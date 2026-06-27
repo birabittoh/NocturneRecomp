@@ -19,3 +19,5 @@
 #   memmove = 0x8XXXXXXX
 
 [functions]
+0x8282AEF0 = {}
+0x82286638 = {}

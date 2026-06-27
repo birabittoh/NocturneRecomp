@@ -45,7 +45,7 @@ def main():
         env.setdefault("__VK_LAYER_NV_optimus", "NVIDIA_only")
 
     assets_path = os.path.join(root, "assets")
-    cmd = [exe_path, "--game_data_root", assets_path] + sys.argv[1:]
+    cmd = [exe_path, "--game_data_root", assets_path, "--gpu_plugin=xenos", "--license_mask=1"] + sys.argv[1:]
     sys.exit(subprocess.run(cmd, env=env).returncode)
 
 
