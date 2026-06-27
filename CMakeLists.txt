@@ -16,6 +16,7 @@ include(generated/rexglue.cmake)
 set(NOCTURNERECOMP_SOURCES
     src/main.cpp
     src/nocturnerecomp_hooks.cpp
+    src/achievements_menu.cpp
     ${GENERATED_SOURCES}
 )
 
