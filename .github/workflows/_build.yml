@@ -35,11 +35,15 @@ jobs:
             runner: windows-latest
             sdk_dir: win-amd64
             artifact_suffix: windows-x64
+            # Vulkan is OFF by default on Windows; enable it so the gpu_backend
+            # cvar can select it at runtime alongside D3D12.
+            sdk_cmake_args: -DREXGLUE_USE_VULKAN=ON
 
           - platform: linux
             runner: ubuntu-latest
             sdk_dir: linux-amd64
             artifact_suffix: linux-x64
+            sdk_cmake_args: ""
 
     steps:
       - name: Checkout
@@ -72,7 +76,7 @@ jobs:
           CXX: ${{ matrix.platform == 'linux' && 'clang++-20' || '' }}
         run: |
           cd rexglue-sdk
-          cmake --preset ${{ matrix.sdk_dir }}
+          cmake --preset ${{ matrix.sdk_dir }} ${{ matrix.sdk_cmake_args }}
           cmake --build --preset ${{ matrix.sdk_dir }}-release -- -j$(nproc 2>/dev/null || echo $NUMBER_OF_PROCESSORS)
           cmake --install out/build/${{ matrix.sdk_dir }} --config Release --prefix "$GITHUB_WORKSPACE/sdk"
 
