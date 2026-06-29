@@ -44,12 +44,37 @@
 #include <rex/ui/window.h>
 #include <rex/ui/windowed_app_context.h>
 
+// The bridge hooks four guest XAM thunks by their guest address. The title
+// update relocates the whole image, so the thunks live at different guest VAs in
+// the patched image; -DNOCTURNE_TU (set by scripts/build.py --tu) selects that
+// address set. Both sets were verified against the patched-image codegen by the
+// XAM export each thunk tail-calls; map a vanilla VA with scripts/find_reloc.py.
+#ifdef NOCTURNE_TU
+#define ACH_SHOW_FN       sub_825D8228  // -> XamShowAchievementsUI
+#define ACH_GETSTATE_FN   sub_825DB1C0  // -> XamInputGetState (r3=user, r4=X_INPUT_STATE*)
+#define ACH_KEYSTROKE1_FN sub_825DB200  // -> XamInputGetKeystrokeEx (thin)
+#define ACH_KEYSTROKE2_FN sub_825DB220  // -> XamInputGetKeystrokeEx (stack wrapper)
+#else
+#define ACH_SHOW_FN       sub_825D8028  // -> XamShowAchievementsUI
+#define ACH_GETSTATE_FN   sub_825DAF30  // -> XamInputGetState (r3=user, r4=X_INPUT_STATE*)
+#define ACH_KEYSTROKE1_FN sub_825DAF70  // -> XamInputGetKeystrokeEx (thin)
+#define ACH_KEYSTROKE2_FN sub_825DAF90  // -> XamInputGetKeystrokeEx (stack wrapper)
+#endif
+
+// ACH_IMP(fn) -> __imp__<fn>, the real recompiled thunk body. The strong
+// REX_HOOK_RAW definitions below override the weak generated sub_* aliases, so
+// calling __imp__ runs the original. Two-level paste so fn (itself a macro) is
+// expanded before the ## glues it to the __imp__ prefix.
+#define ACH_CONCAT_(a, b) a##b
+#define ACH_CONCAT(a, b) ACH_CONCAT_(a, b)
+#define ACH_IMP(fn) ACH_CONCAT(__imp__, fn)
+
 // Original guest thunks (real recompiled bodies; the weak `sub_*` aliases are
 // overridden by the strong hook definitions below).
-extern "C" REX_FUNC(__imp__sub_825D8028);  // -> XamShowAchievementsUI
-extern "C" REX_FUNC(__imp__sub_825DAF30);  // -> XamInputGetState (r3=user, r4=X_INPUT_STATE*)
-extern "C" REX_FUNC(__imp__sub_825DAF70);  // -> XamInputGetKeystrokeEx (thin)
-extern "C" REX_FUNC(__imp__sub_825DAF90);  // -> XamInputGetKeystrokeEx (stack wrapper)
+extern "C" REX_FUNC(ACH_IMP(ACH_SHOW_FN));
+extern "C" REX_FUNC(ACH_IMP(ACH_GETSTATE_FN));
+extern "C" REX_FUNC(ACH_IMP(ACH_KEYSTROKE1_FN));
+extern "C" REX_FUNC(ACH_IMP(ACH_KEYSTROKE2_FN));
 
 namespace nocturne {
 namespace {
@@ -197,41 +222,41 @@ float AchievementsMenu::LeftStickY() {
 
 }  // namespace nocturne
 
-// sub_825D8028(...) -> XamShowAchievementsUI (SDK stub). Open our overlay and
+// ACH_SHOW_FN(...) -> XamShowAchievementsUI (SDK stub). Open our overlay and
 // pause the game, then run the original so the guest sees behavior identical to
 // the stub.
-REX_HOOK_RAW(sub_825D8028) {
+REX_HOOK_RAW(ACH_SHOW_FN) {
   REXLOG_INFO("[achievements] guest opened Achievements UI -> opening overlay");
   nocturne::Achievements().OpenFromGuest();
-  __imp__sub_825D8028(ctx, base);
+  ACH_IMP(ACH_SHOW_FN)(ctx, base);
 }
 
 // While the overlay is open, lock the game's controller input so its pause menu
 // can't act (and back out) underneath it. The overlay is closed by our own
 // host-side B watcher, which reads the controller independently.
 
-// sub_825DAF30(user=r3, X_INPUT_STATE* state=r4) -> XamInputGetState. After the
-// original fills the state, neutralize the gamepad (12 bytes at state+4) so the
-// guest sees a controller with nothing pressed.
-REX_HOOK_RAW(sub_825DAF30) {
+// ACH_GETSTATE_FN(user=r3, X_INPUT_STATE* state=r4) -> XamInputGetState. After
+// the original fills the state, neutralize the gamepad (12 bytes at state+4) so
+// the guest sees a controller with nothing pressed.
+REX_HOOK_RAW(ACH_GETSTATE_FN) {
   const uint32_t state_ptr = ctx.r4.u32;
-  __imp__sub_825DAF30(ctx, base);
+  ACH_IMP(ACH_GETSTATE_FN)(ctx, base);
   if (state_ptr && nocturne::Achievements().ShouldSuppressGuestInput()) {
     std::memset(base + state_ptr + 4, 0, sizeof(rex::input::X_INPUT_GAMEPAD));
   }
 }
 
-// sub_825DAF70 / sub_825DAF90(...) -> XamInputGetKeystrokeEx. Report "no
-// keystroke" (X_ERROR_EMPTY) so menu navigation/back presses are swallowed.
-REX_HOOK_RAW(sub_825DAF70) {
-  __imp__sub_825DAF70(ctx, base);
+// ACH_KEYSTROKE1_FN / ACH_KEYSTROKE2_FN(...) -> XamInputGetKeystrokeEx. Report
+// "no keystroke" (X_ERROR_EMPTY) so menu navigation/back presses are swallowed.
+REX_HOOK_RAW(ACH_KEYSTROKE1_FN) {
+  ACH_IMP(ACH_KEYSTROKE1_FN)(ctx, base);
   if (nocturne::Achievements().ShouldSuppressGuestInput()) {
     ctx.r3.u32 = 0x000010D2u;  // X_ERROR_EMPTY (ERROR_EMPTY)
   }
 }
 
-REX_HOOK_RAW(sub_825DAF90) {
-  __imp__sub_825DAF90(ctx, base);
+REX_HOOK_RAW(ACH_KEYSTROKE2_FN) {
+  ACH_IMP(ACH_KEYSTROKE2_FN)(ctx, base);
   if (nocturne::Achievements().ShouldSuppressGuestInput()) {
     ctx.r3.u32 = 0x000010D2u;  // X_ERROR_EMPTY (ERROR_EMPTY)
   }

@@ -22,14 +22,21 @@ env:
   ASSETS_REPO: ${{ vars.ASSETS_REPO }}
   ASSET_PATH: default.xex
   ASSET_CACHE_KEY: codegen-assets-v1
+  TU_ASSET_CACHE_KEY: tu-assets-v1
 
 jobs:
   build:
-    name: Build (${{ matrix.platform }})
+    name: Build (${{ matrix.variant }}, ${{ matrix.platform }})
     runs-on: ${{ matrix.runner }}
     strategy:
       fail-fast: false
       matrix:
+        platform:
+          - windows
+          - linux
+        variant:
+          - vanilla
+          - tu
         include:
           - platform: windows
             runner: windows-latest
@@ -64,7 +71,7 @@ jobs:
         uses: hendrikmuhs/ccache-action@v1.2.22
         with:
           variant: sccache
-          key: ${{ matrix.platform }}-amd64
+          key: ${{ matrix.platform }}-${{ matrix.variant }}-amd64
 
       - name: Cache XEX asset for codegen
         id: asset-cache
@@ -87,9 +94,38 @@ jobs:
           echo "Fetched ${{ env.ASSET_PATH }} ($size bytes)"
           [ "$size" -ge 1048576 ] || { echo "Asset too small — fetch likely failed"; exit 1; }
 
+      - name: Cache TU packages
+        if: matrix.variant == 'tu'
+        id: tu-cache
+        uses: actions/cache@v5
+        with:
+          path: tu_packages/
+          key: ${{ env.TU_ASSET_CACHE_KEY }}
+
+      - name: Fetch TU packages
+        if: matrix.variant == 'tu' && steps.tu-cache.outputs.cache-hit != 'true'
+        env:
+          GH_TOKEN: ${{ secrets.ASSETS_TOKEN }}
+        shell: bash
+        run: |
+          mkdir -p tu_packages
+          files=$(gh api "repos/${{ env.ASSETS_REPO }}/contents" \
+            --jq '.[] | select(.name | startswith("TU_")) | .name')
+          for f in $files; do
+            gh api -H "Accept: application/vnd.github.raw" \
+              "repos/${{ env.ASSETS_REPO }}/contents/${f}" \
+              > "tu_packages/${f}"
+            echo "Fetched ${f} ($(wc -c < "tu_packages/${f}") bytes)"
+          done
+
       - name: Build
         shell: bash
-        run: python scripts/build.py --sdk-dir sdk/${{ matrix.sdk_dir }}
+        run: |
+          if [ "${{ matrix.variant }}" = "tu" ]; then
+            python scripts/build.py --sdk-dir sdk/${{ matrix.sdk_dir }} --tu tu_packages/
+          else
+            python scripts/build.py --sdk-dir sdk/${{ matrix.sdk_dir }}
+          fi
 
       - name: sccache stats
         if: always()
@@ -99,10 +135,14 @@ jobs:
       - name: Package
         shell: bash
         run: |
+          variant_tag=""
+          if [ "${{ matrix.variant }}" = "tu" ]; then
+            variant_tag="-tu"
+          fi
           if [ "${{ inputs.publish_mode }}" = "artifact" ]; then
-            out="${{ inputs.artifact_name }}-${{ matrix.artifact_suffix }}"
+            out="${{ inputs.artifact_name }}${variant_tag}-${{ matrix.artifact_suffix }}"
           else
-            out="nocturnerecomp-${{ inputs.tag }}-${{ matrix.artifact_suffix }}"
+            out="nocturnerecomp${variant_tag}-${{ inputs.tag }}-${{ matrix.artifact_suffix }}"
           fi
           python scripts/build.py --package "${out}"
 
@@ -118,6 +158,6 @@ jobs:
         if: inputs.publish_mode == 'release'
         uses: actions/upload-artifact@v4
         with:
-          name: release-${{ matrix.platform }}
+          name: release-${{ matrix.variant }}-${{ matrix.platform }}
           path: ${{ env.ARTIFACT_PATH }}
           if-no-files-found: error

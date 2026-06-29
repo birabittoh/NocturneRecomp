@@ -70,6 +70,32 @@ python scripts/build.py
 python scripts/build.py --tu /path/to/TU_*
 ```
 
+### Title update (`--tu`)
+
+The retail title update relocates the whole executable, so it needs its own
+recompilation. Pass the TU package(s) (the `TU_*` STFS file the console
+downloaded, or a directory of them) to `--tu`:
+
+```bash
+python scripts/build.py --tu TU_1C42227_000010G000000.00000000000G4
+```
+
+The build script picks the package whose embedded patch matches your
+`assets/default.xex` (by signature), stages it as the sibling
+`assets/default.xexp` (codegen and the runtime both apply it automatically),
+extracts the TU's bundled data into `update/`, and recompiles using
+`nocturnerecomp_tu_config.toml` (the patched image's codegen hints — the vanilla
+`nocturnerecomp_config.toml` addresses don't apply). `scripts/run.py` mounts
+`update/` as the `update:` device automatically, so the same run command works
+for both builds. Switching back to a plain `python scripts/build.py` clears the
+staged patch and rebuilds the vanilla image.
+
+You can also run the extractor standalone (e.g. to inspect a package):
+
+```bash
+python scripts/extract_tu.py --base assets/default.xex TU_*
+```
+
 ## Options
 
 Options can be persisted by adding them to `nocturnerecomp.toml` next to the game executable, for example:

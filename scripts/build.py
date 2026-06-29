@@ -72,6 +72,15 @@ def compute_codegen_hash(manifest, manifest_path):
         while chunk := f.read(1 << 20):
             h.update(chunk)
 
+    # 1b. Title-update delta patch, if staged. Codegen analyses base+patch, so the
+    #     patch is a codegen input; including it makes the stamp flip between
+    #     vanilla and --tu builds and re-runs codegen when the TU changes.
+    xexp_path = xex_path + "p"
+    if os.path.exists(xexp_path):
+        with open(xexp_path, "rb") as f:
+            while chunk := f.read(1 << 20):
+                h.update(chunk)
+
     # 2. Include files (e.g. nocturnerecomp_config.toml)
     for inc in manifest["entrypoint"].get("includes", []):
         with open(inc, "rb") as f:
@@ -149,7 +158,68 @@ def parse_args():
     p.add_argument("--debug", action="store_true", help="Build with debug symbols (uses the debug CMake preset)")
     p.add_argument("--force-codegen", action="store_true", help="Force codegen even if inputs are unchanged")
     p.add_argument("--strict-codegen", action="store_true", help="Abort the build if codegen returns a non-zero exit code")
+    p.add_argument(
+        "--tu",
+        nargs="+",
+        metavar="PACKAGE",
+        help="Build with a title update. Pass the TU package(s) (LIVE/CON/PIRS) or a "
+        "directory containing them; the variant matching your base XEX is selected by "
+        "digest, staged as a sibling assets/default.xexp, and baked in by codegen.",
+    )
     return p.parse_args()
+
+
+def stage_title_update(tu_args, xex_path):
+    """Select the TU variant matching xex_path and stage it as the sibling '<xex>p'.
+
+    Also extracts the TU's data files (the replacement audio track) into update/,
+    which run.py mounts as the update: device. Returns the target version label.
+    Exits on no match.
+    """
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+    import extract_tu
+
+    packages = []
+    for arg in tu_args:
+        if os.path.isdir(arg):
+            packages += sorted(glob.glob(os.path.join(arg, "TU_*")))
+        else:
+            packages.append(arg)
+    if not packages:
+        print(f"error: no TU packages found in {tu_args}", file=sys.stderr)
+        sys.exit(1)
+
+    pkg, xexp, version = extract_tu.select_matching(packages, xex_path)
+    if not pkg:
+        print(
+            f"error: none of the given TU packages match the base XEX "
+            f"({extract_tu.base_signature(xex_path)}). They are for other game revisions.",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+    staged = xex_path + "p"  # the loader (codegen + runtime) applies the sibling '<name>p'
+    with open(staged, "wb") as f:
+        f.write(xexp)
+    print(f"+ title update: {os.path.basename(pkg)} -> v{version}, staged {staged}")
+    n = extract_tu.extract_update_tree(pkg, "update")
+    print(f"+ title update: extracted {n} data file(s) -> update/ (mounted as update:)")
+    return version
+
+
+def derive_tu_manifest(manifest_path, base_config, tu_config):
+    """Write a throwaway manifest that points codegen at the standalone TU config.
+
+    The vanilla manifest/config target the unpatched image; the TU config is a
+    standalone set of hints for the patched image. Returns the temp manifest path.
+    """
+    manifest_text = open(manifest_path).read().replace(
+        f'"{base_config}"', f'"{tu_config}"'
+    )
+    tu_manifest = ".tu_build.toml"  # deliberately not '*_manifest.toml'
+    with open(tu_manifest, "w") as f:
+        f.write(manifest_text)
+    return tu_manifest
 
 
 def main():
@@ -190,6 +260,25 @@ def main():
         print(f"error: XEX not found at '{xex_path}' — place the game's default.xex there before building", file=sys.stderr)
         sys.exit(1)
 
+    # Title update: stage the matching delta patch as a sibling assets/default.xexp
+    # (codegen + runtime both apply it automatically) and switch codegen to the
+    # standalone TU config. A non-TU build clears any stale patch so it reverts to
+    # the vanilla image.
+    base_config = manifest["entrypoint"]["includes"][0]
+    tu_version = None
+    sibling_patch = xex_path + "p"
+    codegen_manifest = manifest_path
+    if args.tu:
+        tu_version = stage_title_update(args.tu, xex_path)
+        tu_config = "nocturnerecomp_tu_config.toml"
+        if not os.path.exists(tu_config):
+            print(f"error: {tu_config} not found (needed for --tu codegen)", file=sys.stderr)
+            sys.exit(1)
+        codegen_manifest = derive_tu_manifest(manifest_path, base_config, tu_config)
+    elif os.path.exists(sibling_patch):
+        print(f"+ rm {sibling_patch} (not a TU build)")
+        os.remove(sibling_patch)
+
     check_deps()
 
     preset = detect_preset("relwithdebinfo" if args.debug else "release")
@@ -201,6 +290,9 @@ def main():
     cmake_configure_args = [
         f"-DCMAKE_PREFIX_PATH={sdk_dir}",
         f"-DCMAKE_CXX_COMPILER={cxx_compiler}",
+        # Always set explicitly so switching between TU and vanilla builds doesn't
+        # inherit a stale value from the CMake cache.
+        f"-DNOCTURNE_TU={'ON' if args.tu else 'OFF'}",
     ]
     if shutil.which("sccache"):
         cmake_configure_args += [
@@ -215,7 +307,7 @@ def main():
             os.remove(name)
 
     stamp_path = os.path.join("out", "codegen.stamp")
-    new_hash = compute_codegen_hash(manifest, manifest_path)
+    new_hash = compute_codegen_hash(load_manifest(codegen_manifest), codegen_manifest)
     generated_present = os.path.exists(os.path.join("generated", "sources.cmake"))
     old_hash = None
     if os.path.exists(stamp_path):
@@ -225,11 +317,13 @@ def main():
     if not args.force_codegen and new_hash == old_hash and generated_present:
         print("+ codegen inputs unchanged — skipping codegen (incremental build)")
     else:
-        run([rexglue, "codegen", manifest_path], check=args.strict_codegen)
+        run([rexglue, "codegen", codegen_manifest], check=args.strict_codegen)
 
-        with open(manifest_path, "r") as f:
+        # codegen re-stamps sdk_version into the manifest it was given; blank it
+        # back out in the working tree (the .tu_build.toml is a throwaway anyway).
+        with open(codegen_manifest, "r") as f:
             lines = f.readlines()
-        with open(manifest_path, "w") as f:
+        with open(codegen_manifest, "w") as f:
             for line in lines:
                 if line.startswith("sdk_version"):
                     f.write('sdk_version = ""\n')
@@ -247,6 +341,13 @@ def main():
     shutil.copy2(build_output, exe_name)
 
     copy_runtime_libs(is_windows, sdk_dir)
+
+    if tu_version:
+        print(
+            f"\nBuilt with title update v{tu_version}. The matching patch is staged at "
+            f"'{sibling_patch}'\nand is required at runtime — the loader re-applies it to "
+            f"the base image on launch. Run with scripts/run.py."
+        )
 
 
 if __name__ == "__main__":

@@ -1,0 +1,19 @@
+# nocturnerecomp - ReXGlue codegen config for title-update (--tu) builds.
+#
+# This is a STANDALONE config — NOT derived from nocturnerecomp_config.toml.
+# The title update relocates the whole image, so the gap-fill function hints in
+# the vanilla config point at the wrong addresses for the patched image. Codegen
+# runs against the patched image (base assets/default.xex + the staged sibling
+# assets/default.xexp), so every address below is a *patched-image* guest VA.
+#
+# scripts/build.py --tu points a throwaway .tu_build.toml manifest at this file.
+# Start from the analyzer's own output and add only what the patched image needs
+# (indirect-call / gap-fill targets it misses); see scripts/find_reloc.py to map
+# a vanilla VA to its relocated patched-image VA.
+
+[functions]
+# Indirect-call targets the analyzer misses in the patched image. Each was found
+# at runtime as a "Call to invalid or unregistered function at guest address X"
+# fatal; declaring it here makes codegen emit a callable body for that VA.
+0x8282B230 = {}
+0x82286758 = {}
