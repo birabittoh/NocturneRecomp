@@ -66,10 +66,6 @@ jobs:
           variant: sccache
           key: ${{ matrix.platform }}-amd64
 
-      - name: Download ReXGlue SDK
-        shell: bash
-        run: python scripts/download-sdk.py sdk/${{ matrix.sdk_dir }} --pinned
-
       - name: Cache XEX asset for codegen
         id: asset-cache
         uses: actions/cache@v5

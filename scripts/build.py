@@ -182,7 +182,7 @@ def main():
 
     if not os.path.exists(rexglue):
         print(f"SDK not found at '{sdk_dir}' — downloading pinned version...")
-        run([sys.executable, os.path.join(script_dir, "download-sdk.py"), sdk_dir, "--pinned"])
+        run([sys.executable, os.path.join(script_dir, "download-sdk.py"), os.path.abspath(sdk_dir), "--pinned"])
 
     xex_path = manifest["entrypoint"]["file_path"]
 
