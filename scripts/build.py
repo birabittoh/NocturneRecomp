@@ -102,17 +102,38 @@ def compute_codegen_hash(manifest, manifest_path):
     return h.hexdigest()
 
 
-def copy_runtime_libs(is_windows, sdk_dir):
+def copy_runtime_libs(is_windows, sdk_dir, build_type):
+    # The SDK ships all build variants of each shared lib side by side
+    # (e.g. rexruntime.dll, rexruntimed.dll, rexruntimerd.dll for release,
+    # debug, and relwithdebinfo respectively) — only copy the one matching
+    # the variant we just built, identified by its filename suffix.
+    variant_suffix = {"release": "", "debug": "d", "relwithdebinfo": "rd"}[build_type]
+
     src_dir = os.path.join(sdk_dir, "bin" if is_windows else "lib")
-    suffix = ".dll" if is_windows else ".so"
+    ext = ".dll" if is_windows else ".so"
 
     if not os.path.isdir(src_dir):
         return
     for name in os.listdir(src_dir):
-        if name.endswith(suffix):
-            src = os.path.join(src_dir, name)
-            print(f"+ cp {src} {name}")
-            shutil.copy2(src, name)
+        if not name.endswith(ext):
+            continue
+        stem = name[: -len(ext)]
+        stem_suffix = "rd" if stem.endswith("rd") else "d" if stem.endswith("d") else ""
+        if stem_suffix != variant_suffix:
+            continue
+        src = os.path.join(src_dir, name)
+        print(f"+ cp {src} {name}")
+        shutil.copy2(src, name)
+
+
+def write_launcher(template_name, dest_path, exe):
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    template_path = os.path.join(script_dir, "launch_templates", template_name)
+    with open(template_path, "r", newline="") as f:
+        content = f.read().replace("{{EXE}}", exe)
+    newline = "\r\n" if template_name.endswith(".bat") else "\n"
+    with open(dest_path, "w", newline=newline) as f:
+        f.write(content)
 
 
 def do_package(name, project_name, is_windows):
@@ -129,6 +150,26 @@ def do_package(name, project_name, is_windows):
         if os.path.isfile(src):
             print(f"+ cp {src} {pkg_dir}/")
             shutil.copy2(src, pkg_dir)
+
+    # Static options mirror scripts/run.py's fixed CLI flags. game_data_root is
+    # deliberately not set here: the config file overrides CLI args (see the
+    # CVar precedence rules), which would defeat the launcher script's detection
+    # of the assets/update/mods directories below.
+    config_path = os.path.join(pkg_dir, f"{project_name}.toml")
+    print(f"+ write {config_path}")
+    with open(config_path, "w") as f:
+        f.write('gpu_plugin = "xenos"\n')
+        f.write("license_mask = 1\n")
+
+    if is_windows:
+        launcher_path = os.path.join(pkg_dir, "run.bat")
+        print(f"+ write {launcher_path}")
+        write_launcher("run.bat", launcher_path, exe)
+    else:
+        launcher_path = os.path.join(pkg_dir, "run.sh")
+        print(f"+ write {launcher_path}")
+        write_launcher("run.sh", launcher_path, exe)
+        os.chmod(launcher_path, 0o755)
 
     if is_windows:
         archive_path = f"{name}.zip"
@@ -281,7 +322,8 @@ def main():
 
     check_deps()
 
-    preset = detect_preset("relwithdebinfo" if args.debug else "release")
+    build_type = "relwithdebinfo" if args.debug else "release"
+    preset = detect_preset(build_type)
     exe_name = f"{project_name}.exe" if is_windows else project_name
     build_output = os.path.join("out", "build", preset, exe_name)
 
@@ -340,7 +382,7 @@ def main():
     print(f"+ cp {build_output} {exe_name}")
     shutil.copy2(build_output, exe_name)
 
-    copy_runtime_libs(is_windows, sdk_dir)
+    copy_runtime_libs(is_windows, sdk_dir, build_type)
 
     if tu_version:
         print(
