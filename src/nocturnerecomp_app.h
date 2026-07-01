@@ -13,6 +13,7 @@
 #include <rex/rex_app.h>
 #include <rex/runtime.h>
 #include <rex/ui/imgui_drawer.h>
+#include <rex/ui/imgui_theme.h>
 
 #ifdef _WIN32
 #include <Windows.h>
@@ -20,8 +21,10 @@
 #pragma comment(lib, "winmm.lib")
 #endif
 
+#include "accent_color.h"
 #include "achievements_menu.h"
 #include "audio_player.h"
+#include "fonts.generated.h"
 
 #include <rex/kernel/xam/apps/xmp_app.h>
 #include <rex/system/kernel_state.h>
@@ -61,6 +64,7 @@ class NocturnerecompApp : public rex::ReXApp {
     nocturne::GetAudioPlayer().Bind(window(), &app_context());
 
     auto* ks = rex::system::kernel_state();
+    nocturne::GetAccentColor().Bind(ks, user_data_root());
     if (ks && ks->app_manager()) {
       auto* xmp = static_cast<rex::kernel::xam::apps::XmpApp*>(
           ks->app_manager()->FindApp(0xFA));
@@ -92,6 +96,27 @@ class NocturnerecompApp : public rex::ReXApp {
   void OnCreateDialogs(rex::ui::ImGuiDrawer* drawer) override {
     nocturne::Achievements().AttachWatcher(drawer);
     nocturne::GetAudioPlayer().AttachDialog(drawer);
+    nocturne::GetAccentColor().AttachWatcher(drawer);
+  }
+
+  // Replace the SDK's default pixel font with a serif face that fits the
+  // game's gothic aesthetic.
+  void OnConfigureFonts(ImFontAtlas* atlas) override {
+    ImFontConfig cfg;
+    cfg.FontDataOwnedByAtlas = false;
+    atlas->AddFontFromMemoryTTF(const_cast<unsigned char*>(nocturne::kPTSerifRegularTTF),
+                                static_cast<int>(nocturne::kPTSerifRegularTTFSize), 16.0f, &cfg);
+  }
+
+  // The overlay's whole color palette is mathematically derived (see
+  // rex::ui::ApplyAccentTheme) from this single accent. Fallback used until
+  // nocturne::AccentColor can read the player's own in-game accent color
+  // setting (R/G/B, 0-15 each) from save data -- KernelState doesn't exist yet
+  // at this point, so this matches the game's own shipped default (0, 0, 8).
+  static constexpr ImVec4 kDefaultAccentColor = ImVec4(0.00f, 0.00f, 8.0f / 15.0f, 1.00f);
+
+  void OnConfigureStyle(ImGuiStyle& style) override {
+    rex::ui::ApplyAccentTheme(style, kDefaultAccentColor);
   }
 
   void OnShutdown() override {

@@ -18,6 +18,9 @@ src/main.cpp.bak
 # Generated recomp sources
 /generated/
 
+# Embedded fonts header, rebuilt from src/fonts/*.ttf by scripts/gen-fonts.py
+/src/fonts.generated.h
+
 # Runtime artifacts — binary, logs, and bundled shared libraries
 /sdk/
 /logs/

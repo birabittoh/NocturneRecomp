@@ -12,12 +12,29 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 include(generated/rexglue.cmake)
 
+# Embedded overlay fonts: src/fonts/*.ttf are the checked-in source of truth;
+# src/fonts.generated.h is a gitignored build artifact regenerated whenever a
+# .ttf or the generator script changes.
+find_package(Python3 COMPONENTS Interpreter REQUIRED)
+set(NOCTURNE_FONTS_HEADER ${CMAKE_SOURCE_DIR}/src/fonts.generated.h)
+add_custom_command(
+    OUTPUT ${NOCTURNE_FONTS_HEADER}
+    COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/scripts/gen-fonts.py
+    DEPENDS
+        ${CMAKE_SOURCE_DIR}/scripts/gen-fonts.py
+        ${CMAKE_SOURCE_DIR}/src/fonts/PTSerif-Regular.ttf
+    COMMENT "Generating src/fonts.generated.h"
+    VERBATIM
+)
+
 # Sources
 set(NOCTURNERECOMP_SOURCES
     src/main.cpp
     src/nocturnerecomp_hooks.cpp
+    src/accent_color.cpp
     src/achievements_menu.cpp
     src/audio_player.cpp
+    ${NOCTURNE_FONTS_HEADER}
     ${GENERATED_SOURCES}
 )
 

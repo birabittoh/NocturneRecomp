@@ -210,7 +210,7 @@ class AudioPlayerDialog : public rex::ui::ImGuiDialog {
 
       bool is_current = (g == current_group) && (is_playing || is_paused);
       if (is_current) {
-        ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.2f, 1.0f, 0.4f, 1.0f));
+        ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 0.78f, 0.2f, 1.0f));
       }
 
       char buf[512];
