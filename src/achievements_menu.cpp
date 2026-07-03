@@ -139,11 +139,18 @@ AchievementsMenu& Achievements() {
   return instance;
 }
 
+// The bind's real key, used only to briefly re-arm bind_achievements for our
+// own synthetic toggle (see ToggleOverlayBindOnUIThread). Kept unbound the
+// rest of the time so it can't be pressed directly and Settings shows it as
+// unbound rather than a misleading "F7".
+constexpr const char* kAchievementsUnderlyingKey = "F7";
+
 void AchievementsMenu::Bind(rex::ui::Window* window, rex::ui::WindowedAppContext* context,
                             rex::input::InputSystem* input_system) {
   window_ = window;
   context_ = context;
   input_ = input_system;
+  rex::cvar::SetFlagByName("bind_achievements", "");
 }
 
 void AchievementsMenu::AttachWatcher(rex::ui::ImGuiDrawer* drawer) {
@@ -154,14 +161,16 @@ void AchievementsMenu::AttachWatcher(rex::ui::ImGuiDrawer* drawer) {
 
 void AchievementsMenu::ToggleOverlayBindOnUIThread() {
   // Synthesize the bind_achievements key -- the public way to toggle ReXApp's
-  // privately-owned achievements overlay. Read the bind's current key so a
-  // rebind is respected; fall back to its F7 default.
-  std::string key = rex::cvar::GetFlagByName("bind_achievements");
-  rex::ui::VirtualKey vk = rex::ui::ParseVirtualKey(key.empty() ? "F7" : key);
+  // privately-owned achievements overlay. The cvar is normally cleared (see
+  // Bind()), so briefly re-arm it with the real key, fire the synthetic event,
+  // then clear it again immediately.
+  rex::cvar::SetFlagByName("bind_achievements", kAchievementsUnderlyingKey);
+  rex::ui::VirtualKey vk = rex::ui::ParseVirtualKey(kAchievementsUnderlyingKey);
   rex::ui::KeyEvent key_event(window_, vk, /*repeat_count=*/1, /*prev_state=*/false,
                               /*modifier_shift_pressed=*/false, /*modifier_ctrl_pressed=*/false,
                               /*modifier_alt_pressed=*/false, /*modifier_super_pressed=*/false);
   rex::ui::ProcessKeyEvent(key_event);
+  rex::cvar::SetFlagByName("bind_achievements", "");
 }
 
 void AchievementsMenu::OpenFromGuest() {
