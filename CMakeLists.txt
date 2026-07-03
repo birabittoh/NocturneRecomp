@@ -33,7 +33,6 @@ set(NOCTURNERECOMP_SOURCES
     src/nocturnerecomp_hooks.cpp
     src/accent_color.cpp
     src/achievements_menu.cpp
-    src/audio_player.cpp
     ${NOCTURNE_FONTS_HEADER}
     ${GENERATED_SOURCES}
 )

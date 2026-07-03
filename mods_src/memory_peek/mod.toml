@@ -1,0 +1,5 @@
+manifest_version = 1
+name = "Memory Peek"
+version = "1.0.0"
+description = "Live guest-memory hex viewer for a user-entered address. Press F10 to toggle."
+code = "memory_peek"

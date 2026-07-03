@@ -1,0 +1,5 @@
+manifest_version = 1
+name = "Sample Overlay"
+version = "1.0.0"
+description = "Minimal code-mod template: a keybind (F9) and a tiny ImGui overlay."
+code = "sample_overlay"
