@@ -46,9 +46,9 @@ inline std::string_view PrettyTrackName(std::string_view key) {
       {"turoom1", "Gates of Hell"},
       {"tyukan", "Transformation No.2"},
       {"wboss", "Demonic Banquet"},
+      {"lament", "Admiration of a Clan"},
       // {"wind1", ""},
       // {"wind_ini", ""},
-      // {"lament", ""},
   };
   auto it = kTrackNames.find(key);
   return it != kTrackNames.end() ? it->second : std::string_view{};
