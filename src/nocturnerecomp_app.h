@@ -9,6 +9,7 @@
 
 #include <imgui.h>
 
+#include <rex/cvar.h>
 #include <rex/input/input_system.h>
 #include <rex/rex_app.h>
 #include <rex/runtime.h>
@@ -51,6 +52,14 @@ class NocturnerecompApp : public rex::ReXApp {
     // live after setup.
     auto* input_sys = static_cast<rex::input::InputSystem*>(runtime()->input_system());
     nocturne::Achievements().Bind(window(), &app_context(), input_sys);
+
+    // Movement/aim in mnk_mode is driven by the D-pad and mouse keybinds, not
+    // the left/right analog stick.
+    for (const char* stick_cvar : {"keybind_lstick_up", "keybind_lstick_down",
+                                    "keybind_lstick_left", "keybind_lstick_right",
+                                    "keybind_lstick_press", "keybind_rstick_press"}) {
+      rex::cvar::SetFlagByName(stick_cvar, "");
+    }
 
     auto* ks = rex::system::kernel_state();
     nocturne::GetAccentColor().Bind(ks, user_data_root());

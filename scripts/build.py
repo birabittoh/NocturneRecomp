@@ -158,9 +158,21 @@ def do_package(name, project_name, is_windows):
     config_path = os.path.join(pkg_dir, f"{project_name}.toml")
     print(f"+ write {config_path}")
     with open(config_path, "w") as f:
+        f.write("ui_settings_disable_save = true\n")
         f.write('gpu_plugin = "xenos"\n')
         f.write("license_mask = 1\n")
         f.write("gpu_allow_invalid_fetch_constants = true\n")
+        f.write("mnk_capture_mouse = false\n")
+        f.write("mnk_mode = true\n")
+        f.write('keybind_a = "Z"\n')
+        f.write('keybind_b = "X"\n')
+        f.write('keybind_x = "A"\n')
+        f.write('keybind_y = "Shift"\n')
+        f.write('keybind_left_trigger = "Tab"\n')
+        f.write('keybind_right_trigger = "W"\n')
+        f.write('keybind_left_shoulder = "M"\n')
+        f.write('keybind_right_shoulder = "B"\n')
+        f.write('keybind_back = "Return"\n')
 
     if is_windows:
         launcher_path = os.path.join(pkg_dir, "run.bat")
