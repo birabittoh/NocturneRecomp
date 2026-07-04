@@ -5,6 +5,8 @@
 
 #pragma once
 
+#include <atomic>
+#include <chrono>
 #include <memory>
 
 #include <imgui.h>
@@ -64,6 +66,29 @@ class NocturnerecompApp : public rex::ReXApp {
     auto* ks = rex::system::kernel_state();
     nocturne::GetAccentColor().Bind(ks, user_data_root());
 
+    // Feed the F3 debug overlay's "Guest FPS" readout. RegisterTick fires once
+    // per guest frame on GPU swap (command-processor thread); the counter is
+    // polled from the UI thread each time the overlay redraws to derive an
+    // instantaneous FPS, smoothed by only recomputing every ~0.2s.
+    runtime()->mod_registry()->RegisterTick(
+        [this] { guest_frame_count_.fetch_add(1, std::memory_order_relaxed); });
+    SetGuestFrameStats([this]() -> rex::ui::FrameStats {
+      rex::ui::FrameStats stats;
+      uint64_t count = guest_frame_count_.load(std::memory_order_relaxed);
+      stats.frame_count = count;
+
+      auto now = std::chrono::steady_clock::now();
+      double elapsed = std::chrono::duration<double>(now - fps_poll_time_).count();
+      if (elapsed >= 0.2) {
+        fps_smoothed_ = static_cast<double>(count - fps_poll_frame_count_) / elapsed;
+        fps_poll_time_ = now;
+        fps_poll_frame_count_ = count;
+      }
+      stats.fps = fps_smoothed_;
+      stats.frame_time_ms = fps_smoothed_ > 0.0 ? 1000.0 / fps_smoothed_ : 0.0;
+      return stats;
+    });
+
     // Keep guest input "active" while our achievements overlay is open so the
     // B-watcher / left-stick reads see the real controller regardless of mouse
     // position (the SDK otherwise zeroes input reads when the mouse captures an
@@ -114,4 +139,10 @@ class NocturnerecompApp : public rex::ReXApp {
     timeEndPeriod(1);
 #endif
   }
+
+ private:
+  std::atomic<uint64_t> guest_frame_count_{0};
+  std::chrono::steady_clock::time_point fps_poll_time_ = std::chrono::steady_clock::now();
+  uint64_t fps_poll_frame_count_ = 0;
+  double fps_smoothed_ = 0.0;
 };
