@@ -5,6 +5,7 @@ import json
 import shutil
 import platform
 import tempfile
+import time
 import zipfile
 import argparse
 from urllib.request import urlopen, Request
@@ -64,6 +65,21 @@ def write_file(path, content):
         f.write(content)
 
 
+def rmtree_retry(path, attempts=5, delay=0.5):
+    """Deleting a directory tree on a Windows/Docker bind mount can transiently
+    fail with 'directory not empty' if another process (antivirus, an editor,
+    a concurrent build) still has a handle open somewhere underneath -- retry
+    a few times before giving up."""
+    for attempt in range(attempts):
+        try:
+            shutil.rmtree(path)
+            return
+        except OSError:
+            if attempt == attempts - 1:
+                raise
+            time.sleep(delay)
+
+
 def download_file(url, dest):
     req = Request(url, headers={"User-Agent": "python"})
     with urlopen(req) as resp, open(dest, "wb") as out:
@@ -90,6 +106,12 @@ def main():
         action="store_true",
         help="Use latest stable (non-nightly) release"
     )
+    parser.add_argument(
+        "--platform",
+        choices=["win-amd64", "linux-amd64", "linux-arm64"],
+        help="Override the auto-detected platform (e.g. to fetch the win-amd64 SDK "
+             "from a Linux cross-build container)"
+    )
 
     args = parser.parse_args()
 
@@ -100,7 +122,7 @@ def main():
     script_dir = os.path.dirname(os.path.abspath(__file__))
     version_file = os.path.normpath(os.path.join(script_dir, "../.sdk-version"))
 
-    platform_id = detect_platform()
+    platform_id = args.platform or detect_platform()
 
     if pinned_mode:
         repo, target_tag = read_pinned(version_file)
@@ -187,7 +209,7 @@ def main():
 
         dest_dir = out_dir
         if os.path.exists(dest_dir):
-            shutil.rmtree(dest_dir)
+            rmtree_retry(dest_dir)
 
         shutil.move(
             os.path.join(extract_dir, inner_dirs[0]),

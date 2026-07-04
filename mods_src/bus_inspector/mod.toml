@@ -1,0 +1,7 @@
+manifest_version = 1
+name = "Bus Inspector"
+version = "1.0.0"
+author = "BiRabittoh"
+description = "Overlay (F5) showing a live scrolling log of mod event-bus traffic, demonstrating multi-subscriber fan-out."
+code = "bus_inspector"
+platform = "windows-x64,linux-x64"

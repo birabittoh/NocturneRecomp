@@ -1,0 +1,7 @@
+manifest_version = 1
+name = "Blackboard"
+version = "1.0.0"
+author = "BiRabittoh"
+description = "Shared key/value store (F12) other mods can read/write over the mod event bus, with a viewer/editor overlay."
+code = "blackboard"
+platform = "windows-x64,linux-x64"

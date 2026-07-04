@@ -10,12 +10,13 @@
 // needed.
 //
 // The struct's guest address differs between the vanilla and title-update
-// (TU) builds, because a TU relocates the whole image. This one DLL has to
-// work with both, so instead of hardcoding one build's address (like the base
-// game's #ifdef NOCTURNE_TU does) or guessing, it asks the SDK whether the
-// loaded image had a delta patch applied (rex::system::UserModule::
-// is_patched(), true exactly when a TU's .xexp patch was applied at load) and
-// picks the matching known address.
+// (TU) builds, because a TU relocates the whole image. Rather than
+// hardcoding either address itself, this mod looks it up by name
+// ("ui.accent_color") from the shared registry that mods_src/game_symbols
+// publishes into (rex::system::ModRegistry), which resolves the vanilla/TU
+// split internally. mod.toml declares `requires = "game_symbols"` so the SDK
+// guarantees that mod is enabled and loaded first -- see
+// docs/making-mods.md's "Library mods and the shared registry" section.
 
 #include <rex/system/mod_plugin.h>
 
@@ -27,8 +28,7 @@
 
 #include <rex/memory/utils.h>
 #include <rex/runtime.h>
-#include <rex/system/kernel_state.h>
-#include <rex/system/user_module.h>
+#include <rex/system/mod_registry.h>
 #include <rex/system/xmemory.h>
 #include <rex/ui/imgui_dialog.h>
 #include <rex/ui/imgui_drawer.h>
@@ -36,11 +36,6 @@
 
 namespace {
 
-// Guest addresses of the live Settings -> Accent Color struct, copied from
-// src/accent_color.cpp (kept independently here -- see mods_src/README /
-// making-mods.md: mods don't share translation units with the game exe).
-constexpr uint32_t kAccentAddrVanilla = 0x83173CC8u;
-constexpr uint32_t kAccentAddrTU = 0x83173A88u;
 constexpr uint32_t kRedOffset = 0;
 constexpr uint32_t kGreenOffset = 4;
 constexpr uint32_t kBlueOffset = 8;
@@ -71,13 +66,16 @@ class UiColorDialog : public rex::ui::ImGuiDialog {
   ~UiColorDialog() override { rex::ui::UnregisterBind("bind_ui_color"); }
 
   // Called once KernelState/the executable module are live (see
-  // UiColorMod::OnModuleLaunched). Picks the accent address matching the
-  // running image so we never have to probe or guess.
+  // UiColorMod::OnModuleLaunched). Looks up the accent address published by
+  // game_symbols (see mods_src/game_symbols/mod_main.cpp), which resolves
+  // vanilla vs TU for us.
   void ResolveAddress() {
-    auto exec = rex::system::kernel_state()->GetExecutableModule();
-    bool is_tu = exec && exec->is_patched();
-    addr_ = is_tu ? kAccentAddrTU : kAccentAddrVanilla;
-    addr_resolved_ = true;
+    if (runtime_ && runtime_->mod_registry()) {
+      if (auto addr = runtime_->mod_registry()->FindAddress("ui.accent_color")) {
+        addr_ = *addr;
+        addr_resolved_ = true;
+      }
+    }
   }
 
  protected:
@@ -215,8 +213,9 @@ class UiColorMod : public rex::system::IModPlugin {
   }
 
   void OnModuleLaunched() override {
-    // KernelState and the executable module are live now -- safe to check
-    // is_patched() and pick the accent address for this build.
+    // KernelState is live now, but the lookup itself is just a registry read
+    // (game_symbols already published the address in its own
+    // OnCreateDialogs, dispatched before this).
     if (dialog_) {
       dialog_->ResolveAddress();
     }

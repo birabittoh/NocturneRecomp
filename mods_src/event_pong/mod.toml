@@ -1,0 +1,8 @@
+manifest_version = 1
+name = "Event Pong"
+version = "1.0.0"
+author = "BiRabittoh"
+description = "Overlay (F11) that subscribes to event_ping's \"sample.ping\" event and republishes a running count to the blackboard mod, if enabled."
+code = "event_pong"
+requires = "event_ping"
+platform = "windows-x64,linux-x64"

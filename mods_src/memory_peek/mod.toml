@@ -1,5 +1,10 @@
 manifest_version = 1
 name = "Memory Peek"
-version = "1.0.0"
+version = "1.0.1"
+author = "BiRabittoh"
 description = "Live guest-memory hex viewer for a user-entered address. Press F10 to toggle."
 code = "memory_peek"
+# Auto-managed by scripts/make_mods.py after each build -- lists which
+# platform(s) mods/<name>/code/ currently ships a binary for. Don't edit by
+# hand; leave it empty in a fresh mod (see docs/making-mods.md).
+platform = "windows-x64,linux-x64"

@@ -1,10 +1,9 @@
 manifest_version = 1
-name = "UI Color Picker"
+name = "Game Symbols"
 version = "1.0.0"
 author = "BiRabittoh"
-description = "Overlay (F7) with a color picker for the UI accent color, synced live with game memory."
-code = "ui_color"
-requires = "game_symbols"
+description = "Library mod: publishes reverse-engineered guest addresses into the SDK's shared mod registry."
+code = "game_symbols"
 # Auto-managed by scripts/make_mods.py after each build -- lists which
 # platform(s) mods/<name>/code/ currently ships a binary for. Don't edit by
 # hand; leave it empty in a fresh mod (see docs/making-mods.md).
