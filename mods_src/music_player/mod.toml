@@ -1,4 +1,4 @@
-manifest_version = 1
+manifest_version = 2
 name = "Music Player"
 version = "1.0.1"
 author = "BiRabittoh"

@@ -1,4 +1,4 @@
-manifest_version = 1
+manifest_version = 2
 name = "Graphics Settings"
 version = "1.0.1"
 description = "Overlay (F6) for the game's graphics settings."
