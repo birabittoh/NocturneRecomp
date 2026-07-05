@@ -15,6 +15,7 @@
 #include <rex/input/input_system.h>
 #include <rex/rex_app.h>
 #include <rex/runtime.h>
+#include <rex/version.h>
 #include <rex/ui/imgui_drawer.h>
 #include <rex/ui/imgui_theme.h>
 
@@ -64,6 +65,11 @@ class NocturnerecompApp : public rex::ReXApp {
     nocturne::Achievements().Bind(window(), &app_context(), input_sys);
 
     window()->SetIcon(nocturne::kIconPNG, nocturne::kIconPNGSize);
+
+    // The SDK titles the window after the app identifier ("nocturnerecomp",
+    // lowercase, since that name also drives the config file and user data
+    // dir and can't be freely changed). Override the display-only title here.
+    window()->SetTitle("NocturneRecomp " + std::string(REXGLUE_BUILD_TITLE));
 
     // Movement/aim in mnk_mode is driven by the D-pad and mouse keybinds, not
     // the left/right analog stick.
