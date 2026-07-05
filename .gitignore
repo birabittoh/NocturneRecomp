@@ -24,6 +24,10 @@ src/main.cpp.bak
 # Embedded icon header, rebuilt from assets/icon.png by scripts/gen-icon.py
 /src/icon.generated.h
 
+# Project version header, rewritten from the nearest git tag on every CMake
+# configure (see CMakeLists.txt)
+/src/version.generated.h
+
 # Runtime artifacts — binary, logs, and bundled shared libraries
 /sdk/
 /logs/

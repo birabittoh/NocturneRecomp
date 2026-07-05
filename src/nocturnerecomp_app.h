@@ -28,6 +28,7 @@
 #include "achievements_menu.h"
 #include "fonts.generated.h"
 #include "icon.generated.h"
+#include "version.generated.h"
 
 #include <rex/system/kernel_state.h>
 
@@ -41,7 +42,13 @@ class NocturnerecompApp : public rex::ReXApp {
         PPCImageConfig));
   }
 
-  void OnPreSetup(rex::RuntimeConfig& /*config*/) override {
+  void OnPreSetup(rex::RuntimeConfig& config) override {
+    // Lets a mod.toml pin a minimum build via `game_version = ">= x.y.z"`,
+    // validated at Setup() alongside `requires`/`conflicts` -- see
+    // docs/making-mods.md. Derived from the nearest git tag at configure
+    // time (src/version.generated.h, see CMakeLists.txt).
+    config.game_version = nocturne::kVersionString;
+
 #ifdef _WIN32
     timeBeginPeriod(1);
 #endif

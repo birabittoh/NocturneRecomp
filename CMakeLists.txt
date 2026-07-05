@@ -12,6 +12,34 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 include(generated/rexglue.cmake)
 
+# Project version: the nearest reachable `vX.Y.Z` git tag, not an exact
+# match -- a dev build sitting on commits after v1.2.2 already contains
+# everything v1.2.2 did, so it should still satisfy a mod's
+# `game_version >= 1.2.0` (see nocturnerecomp_app.h's OnPreSetup and
+# docs/making-mods.md). Falls back to "0.0.0" if git or a reachable tag is
+# unavailable (e.g. a shallow/--depth=1 checkout with no tags fetched); the
+# SDK already treats an unparsable/absent game_version as "can't verify,
+# don't block" for any mod that declares the constraint.
+find_package(Git QUIET)
+set(NOCTURNE_VERSION "0.0.0")
+if(GIT_EXECUTABLE)
+    execute_process(
+        COMMAND ${GIT_EXECUTABLE} describe --tags --abbrev=0 --match "v[0-9]*.[0-9]*.[0-9]*"
+        WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
+        OUTPUT_VARIABLE NOCTURNE_GIT_TAG
+        OUTPUT_STRIP_TRAILING_WHITESPACE
+        ERROR_QUIET
+        RESULT_VARIABLE NOCTURNE_GIT_TAG_RC)
+    if(NOCTURNE_GIT_TAG_RC EQUAL 0 AND NOCTURNE_GIT_TAG MATCHES "^v([0-9]+\\.[0-9]+\\.[0-9]+)$")
+        set(NOCTURNE_VERSION "${CMAKE_MATCH_1}")
+    endif()
+endif()
+configure_file(
+    ${CMAKE_SOURCE_DIR}/src/version.generated.h.in
+    ${CMAKE_SOURCE_DIR}/src/version.generated.h
+    @ONLY
+)
+
 # Embedded overlay fonts: src/fonts/*.ttf are the checked-in source of truth;
 # src/fonts.generated.h is a gitignored build artifact regenerated whenever a
 # .ttf or the generator script changes.

@@ -169,8 +169,8 @@ running at process exit; use `OnShutdown()` instead.
   for other mods to depend on. See
   [Library mods and the shared registry](#library-mods-and-the-shared-registry).
 - **`mods_src/ui_color/`**: consumes `game_symbols`'s published address
-  (`requires = "game_symbols"` in its `mod.toml`) instead of hardcoding or
-  re-deriving it.
+  (`requires = "game_symbols >= 1.0.0"` in its `mod.toml`) instead of
+  hardcoding or re-deriving it.
 - **`mods_src/event_ping/`** and **`mods_src/event_pong/`**: a
   producer/consumer pair over the shared registry's event bus rather than
   addresses. `event_ping` has no UI: it uses `RegisterTick` to publish a
@@ -266,6 +266,36 @@ registry (below) to depend on the other mod's data, this is what actually
 guarantees that data exists by the time it's looked up. `load_after` only
 warns; it doesn't gate startup.
 
+Each `requires` entry can also pin a minimum version of the mod it names:
+
+```toml
+requires = "game_symbols >= 1.0.0"
+```
+
+The version is checked against the named mod's own `version` key (dotted
+numeric, e.g. `1.0.0`; missing trailing components count as `0`, so `1.0` ==
+`1.0.0`). This is a **hard failure** at Setup() only if the enabled
+`game_symbols` is actually older. If `game_symbols` has no `version` key at
+all (or the constraint itself isn't a valid dotted version), the check can't
+be verified either way, so it's accepted with a warning rather than blocking
+startup -- this keeps mods and dependencies that predate this feature
+working unchanged. A bare `requires = "game_symbols"` (no `>=`) stays
+unconstrained.
+
+A mod can similarly require a minimum version of NocturneRecomp itself via
+`game_version`, independent of any other mod:
+
+```toml
+game_version = "1.0.0"   # or, equivalently: game_version = ">= 1.0.0"
+```
+
+This is checked against the build's own version (`nocturnerecomp_app.h`'s
+`OnPreSetup` sets it from `src/version.generated.h`, derived from the
+nearest `vX.Y.Z` git tag at CMake configure time -- see `CMakeLists.txt`)
+and is likewise a hard failure only when the build is actually older; if no
+tag is reachable, the version falls back to `0.0.0` and the check is
+accepted with a warning instead.
+
 ## Library mods and the shared registry
 
 `rex::system::ModRegistry`, reached via `runtime->mod_registry()` from any
@@ -293,7 +323,7 @@ consumes it:
 ```toml
 # mods_src/ui_color/mod.toml
 code = "ui_color"
-requires = "game_symbols"
+requires = "game_symbols >= 1.0.0"
 ```
 
 ```cpp
