@@ -8,7 +8,12 @@ heavier than a renderer written only for this game needs to be.
 The plan is incremental: first get the game running with `--gpu_plugin`
 removed entirely — black screen, but audio playing and menus navigable —
 before writing a single line of the real renderer. This document is the
-log of that first step, which is still in progress.
+log of that first step.
+
+**Status: headless boot works.** With the fixes below, the game boots
+fully headless — audio plays (confirmed audible), and the guest runs its
+normal frame loop indefinitely instead of hanging. See "Resolution" below
+for the final fix and "Next: basic textures" for where this picks back up.
 
 ## Where the renderer will hook in
 
@@ -194,20 +199,97 @@ loop's exit condition — either:
 - offsets `+10768`/`+10780` on the D3D device struct (`r31`) mean
   something other than assumed here.
 
-**This is where the D3D device struct reverse engineering mentioned above
-actually needs to start** — guessing further from raw PPC disassembly
-without a labeled struct layout is unproductive. Next session should
-begin there, probably by:
+### Resolution: bypass the wait primitives instead of feeding them
 
-1. Confirming `r31` is in fact the D3D device pointer (cross-reference
-   against `game_symbols` mod data / known SOTN struct dumps if any
-   exist).
-2. Tracing where `r30` is set in the callers above
-   (`sub_82525630`/`sub_82534378`/`sub_82534910`) to determine what value
-   it actually holds relative to the ring buffer state.
-3. Deciding whether "make the GPU look infinitely fast" is even the
-   right mental model here, versus "make ring buffer space always look
-   available" (a related but distinct invariant).
+Runtime instrumentation (via SDK [[midasm_hook]] config, not by editing
+`generated/` directly — those files get overwritten by codegen) settled
+the open questions above empirically instead of by further disassembly
+guessing:
+
+- **`r31` is *not* simply "the" D3D device pointer, and there is no single
+  ring-buffer counter to feed.** `sub_825252C8` is a generic
+  "wait until some GPU-driven counter reaches a target" primitive, called
+  from many sites with different device/pool pointers and different
+  target semantics (absolute ring position in one call site, a small
+  block-count delta in another). Logging actual entry args at the hang
+  showed `device=0x40039C00 target=7 mode=3` — nowhere near ring-buffer
+  scale, and dereferencing `device+10768` gave `0xFFC9B000`, a guest
+  *virtual* address completely unrelated to the *physical* write-back
+  pointer (`0x1FC9C03C`) registered via `VdEnableRingBufferRPtrWriteBack`.
+  So the mirror-on-`CP_RB_WPTR`-write fix above was correctly mirroring
+  the *real* ring buffer's read pointer, but this particular wait was
+  parked on an entirely different counter that nothing was ever going to
+  advance.
+- There's also at least one **structurally-duplicated wait loop that
+  doesn't call `sub_825252C8` at all** — `sub_82524330` inlines the same
+  "poll a GPU counter, retry via `sub_8252F840`" pattern independently
+  (found by re-attaching lldb after the first bypass and getting a fresh
+  hang backtrace one level further into boot).
+
+Given that, "make the GPU look infinitely fast" (mirroring specific
+counters) doesn't scale — there's no way to know how many of these
+counters exist or where they live without tracing every call site by
+hand. The fix that actually worked is "make ring buffer space always
+look available" **at the primitive itself**: both `sub_825252C8` and
+`sub_82524330` are guest code whose entire purpose is waiting on GPU
+progress. Headless means there is no GPU, so the wait is unconditionally
+meaningless — bypass it outright rather than trying to satisfy it.
+
+Implemented as two SDK mid-asm hooks (see [[Mid-ASM
+Hooks|../../rexglue-sdk-wiki/Mid-ASM-Hooks.md]] in the wiki) at each
+function's entry point, both wired to the same bool hook function:
+
+```toml
+# nocturnerecomp_config.toml
+[[midasm_hook]]
+address = 0x825252C8
+name = "HeadlessRingWaitBypass"
+return_on_true = true
+
+[[midasm_hook]]
+address = 0x82524330
+name = "HeadlessRingWaitBypass"
+return_on_true = true
+```
+
+```cpp
+// src/nocturnerecomp_hooks.cpp
+bool HeadlessRingWaitBypass() {
+  return REX_KERNEL_STATE()->emulator()->graphics_system() == nullptr;
+}
+```
+
+When a real `GraphicsSystem` (xenos) is loaded, the hook returns `false`
+and the original wait logic runs untouched — this only changes behavior
+in headless mode.
+
+**Verified this fixes it**, not just "compiles": before the fix, CPU
+sampling showed one core pinned near 100% with zero further log output
+(a true spin). After, the guest ran its normal frame loop indefinitely —
+`HeadlessWriteRegister` (CP_RB_WPTR mirroring) kept firing continuously
+frame after frame (log grew from ~170 lines to 16,000+ over a few
+seconds), and repeated lldb backtraces of the "Main XThread" showed it
+actively moving through real game logic (recursive scene/actor update
+calls), not stuck at a fixed PC. `XMP: started BGM playlist` — the same
+milestone the working xenos boot reaches — now shows up in headless logs
+too, and the game's audio is audible when run.
+
+The debug mid-asm hooks used to get the `device`/`target`/`W`/`R` values
+above (`DebugRingWaitEntry`, `DebugRingWaitIter`, `DebugRingWaitPtr`) were
+temporary and have been removed; `REXSYS_INFO` logging temporarily added
+to `KernelState::EnableHeadlessRingBufferWriteBack` /
+`HeadlessWriteRegister` for the same purpose was also reverted. Only the
+two `HeadlessRingWaitBypass` hooks and the original ring-buffer-mirroring
+fix (`EnableHeadlessRingBufferWriteBack` et al., described above) remain.
+
+One thing not yet confirmed: whether there are *further* GPU-wait
+primitives of this shape deeper in the game (e.g. gated behind menu
+input or a specific game state not reached during the ~10s boot window
+tested). If a future headless run hangs again, the same technique
+applies: re-attach lldb to the spinning `Main XThread`, get a fresh
+backtrace, and if it's a new function shaped like "poll a counter, retry
+via `sub_8252F840`", add another `HeadlessRingWaitBypass` mid-asm hook at
+its entry rather than trying to feed it real data.
 
 ## Known SDK issue: per-config DLL packaging
 
@@ -234,6 +316,9 @@ consumers actually link against) and hasn't been made yet.
 - This repo (work committed on a `native` branch):
   - `src/nocturnerecomp_app.h` — explicit `config.graphics = nullptr` in
     `OnPreSetup`.
+  - `nocturnerecomp_config.toml` — two `[[midasm_hook]]` entries
+    (`HeadlessRingWaitBypass` at `0x825252C8` and `0x82524330`).
+  - `src/nocturnerecomp_hooks.cpp` — the hook implementation.
 
 Both `native` branches need to stay in sync going forward — the
 SDK-side fix without the `config.graphics = nullptr` app-side change (or
@@ -257,10 +342,56 @@ python scripts/build.py
 
 No `--gpu_plugin` flag. Compare against a normal boot
 (`--gpu_plugin=xenos` added back) by diffing `logs/nocturnerecomp_*.log`
-— the working xenos boot reaches `XMP: started BGM playlist` within
-~100ms of `KernelState: Preparing module launch...`; headless currently
-never gets there. `logs/` is gitignored and each run appends a new
-numbered file, so `rm -f logs/*.log` before a run keeps things readable.
+— both now reach `XMP: started BGM playlist` shortly after
+`KernelState: Preparing module launch...`. `logs/` is gitignored and each
+run appends a new numbered file, so `rm -f logs/*.log` before a run keeps
+things readable.
+
+### Instrumenting guest code without editing `generated/`
+
+**Do not edit files under `generated/`** to add temporary logging/asserts
+— they're `build.py`'s codegen output and get silently overwritten (or,
+if codegen decides its inputs are unchanged, silently *kept* on the next
+build, which is worse: you'll debug against stale edits without
+realizing it). The supported way to inject native code at a specific PPC
+instruction is a **mid-asm hook**, documented in the SDK wiki at
+`../rexglue-sdk-wiki/Mid-ASM-Hooks.md`. Two-step recipe used throughout
+this investigation:
+
+1. Add a `[[midasm_hook]]` entry to `nocturnerecomp_config.toml` (config
+   input, survives codegen) naming the guest address and the registers
+   you want to inspect/patch, e.g.:
+   ```toml
+   [[midasm_hook]]
+   address = 0x825252C8   # function/instruction address, from lldb backtraces
+   name = "MyDebugHook"
+   registers = ["r3", "r4", "r5"]
+   ```
+2. Implement `MyDebugHook` in `src/nocturnerecomp_hooks.cpp` (a real
+   source file, not generated) — either a `void` hook for pure logging via
+   `REXSYS_INFO(...)`, or a `bool` hook combined with `return_on_true` /
+   `jump_address_on_true` etc. to actually redirect control flow (this is
+   how the `HeadlessRingWaitBypass` fix above works).
+3. `python scripts/build.py --debug` (or without `--debug` for a release
+   test) — codegen detects the TOML change and regenerates, wiring the
+   hook call into the matching `generated/*.cpp` line automatically.
+
+This is also how the exact hang state was captured empirically instead of
+guessed from disassembly: temporary hooks logged `device`/`target`/`W`/`R`
+at the wait loop (see git history around this doc's commit for the exact
+temporary hooks used, since they've since been removed) rather than
+trying to read live PPC-context register values through lldb, which is
+*not* reliable here — `PPCContext` is one mutable struct shared across
+the whole call stack (all guest functions operate on the same `ctx`), so
+`frame select N` in lldb changes which *source line* is displayed but
+**not** which register values you read; `ctx.r31` always reflects
+whatever the innermost currently-executing guest function is doing with
+r31 right now, not what the frame you selected saw at its own call site.
+Reading a specific frame's original register values reliably means
+either breaking at that function's own entry (before it or its callees
+clobber anything) or reading the stack-spilled copies `__savegprlr_*`
+wrote — a mid-asm hook at the exact instruction of interest sidesteps the
+whole problem.
 
 ### Checking if the guest is hung vs. spinning
 
