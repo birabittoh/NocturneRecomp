@@ -10,10 +10,12 @@ removed entirely — black screen, but audio playing and menus navigable —
 before writing a single line of the real renderer. This document is the
 log of that first step.
 
-**Status: headless boot works.** With the fixes below, the game boots
-fully headless — audio plays (confirmed audible), and the guest runs its
-normal frame loop indefinitely instead of hanging. See "Resolution" below
-for the final fix and "Next: basic textures" for where this picks back up.
+**Status: headless boot works, and phases 1-2 of the follow-on "basic
+textures" plan are done.** The game boots fully headless (audio plays,
+guest frame loop runs indefinitely), the real intro-sequence PM4 draw
+stream can be decoded (see "Phase 1 revisited" below), and a real Vulkan
+swapchain is attached to the game window (see "Phase 2" below). Nothing
+renders on screen yet — that's Phase 3.
 
 ## Where the renderer will hook in
 
@@ -542,35 +544,121 @@ trying to avoid.
    this is throwaway diagnostic instrumentation, not something that needs to
    run unbounded.
 
-### Finding: headless boot never reaches the real intro command stream
+### Finding (superseded): headless boot never reaches the real intro command stream
 
-With the above fixes, a decoded capture from process start shows **one**
-`PM4_ME_INIT` (19 dwords) followed by **repeating, essentially static**
-traffic for the entire ~20,000-packet capture window: a 3-dword
-`PM4_INDIRECT_BUFFER` packet (alternating `predicated=true/false`) pointing
-at what appears to be the same self-referencing jump, plus one `PM4_TYPE0`
-register write per cycle to a rotating scratch register (`BIOS_7_SCRATCH`
-`0x000B`, and two others the register table doesn't name — `0x005A`,
-`0x1274`) always with the same value `0xC0013F00`. This repeats on an
-almost exactly 100ms cadence — i.e., this is the `Headless VBlank` thread's
-keepalive tick (see `StartHeadlessVblankThreadIfNeeded`), not the game
-submitting real per-frame draw commands. **No register writes for viewport,
-render-target format, texture fetch constants, or vertex fetch constants
-appear; no `PM4_DRAW_INDX`/`_2`; no `PM4_XE_SWAP`.** This is despite the
-capture running well past the point where `XMP: started BGM playlist` fires
-and audio is confirmed playing, so the guest is genuinely running real game
-logic — it's specifically GPU submission that never happens.
+An earlier capture appeared to show **only** repeating, static
+`PM4_INDIRECT_BUFFER`/keepalive traffic for the entire ~20,000-packet
+window, with no draws, no shader loads, and no viewport/render-target
+register writes — leading to a (wrong) conclusion that GPU submission never
+happens headlessly at all. **This was a decoder limitation, not a fact
+about the guest.** The decoder only walked the *top-level* ring buffer,
+which is dominated by the guest's tight `PM4_INDIRECT_BUFFER` resubmit spin
+(nothing drains the ring headlessly, so the guest keeps resubmitting the
+same jump); the real per-frame command stream lives *inside* those
+indirect buffers and was never actually decoded. See "Phase 1 revisited"
+below for the fix and the real finding.
 
-**Scope conclusion:** the intro's real texture/draw/shader command stream is
-gated behind something that doesn't fire in headless mode at all — most
-likely the game's actual per-frame GPU submission path checks something
-tied to `config.graphics` / the D3D device / a real vsync signal that only
-the `HeadlessRingWaitBypass`-patched wait loops and the VBlank keepalive
-thread currently stand in for. Finding *that* gate is a prerequisite for
-Phases 2-4 of the renderer plan (there's no draw stream to interpret or
-texture to upload yet) and needs the same lldb-backtrace-driven RE technique
-used to find the original ring-wait spin (see "Reproducing this" above),
-starting from where the VBlank keepalive vs. real submission paths diverge.
-This changes the phase-2 plan's assumption that Phase 1 would just be a
-scope-narrowing exercise — it surfaced a second, deeper hang/gate that has
-to be resolved first.
+### Phase 1 revisited: the real command stream was inside the indirect buffers all along
+
+`KernelState::HeadlessWriteRegister` now follows each `PM4_INDIRECT_BUFFER`
+packet's target and decodes its contents too, logging each distinct target
+(deduped by pointer+length, since the same handful of buffers get
+resubmitted every spin iteration) only once. Two bugs had to be fixed to
+get this working:
+
+1. **Pointer space.** The raw dword in the packet body is a GPU-space
+   pointer (see `xenos::CpuToGpu`/`GpuToCpu` and
+   `CommandProcessor::ExecutePacketType3_INDIRECT_BUFFER` in
+   `rexglue-sdk/src/graphics/command_processor.cpp`) and must be masked to
+   the 29-bit physical range (`& 0x1FFFFFFF`) before being treated as a
+   `TranslatePhysical` argument — using it raw caused a runaway decode of
+   garbage packets.
+2. **Unbounded recursion guard.** Added a defensive cap
+   (`kMaxIbPacketsLogged = 512`) and a zero-length-packet check on the
+   inner decode loop, since this walks guest-controlled data and must not
+   be able to spin forever on a corrupt/stale buffer.
+
+**With that fix, the real finding reverses the earlier conclusion: headless
+boot *does* reach genuine GPU submission.** The decoded indirect-buffer
+content for the intro sequence shows real vertex/pixel shader loads
+(`PM4_IM_LOAD`/`PM4_IM_LOAD_IMMEDIATE`), `SQ_PROGRAM_CNTL` and
+`SHADER_CONSTANT_FETCH_*` (texture/vertex fetch constants) register writes,
+`PM4_LOAD_ALU_CONSTANT`, active blend/depth/color state
+(`RB_BLENDCONTROL0-3`, `RB_DEPTHCONTROL`, `RB_COLORCONTROL`), and 10
+`PM4_DRAW_INDX` calls. This confirms the intro is not a simple passthrough
+quad — Phase 3's native command processor will need the real
+`SpirvShaderTranslator` path (translating the actual Xenos microcode found
+at the shader-constant addresses), not a hardcoded shader.
+
+## Phase 2: a real Vulkan swapchain via detached `ImmediateDrawer`
+
+Implements `NocturnerecompApp::OnCreateImmediateDrawer()` and
+`OnPreLaunchModule()` (`src/nocturnerecomp_app.h`), per the detached-mode
+contract documented on `rex::ReXApp::OnCreateImmediateDrawer` in
+`rex/rex_app.h`:
+
+- `src/native_immediate_drawer.h` — `nocturne::NativeImmediateDrawer`, an
+  `ImmediateDrawer` subclass constructed with no Vulkan state at all
+  (`OnCreateImmediateDrawer` is called from `SetupPresentation` right after
+  the window opens, well before any GPU device exists). Every virtual
+  (`CreateTexture`, `Begin`, `BeginDrawBatch`, `Draw`, `EndDrawBatch`,
+  `End`) forwards to an internal `rex::ui::vulkan::VulkanImmediateDrawer`
+  that starts out null; `CreateTexture` returns `nullptr` (never crashes)
+  until `InitializeVulkan()` has run, satisfying the "font atlas may upload
+  before the device exists" contract.
+- `OnPreLaunchModule()` builds a `rex::ui::vulkan::VulkanProvider` with
+  `with_gpu_emulation=false` (no `CommandProcessor`/xenos guest-GPU
+  emulation — just instance/device/samplers) and `with_presentation=true`,
+  creates a `Presenter` from it, and attaches that presenter to the game
+  window directly via `window()->SetPresenter(...)` — the same mechanism
+  `GraphicsSystem::SetupPresentation` uses for the xenos backend, just
+  wired manually instead of through `GraphicsSystem`. This gets swapchain
+  creation, resize handling, and per-frame presentation for free (the
+  `Window`'s own paint loop already calls
+  `presenter->PaintFromUIThread()`).
+- `VulkanProvider::CreateImmediateDrawer()` returns a fully-working
+  `VulkanImmediateDrawer` (the SDK's own texture/pipeline machinery,
+  reused rather than reimplemented); `NativeImmediateDrawer::
+  InitializeVulkan()` wraps it and calls `SetPresenter()` on it. Since the
+  detached-mode `SetupOverlays(nullptr, drawer)` call (in
+  `rexglue-sdk/src/ui/rex_app.cpp`) constructs `imgui_drawer()` with a null
+  presenter (no device existed yet at that point), it's never auto-
+  registered as a UI drawer anywhere; `OnPreLaunchModule` does that
+  manually once a real presenter exists
+  (`presenter->AddUIDrawerFromUIThread(imgui_drawer(), 0)`), so the
+  debug/console/settings overlays still paint.
+- `VulkanProvider::CreatePresenter()` must run on the UI thread (mirrors
+  `GraphicsSystem::SetupPresentation`'s use of
+  `CallInUIThreadSynchronous`); `OnPreLaunchModule` isn't guaranteed to be
+  called on the UI thread by the SDK's general contract, so the whole body
+  is wrapped in `window()->app_context().CallInUIThreadSynchronous(...)`
+  (harmless if already on the UI thread — it just calls through directly).
+
+**SDK-side fix required:** `rexglue-sdk/src/kernel/CMakeLists.txt` linked
+`rexui` (which declares `renderdoc` as a `PUBLIC` dependency, for
+`rex/ui/renderdoc_api.h`'s `<renderdoc_app.h>` include) as `PRIVATE` into
+`rexruntime`, so the `renderdoc` include directory never propagated through
+`rexruntime`'s CMake export. Invisible as long as only code built alongside
+`rexui` in-tree included `rex/ui/vulkan/*` headers; NocturneRecomp is the
+first *external* consumer to include them directly (for
+`OnCreateImmediateDrawer`), which surfaced it as a `renderdoc_app.h` file
+not found` error. Fixed by re-exporting `renderdoc` `PUBLIC` from
+`rexruntime` explicitly.
+
+**Verified working** (checked the log — note the SDK's rotating file sink
+means recent short runs can land their early messages in an
+`nocturnerecomp_NNN.<n>.log` backup file, not the live
+`nocturnerecomp_NNN.log`): `OnPreLaunchModule` runs, the Vulkan
+provider/presenter/swapchain all construct with no errors, and the
+window's paint loop drives presentation automatically. No visible
+on-screen content yet — that's Phase 3, which needs to actually feed the
+decoded PM4 draw stream from Phase 1 into this swapchain.
+
+## Next: Phase 3, a minimal native command processor
+
+Per the phase-2 plan (`C:\Users\<user>\.claude\plans\deep-foraging-lamport.md`),
+the remaining work is a game-specific PM4 interpreter that consumes the
+ring-buffer/indirect-buffer packets Phase 1 can already decode, translates
+the real shaders found there via `SpirvShaderTranslator`, uploads the
+intro's texture(s) via `Memory::TranslatePhysical` on the fetch-constant
+addresses, and presents through the Phase 2 swapchain on `PM4_XE_SWAP`.
