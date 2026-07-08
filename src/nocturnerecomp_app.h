@@ -50,6 +50,11 @@ class NocturnerecompApp : public rex::ReXApp {
     // time (src/version.generated.h, see CMakeLists.txt).
     config.game_version = nocturne::kVersionString;
 
+    // Explicitly go headless (no xenos/graphics backend) rather than relying
+    // on gpu_plugin being unset -- this is the documented entry point for
+    // bringing your own renderer via OnCreateImmediateDrawer/OnPreLaunchModule.
+    config.graphics = nullptr;
+
 #ifdef _WIN32
     timeBeginPeriod(1);
 #endif
