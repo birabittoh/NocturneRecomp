@@ -18,6 +18,8 @@
 #include <rex/version.h>
 #include <rex/ui/imgui_drawer.h>
 #include <rex/ui/imgui_theme.h>
+#include <rex/ui/vulkan/provider.h>
+#include <rex/ui/window.h>
 
 #ifdef _WIN32
 #include <Windows.h>
@@ -29,6 +31,7 @@
 #include "achievements_menu.h"
 #include "fonts.generated.h"
 #include "icon.generated.h"
+#include "native_immediate_drawer.h"
 #include "version.generated.h"
 
 #include <rex/system/kernel_state.h>
@@ -169,9 +172,73 @@ class NocturnerecompApp : public rex::ReXApp {
 #endif
   }
 
+  // Native renderer phase 2: called from SetupPresentation right after the
+  // (still device-less) window opens, per the detached-mode contract in
+  // rex/rex_app.h. Must return a drawer that tolerates CreateTexture() before
+  // any GPU device exists -- the real Vulkan device/swapchain aren't built
+  // until OnPreLaunchModule, below.
+  std::unique_ptr<rex::ui::ImmediateDrawer> OnCreateImmediateDrawer() override {
+    auto drawer = std::make_unique<nocturne::NativeImmediateDrawer>();
+    native_drawer_ = drawer.get();
+    return drawer;
+  }
+
+  // Stand up a real Vulkan swapchain on the game window, reusing the same
+  // rex::ui::vulkan::VulkanProvider/Presenter classes the xenos Vulkan
+  // backend uses -- infrastructure reuse, not a new abstraction. This is the
+  // "no GraphicsSystem" path: no CommandProcessor, no guest-GPU emulation,
+  // just a presentable surface for phase 3's native command processor (and,
+  // in the meantime, the SDK's own ImGui overlays) to draw into.
+  void OnPreLaunchModule() override {
+    REXGPU_INFO("Native renderer: OnPreLaunchModule entered");
+    // VulkanProvider::CreatePresenter must run on the UI thread (see
+    // GraphicsSystem::SetupPresentation for the equivalent SDK-mode call);
+    // OnPreLaunchModule itself is not guaranteed to be the UI thread.
+    window()->app_context().CallInUIThreadSynchronous([this] {
+      vulkan_provider_ = rex::ui::vulkan::VulkanProvider::Create(
+          /*with_gpu_emulation=*/false, /*with_presentation=*/true);
+      if (!vulkan_provider_) {
+        REXGPU_ERROR("Native renderer: failed to create the Vulkan provider");
+        return;
+      }
+      vulkan_presenter_ = vulkan_provider_->CreatePresenter();
+      if (!vulkan_presenter_) {
+        REXGPU_ERROR("Native renderer: failed to create the Vulkan presenter");
+        return;
+      }
+      REXGPU_INFO("Native renderer: Vulkan provider/presenter created, attaching to window");
+      // Attaching the presenter to the window hooks up swapchain creation,
+      // resize handling, and per-frame presentation automatically (Window's
+      // own paint loop calls presenter->PaintFromUIThread()) -- the same
+      // mechanism the xenos backend relies on, just wired manually instead of
+      // through GraphicsSystem.
+      window()->SetPresenter(vulkan_presenter_.get());
+
+      if (native_drawer_ &&
+          native_drawer_->InitializeVulkan(vulkan_provider_.get(), vulkan_presenter_.get())) {
+        // The detached-mode SetupOverlays() call constructed imgui_drawer()
+        // with a null presenter (no device existed yet), so it was never
+        // registered as a UI drawer anywhere; do that now that a real
+        // presenter exists so the debug/console/settings overlays paint.
+        if (auto* drawer = imgui_drawer()) {
+          vulkan_presenter_->AddUIDrawerFromUIThread(drawer, 0);
+        }
+        REXGPU_INFO("Native renderer: Vulkan swapchain ready");
+      } else {
+        REXGPU_ERROR("Native renderer: failed to initialize the Vulkan immediate drawer");
+      }
+    });
+  }
+
  private:
   std::atomic<uint64_t> guest_frame_count_{0};
   std::chrono::steady_clock::time_point fps_poll_time_ = std::chrono::steady_clock::now();
   uint64_t fps_poll_frame_count_ = 0;
   double fps_smoothed_ = 0.0;
+
+  // Owned by ReXApp via immediate_drawer_; this is a non-owning back-pointer
+  // used to hand it the Vulkan device once OnPreLaunchModule builds one.
+  nocturne::NativeImmediateDrawer* native_drawer_ = nullptr;
+  std::unique_ptr<rex::ui::vulkan::VulkanProvider> vulkan_provider_;
+  std::unique_ptr<rex::ui::Presenter> vulkan_presenter_;
 };
