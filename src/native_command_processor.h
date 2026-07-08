@@ -39,10 +39,29 @@ class NativeCommandProcessor {
  private:
   void PresentFrame();
 
+  // Milestone 3b step 1 (decode-only): parse PM4_IM_LOAD/_IMMEDIATE and
+  // PM4_DRAW_INDX/_2 payloads -- which PacketDisassembler doesn't turn into
+  // PacketAction entries, unlike plain register writes -- and log a summary
+  // of the first few draws (shader addresses/sizes, primitive type, index
+  // count, fetch constants referenced) to verify the decode is right before
+  // building shader translation/texture upload/real drawing on top of it.
+  void OnShaderLoad(const rex::graphics::PacketInfo& info, const uint8_t* packet_base,
+                    bool immediate);
+  void OnDraw(const rex::graphics::PacketInfo& info, const uint8_t* packet_base);
+
   rex::ui::vulkan::VulkanProvider* provider_;
   rex::ui::Presenter* presenter_;
 
   rex::graphics::RegisterFile registers_;
+
+  struct ShaderState {
+    uint32_t guest_address = 0;
+    uint32_t size_dwords = 0;
+  };
+  ShaderState active_vertex_shader_;
+  ShaderState active_pixel_shader_;
+  uint32_t draws_logged_ = 0;
+  static constexpr uint32_t kMaxDrawsLogged = 10;
 
   VkCommandPool command_pool_ = VK_NULL_HANDLE;
   VkCommandBuffer command_buffer_ = VK_NULL_HANDLE;

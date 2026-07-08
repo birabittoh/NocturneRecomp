@@ -4,6 +4,7 @@
 
 #include "native_command_processor.h"
 
+#include <cstring>
 #include <thread>
 
 #include <rex/logging.h>
@@ -86,9 +87,114 @@ void NativeCommandProcessor::OnPacket(const rex::graphics::PacketInfo& info,
     }
   }
 
-  if (info.type_info->category == rex::graphics::PacketCategory::kSwap) {
+  const char* name = info.type_info ? info.type_info->name : "";
+  if (std::strcmp(name, "PM4_IM_LOAD") == 0) {
+    OnShaderLoad(info, packet_base, /*immediate=*/false);
+  } else if (std::strcmp(name, "PM4_IM_LOAD_IMMEDIATE") == 0) {
+    OnShaderLoad(info, packet_base, /*immediate=*/true);
+  } else if (info.type_info && info.type_info->category == rex::graphics::PacketCategory::kDraw) {
+    OnDraw(info, packet_base);
+  }
+
+  if (info.type_info && info.type_info->category == rex::graphics::PacketCategory::kSwap) {
     PresentFrame();
   }
+}
+
+void NativeCommandProcessor::OnShaderLoad(const rex::graphics::PacketInfo& info,
+                                          const uint8_t* packet_base, bool immediate) {
+  // PacketDisassembler doesn't decode these into PacketAction entries (only
+  // plain register writes get that treatment), so re-read the payload dwords
+  // directly -- same layout CommandProcessor::ExecutePacketType3_IM_LOAD[_IMMEDIATE]
+  // reads from the ring (src/graphics/command_processor.cpp), just via
+  // packet_base instead of a RingBuffer cursor.
+  auto payload_dword = [packet_base](uint32_t index) {
+    return rex::memory::load_and_swap<uint32_t>(packet_base + index * 4);
+  };
+
+  uint32_t shader_type_raw;
+  uint32_t guest_address;
+  uint32_t size_dwords;
+  if (immediate) {
+    shader_type_raw = payload_dword(1);
+    uint32_t start_size = payload_dword(2);
+    size_dwords = start_size & 0xFFFF;
+    // The microcode is embedded right after the 2-dword header, in guest
+    // memory order (still to be dealt with by milestone 3b's shader
+    // translation step); no separate physical address exists for it.
+    guest_address = 0;
+  } else {
+    uint32_t addr_type = payload_dword(1);
+    shader_type_raw = addr_type & 0x3;
+    guest_address = addr_type & ~0x3u;
+    uint32_t start_size = payload_dword(2);
+    size_dwords = start_size & 0xFFFF;
+  }
+
+  ShaderState state{guest_address, size_dwords};
+  // xenos::ShaderType: 0 = vertex, 1 = pixel.
+  if (shader_type_raw == 0) {
+    active_vertex_shader_ = state;
+  } else if (shader_type_raw == 1) {
+    active_pixel_shader_ = state;
+  }
+}
+
+void NativeCommandProcessor::OnDraw(const rex::graphics::PacketInfo& info,
+                                    const uint8_t* packet_base) {
+  if (draws_logged_ >= kMaxDrawsLogged) {
+    return;
+  }
+
+  const char* name = info.type_info ? info.type_info->name : "";
+  bool has_viz_token = std::strcmp(name, "PM4_DRAW_INDX") == 0;
+
+  auto payload_dword = [packet_base](uint32_t index) {
+    return rex::memory::load_and_swap<uint32_t>(packet_base + index * 4);
+  };
+
+  // PM4_DRAW_INDX: [1]=viz query token, [2]=VGT_DRAW_INITIATOR, [3..]=index
+  // buffer base/size if source_select==kDMA.
+  // PM4_DRAW_INDX_2: [1]=VGT_DRAW_INITIATOR directly (no viz token).
+  // Layout per CommandProcessor::ExecutePacketType3Draw.
+  uint32_t initiator_index = has_viz_token ? 2 : 1;
+  rex::graphics::reg::VGT_DRAW_INITIATOR initiator;
+  initiator.value = payload_dword(initiator_index);
+
+  bool is_indexed = initiator.source_select == rex::graphics::xenos::SourceSelect::kDMA;
+  uint32_t index_buffer_base = 0;
+  uint32_t index_buffer_size_words = 0;
+  if (is_indexed) {
+    index_buffer_base = payload_dword(initiator_index + 1) & 0x1FFFFFFF;
+    index_buffer_size_words = payload_dword(initiator_index + 2) & 0xFFFFFF;
+  }
+
+  uint32_t num_indices = initiator.num_indices;
+
+  ++draws_logged_;
+  REXGPU_INFO(
+      "NativeCommandProcessor: draw#{} {} prim_type={} source_select={} num_indices={} "
+      "vs_addr={:08X} vs_size_dwords={} ps_addr={:08X} ps_size_dwords={} "
+      "index_buffer_base={:08X} index_buffer_size_words={}",
+      draws_logged_, name, static_cast<uint32_t>(initiator.prim_type),
+      static_cast<uint32_t>(initiator.source_select), num_indices,
+      active_vertex_shader_.guest_address, active_vertex_shader_.size_dwords,
+      active_pixel_shader_.guest_address, active_pixel_shader_.size_dwords, index_buffer_base,
+      index_buffer_size_words);
+
+  // Fetch constant 0 is overwhelmingly the vertex buffer / primary texture in
+  // simple D3D9-style titles; log it to eyeball whether it looks sane
+  // (nonzero base address, plausible pitch/format) before building real
+  // vertex/texture upload on top of this decode.
+  rex::graphics::xenos::xe_gpu_vertex_fetch_t vfetch0 = registers_.GetVertexFetch(0);
+  rex::graphics::xenos::xe_gpu_texture_fetch_t tfetch0 = registers_.GetTextureFetch(0);
+  uint32_t vfetch0_address = vfetch0.address;
+  uint32_t vfetch0_size = vfetch0.size;
+  uint32_t tfetch0_base_address = tfetch0.base_address;
+  REXGPU_INFO(
+      "NativeCommandProcessor:   vfetch[0] address={:08X} size_words={} tfetch[0] "
+      "base_address_shifted={:08X}",
+      vfetch0_address, vfetch0_size, tfetch0_base_address);
 }
 
 void NativeCommandProcessor::PresentFrame() {
