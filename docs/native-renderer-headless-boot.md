@@ -485,3 +485,92 @@ python scripts/build.py                                  # back in NocturneRecom
 - `VdEnableRingBufferRPtrWriteBack`'s pointer argument is a *physical*
   guest address (from `MmGetPhysicalAddress`), not virtual — use
   `Memory::TranslatePhysical`, not `TranslateVirtual`.
+
+## Phase 1: decoding the headless ring's PM4 command stream
+
+Per the native-renderer phase-2 plan (get intro-logo textures on screen),
+Phase 1 was to decode what the intro sequence actually submits to the ring
+buffer, to scope how much of a game-specific Vulkan renderer is really
+needed. `KernelState::HeadlessWriteRegister`
+(`rexglue-sdk/src/system/kernel_state.cpp`) previously just hex-dumped raw
+ring dwords on every `CP_RB_WPTR` write; it now decodes them with the SDK's
+existing `rex::graphics::PacketDisassembler` (opcode/register names via
+`RegisterFile::GetRegisterInfo`), logged as `REXGPU_INFO("headless pm4: ...")`
+lines.
+
+**Reuse note — `PacketDisassembler`/`RegisterFile` had to be duplicated into
+the always-linked runtime.** They live in `src/graphics/` alongside the rest
+of the Xenos GPU format layer, which is built into the `rexgpu-xenos`
+plugin — runtime-loaded only when a GPU plugin is active, never linked into
+the base `rexruntime` that `kernel_state.cpp` is part of. Linking failed
+(`undefined symbol: PacketDisassembler::DisasmPacket` /
+`RegisterFile::GetRegisterInfo`) until `register_file.cpp` and
+`packet_disassembler.cpp` were added directly to `REXSYSTEM_SOURCES` in
+`src/system/CMakeLists.txt`. Both are small, self-contained (no dependency
+on `command_processor.cpp` or anything else plugin-only), so duplicating
+just these two translation units into the core runtime is safe and narrow —
+it does *not* pull in the general xenos plugin machinery the overall plan is
+trying to avoid.
+
+**Bugs found and fixed while wiring this up** (both in
+`KernelState::HeadlessWriteRegister`):
+
+1. **Decode cursor must be independent of the per-call wptr delta.** The
+   guest advances `CP_RB_WPTR` in small increments — often fewer dwords than
+   one packet — so restarting the packet walk at each call's "new bytes
+   since last call" misaligns mid-packet and cascades garbage for every
+   packet after. Fixed by adding a persistent
+   `headless_ring_buffer_decode_pos_` cursor (separate from the wptr itself)
+   that only advances past *fully* decoded packets, leaving any trailing
+   partial packet for a later call once more of it has been submitted.
+2. **Out-of-bounds read / crash.** `PacketDisassembler::DisasmPacket` reads a
+   type-3 packet's whole body speculatively, based on the header's count
+   field, before the caller can check whether that many dwords were even
+   copied yet. Copying only the "newly available" span into a local
+   `std::vector` therefore let a packet header sitting near the end of that
+   span read past the vector — an intermittent segfault (crashed most runs
+   within ~15-30s). Fixed by always copying a full-ring-sized window (plus
+   `1 + 0x3FFF+1` dwords of padding for the theoretical max packet size,
+   wrapping back onto real ring content) — always valid, already-mapped
+   guest physical memory, so the speculative read is safe even for a
+   not-yet-"available" or malformed body; `available` still gates what's
+   actually logged as complete.
+3. **Runaway logging.** With no real GPU draining the ring, the guest can
+   resubmit a tiny unchanging command in a tight spin (see finding below),
+   generating many thousands of log lines per millisecond. Capped total
+   logged/decoded packets per process (`kHeadlessPm4LogLimit = 20000`) since
+   this is throwaway diagnostic instrumentation, not something that needs to
+   run unbounded.
+
+### Finding: headless boot never reaches the real intro command stream
+
+With the above fixes, a decoded capture from process start shows **one**
+`PM4_ME_INIT` (19 dwords) followed by **repeating, essentially static**
+traffic for the entire ~20,000-packet capture window: a 3-dword
+`PM4_INDIRECT_BUFFER` packet (alternating `predicated=true/false`) pointing
+at what appears to be the same self-referencing jump, plus one `PM4_TYPE0`
+register write per cycle to a rotating scratch register (`BIOS_7_SCRATCH`
+`0x000B`, and two others the register table doesn't name — `0x005A`,
+`0x1274`) always with the same value `0xC0013F00`. This repeats on an
+almost exactly 100ms cadence — i.e., this is the `Headless VBlank` thread's
+keepalive tick (see `StartHeadlessVblankThreadIfNeeded`), not the game
+submitting real per-frame draw commands. **No register writes for viewport,
+render-target format, texture fetch constants, or vertex fetch constants
+appear; no `PM4_DRAW_INDX`/`_2`; no `PM4_XE_SWAP`.** This is despite the
+capture running well past the point where `XMP: started BGM playlist` fires
+and audio is confirmed playing, so the guest is genuinely running real game
+logic — it's specifically GPU submission that never happens.
+
+**Scope conclusion:** the intro's real texture/draw/shader command stream is
+gated behind something that doesn't fire in headless mode at all — most
+likely the game's actual per-frame GPU submission path checks something
+tied to `config.graphics` / the D3D device / a real vsync signal that only
+the `HeadlessRingWaitBypass`-patched wait loops and the VBlank keepalive
+thread currently stand in for. Finding *that* gate is a prerequisite for
+Phases 2-4 of the renderer plan (there's no draw stream to interpret or
+texture to upload yet) and needs the same lldb-backtrace-driven RE technique
+used to find the original ring-wait spin (see "Reproducing this" above),
+starting from where the VBlank keepalive vs. real submission paths diverge.
+This changes the phase-2 plan's assumption that Phase 1 would just be a
+scope-narrowing exercise — it surfaced a second, deeper hang/gate that has
+to be resolved first.
