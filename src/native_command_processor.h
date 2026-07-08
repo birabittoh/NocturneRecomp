@@ -6,8 +6,12 @@
 
 #include <chrono>
 #include <cstdint>
+#include <memory>
+#include <vector>
 
 #include <rex/graphics/packet_disassembler.h>
+#include <rex/graphics/pipeline/shader/shader.h>
+#include <rex/graphics/pipeline/shader/spirv_translator.h>
 #include <rex/graphics/register_file.h>
 #include <rex/ui/presenter.h>
 #include <rex/ui/vulkan/provider.h>
@@ -49,6 +53,13 @@ class NativeCommandProcessor {
                     bool immediate);
   void OnDraw(const rex::graphics::PacketInfo& info, const uint8_t* packet_base);
 
+  // Milestone 3b step 2: try translating whatever vertex+pixel shader pair is
+  // active on the first draw, to prove SpirvShaderTranslator integration
+  // works (produces nonempty SPIR-V) before building descriptor sets, a
+  // pipeline, and real drawing on top of it. One-shot, gated by
+  // shaders_translated_once_.
+  void TryTranslateActiveShaders();
+
   rex::ui::vulkan::VulkanProvider* provider_;
   rex::ui::Presenter* presenter_;
 
@@ -56,12 +67,16 @@ class NativeCommandProcessor {
 
   struct ShaderState {
     uint32_t guest_address = 0;
-    uint32_t size_dwords = 0;
+    // Raw microcode dwords exactly as captured (still guest/big-endian --
+    // rex::graphics::Shader's constructor does the byteswap itself given
+    // std::endian::big).
+    std::vector<uint32_t> ucode;
   };
   ShaderState active_vertex_shader_;
   ShaderState active_pixel_shader_;
   uint32_t draws_logged_ = 0;
   static constexpr uint32_t kMaxDrawsLogged = 10;
+  bool shaders_translated_once_ = false;
 
   VkCommandPool command_pool_ = VK_NULL_HANDLE;
   VkCommandBuffer command_buffer_ = VK_NULL_HANDLE;

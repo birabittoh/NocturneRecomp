@@ -8,6 +8,8 @@
 #include <thread>
 
 #include <rex/logging.h>
+#include <rex/string/buffer.h>
+#include <rex/system/kernel_state.h>
 #include <rex/ui/vulkan/device.h>
 #include <rex/ui/vulkan/presenter.h>
 #include <rex/ui/vulkan/util.h>
@@ -115,28 +117,39 @@ void NativeCommandProcessor::OnShaderLoad(const rex::graphics::PacketInfo& info,
   uint32_t shader_type_raw;
   uint32_t guest_address;
   uint32_t size_dwords;
+  ShaderState state;
   if (immediate) {
     shader_type_raw = payload_dword(1);
     uint32_t start_size = payload_dword(2);
     size_dwords = start_size & 0xFFFF;
-    // The microcode is embedded right after the 2-dword header, in guest
-    // memory order (still to be dealt with by milestone 3b's shader
-    // translation step); no separate physical address exists for it.
     guest_address = 0;
+    // The microcode is embedded right after the 2-dword header, still in
+    // guest/big-endian dword order -- Shader's constructor (milestone 3b
+    // step 2) does the byteswap itself given std::endian::big, so capture
+    // the raw bytes as-is rather than pre-swapping.
+    state.ucode.resize(size_dwords);
+    const uint32_t* raw = reinterpret_cast<const uint32_t*>(packet_base) + 3;
+    std::memcpy(state.ucode.data(), raw, size_dwords * sizeof(uint32_t));
   } else {
     uint32_t addr_type = payload_dword(1);
     shader_type_raw = addr_type & 0x3;
     guest_address = addr_type & ~0x3u;
     uint32_t start_size = payload_dword(2);
     size_dwords = start_size & 0xFFFF;
+    if (guest_address != 0 && size_dwords != 0) {
+      const uint32_t* guest_ucode =
+          rex::system::kernel_state()->memory()->TranslatePhysical<uint32_t*>(guest_address);
+      state.ucode.resize(size_dwords);
+      std::memcpy(state.ucode.data(), guest_ucode, size_dwords * sizeof(uint32_t));
+    }
   }
+  state.guest_address = guest_address;
 
-  ShaderState state{guest_address, size_dwords};
   // xenos::ShaderType: 0 = vertex, 1 = pixel.
   if (shader_type_raw == 0) {
-    active_vertex_shader_ = state;
+    active_vertex_shader_ = std::move(state);
   } else if (shader_type_raw == 1) {
-    active_pixel_shader_ = state;
+    active_pixel_shader_ = std::move(state);
   }
 }
 
@@ -178,9 +191,11 @@ void NativeCommandProcessor::OnDraw(const rex::graphics::PacketInfo& info,
       "index_buffer_base={:08X} index_buffer_size_words={}",
       draws_logged_, name, static_cast<uint32_t>(initiator.prim_type),
       static_cast<uint32_t>(initiator.source_select), num_indices,
-      active_vertex_shader_.guest_address, active_vertex_shader_.size_dwords,
-      active_pixel_shader_.guest_address, active_pixel_shader_.size_dwords, index_buffer_base,
+      active_vertex_shader_.guest_address, active_vertex_shader_.ucode.size(),
+      active_pixel_shader_.guest_address, active_pixel_shader_.ucode.size(), index_buffer_base,
       index_buffer_size_words);
+
+  TryTranslateActiveShaders();
 
   // Fetch constant 0 is overwhelmingly the vertex buffer / primary texture in
   // simple D3D9-style titles; log it to eyeball whether it looks sane
@@ -195,6 +210,61 @@ void NativeCommandProcessor::OnDraw(const rex::graphics::PacketInfo& info,
       "NativeCommandProcessor:   vfetch[0] address={:08X} size_words={} tfetch[0] "
       "base_address_shifted={:08X}",
       vfetch0_address, vfetch0_size, tfetch0_base_address);
+}
+
+void NativeCommandProcessor::TryTranslateActiveShaders() {
+  if (shaders_translated_once_) {
+    return;
+  }
+  if (active_vertex_shader_.ucode.empty() || active_pixel_shader_.ucode.empty()) {
+    return;
+  }
+  shaders_translated_once_ = true;
+
+  using rex::graphics::Shader;
+  using rex::graphics::SpirvShaderTranslator;
+
+  // ucode_data_hash is only used for translation caching/dumping keys
+  // upstream; irrelevant for this one-shot proof.
+  Shader vertex_shader(rex::graphics::xenos::ShaderType::kVertex, /*ucode_data_hash=*/0,
+                       active_vertex_shader_.ucode.data(), active_vertex_shader_.ucode.size(),
+                       std::endian::big);
+  Shader pixel_shader(rex::graphics::xenos::ShaderType::kPixel, /*ucode_data_hash=*/0,
+                      active_pixel_shader_.ucode.data(), active_pixel_shader_.ucode.size(),
+                      std::endian::big);
+
+  rex::string::StringBuffer disasm_buffer;
+  vertex_shader.AnalyzeUcode(disasm_buffer);
+  pixel_shader.AnalyzeUcode(disasm_buffer);
+
+  auto program_cntl = registers_.Get<rex::graphics::reg::SQ_PROGRAM_CNTL>();
+  uint32_t vs_dynamic_regs =
+      vertex_shader.GetDynamicAddressableRegisterCount(program_cntl.vs_num_reg);
+  uint32_t ps_dynamic_regs =
+      pixel_shader.GetDynamicAddressableRegisterCount(program_cntl.ps_num_reg);
+
+  // Features(/*all=*/true): this milestone only needs SPIR-V bytes out, not
+  // a device-tailored feature set yet -- pipeline/descriptor set creation
+  // (next step) will need the real VulkanDevice-based Features instead.
+  SpirvShaderTranslator::Features features(/*all=*/true);
+  SpirvShaderTranslator translator(features, /*native_2x_msaa_with_attachments=*/false,
+                                   /*native_2x_msaa_no_attachments=*/false,
+                                   /*edram_fragment_shader_interlock=*/false);
+
+  uint64_t vs_modification = translator.GetDefaultVertexShaderModification(vs_dynamic_regs);
+  uint64_t ps_modification = translator.GetDefaultPixelShaderModification(ps_dynamic_regs);
+
+  Shader::Translation* vs_translation = vertex_shader.GetOrCreateTranslation(vs_modification);
+  Shader::Translation* ps_translation = pixel_shader.GetOrCreateTranslation(ps_modification);
+
+  bool vs_ok = translator.TranslateAnalyzedShader(*vs_translation);
+  bool ps_ok = translator.TranslateAnalyzedShader(*ps_translation);
+
+  REXGPU_INFO(
+      "NativeCommandProcessor: shader translation vs_ok={} vs_spirv_bytes={} ps_ok={} "
+      "ps_spirv_bytes={}",
+      vs_ok, vs_translation->translated_binary().size(), ps_ok,
+      ps_translation->translated_binary().size());
 }
 
 void NativeCommandProcessor::PresentFrame() {
