@@ -226,10 +226,131 @@ consumers actually link against) and hasn't been made yet.
 
 ## Files touched
 
-- `rexglue-sdk` (sibling repo, `development` branch as of this work):
+- `rexglue-sdk` (sibling repo, `development` branch as of this work, work
+  committed on a `native` branch):
   - `include/rex/system/kernel_state.h`
   - `src/system/kernel_state.cpp`
   - `src/kernel/xboxkrnl/xboxkrnl_video.cpp`
-- This repo:
+- This repo (work committed on a `native` branch):
   - `src/nocturnerecomp_app.h` — explicit `config.graphics = nullptr` in
     `OnPreSetup`.
+
+Both `native` branches need to stay in sync going forward — the
+SDK-side fix without the `config.graphics = nullptr` app-side change (or
+vice versa) doesn't get you headless boot; they were developed and
+tested together.
+
+## Reproducing this / tools for the next session
+
+Everything below assumes both repos are checked out side by side (as
+required by `CLAUDE.md`) and both are on their `native` branch
+(`git checkout native` in each). This repo lives at
+`c:\Users\<user>\dev\NocturneRecomp`, the SDK at
+`c:\Users\<user>\dev\rexglue-sdk` (adjust for your machine).
+
+### Build and run headless (release, no debugging)
+
+```
+python scripts/build.py
+./nocturnerecomp.exe --game_data_root assets --license_mask=1
+```
+
+No `--gpu_plugin` flag. Compare against a normal boot
+(`--gpu_plugin=xenos` added back) by diffing `logs/nocturnerecomp_*.log`
+— the working xenos boot reaches `XMP: started BGM playlist` within
+~100ms of `KernelState: Preparing module launch...`; headless currently
+never gets there. `logs/` is gitignored and each run appends a new
+numbered file, so `rm -f logs/*.log` before a run keeps things readable.
+
+### Checking if the guest is hung vs. spinning
+
+A hung/blocked thread shows near-zero CPU; a spinning one doesn't. From
+PowerShell, while the game is running:
+
+```
+powershell -NoProfile -Command "Get-Process nocturnerecomp | Select-Object Id,CPU"
+```
+
+Sample twice a few seconds apart — if CPU time climbs at roughly
+wall-clock rate (e.g. ~5s of CPU across ~6s of wall time), one thread is
+spinning hot, not blocked. `tasklist //FI "IMAGENAME eq nocturnerecomp.exe"`
+gets you the PID for the next step. (Bash tool note: this project's Bash
+tool runs Git Bash/MSYS — `tasklist`, `taskkill`, and `powershell` all
+work directly; just remember MSYS mangles a bare single `/` in flags, so
+use `//FI` not `/FI`. Also: `$TMPDIR` is unset in this environment's Bash
+tool, so redirecting to `"$TMPDIR/foo.log"` silently writes to
+`/foo.log` at the drive root — always use an explicit scratch path.)
+
+### Getting a symbolized backtrace of the spinning/crashing thread
+
+Release builds strip all `sub_XXXXXXXX` guest symbols, so you need a
+build with debug info. Because of the DLL packaging bug (below), a
+plain `--debug` build won't launch — do this instead:
+
+```
+# One-time (or whenever the SDK-side native branch changes):
+cd ../rexglue-sdk
+python scripts/deploy-sdk.py --config RelWithDebInfo --project NocturneRecomp
+
+# Build NocturneRecomp with debug info, then work around the DLL naming bug:
+cd ../NocturneRecomp
+python scripts/build.py --debug
+cp out/build/win-amd64-relwithdebinfo/nocturnerecomp.exe nocturnerecomp.exe
+cp sdk/bin/rexruntimerd.dll rexruntime.dll
+cp sdk/bin/TracyClientrd.dll TracyClient.dll
+# (rexgpu-xenosrd.dll only matters if you pass --gpu_plugin=xenos; not needed headless)
+```
+
+Then run it in the background and attach lldb by PID (lldb lives at
+`C:\Users\<user>\scoop\apps\llvm\current\bin\lldb.exe` on this machine —
+find yours with `where.exe lldb.exe`):
+
+```
+./nocturnerecomp.exe --game_data_root assets --license_mask=1 &
+tasklist //FI "IMAGENAME eq nocturnerecomp.exe"     # get the PID
+
+lldb.exe -p <PID> -o "thread backtrace all" -o "detach" -o "quit"
+```
+
+Look for the thread named `Main XThread (...)` — that's the guest's
+main thread. Its frames will show as `nocturnerecomp.exe\`__imp__sub_XXXXXXXX(...)
+at nocturnerecomp_recomp.N.cpp:LINE` once symbols resolve correctly.
+
+To catch a crash live instead of a spin, launch directly under lldb so
+it stops automatically on the fault (note the `--` separator before the
+game's own args — `settings set target.run-args` chokes on args that
+look like lldb options, so use `process launch --` instead):
+
+```
+lldb.exe -o "process launch -- --game_data_root assets --license_mask=1" \
+         -o "thread backtrace all" -o "quit" ./nocturnerecomp.exe
+```
+
+Once done debugging, restore the normal release build (the debug/rd
+DLLs left renamed in the project root will otherwise linger and confuse
+future runs):
+
+```
+rm -f rexruntimerd.dll rexgpu-xenosrd.dll TracyClientrd.dll
+python scripts/deploy-sdk.py --project NocturneRecomp   # back in ../rexglue-sdk, Release config
+python scripts/build.py                                  # back in NocturneRecomp
+```
+
+### Key addresses/constants from this investigation
+
+- Guest code range: `code=82230000-828799CC` (from the
+  "Function table initialized" log line).
+- The spin: `sub_8252F840` → `sub_825252C8` (wait loop, see disassembly
+  above) → `sub_82525630` → `sub_82534378` → `sub_82534910` →
+  `sub_82582360` → `sub_82576C58` → `sub_82578A30` → `xstart`.
+- D3D device pointer candidate: `r31` in `sub_825252C8`, offsets
+  `+10768` (pointer to a live counter) and `+10780` (a value used
+  against `r30`, meaning not yet nailed down).
+- `CP_RB_WPTR` MMIO register index `0x01C5` (i.e. address
+  `0x7FC80000 + 0x01C5*4` within the GPU register range
+  `0x7FC80000-0x7FCFFFFF`); see `GraphicsSystem::WriteRegister` in
+  `rexglue-sdk/src/graphics/graphics_system.cpp` for the real (xenos)
+  handling this headless path is standing in for.
+- `VdEnableRingBufferRPtrWriteBack`'s pointer argument is a *physical*
+  guest address (from `MmGetPhysicalAddress`), not virtual — use
+  `Memory::TranslatePhysical`, not `TranslateVirtual`.
