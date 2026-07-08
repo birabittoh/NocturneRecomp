@@ -31,6 +31,7 @@
 #include "achievements_menu.h"
 #include "fonts.generated.h"
 #include "icon.generated.h"
+#include "native_command_processor.h"
 #include "native_immediate_drawer.h"
 #include "version.generated.h"
 
@@ -226,7 +227,19 @@ class NocturnerecompApp : public rex::ReXApp {
         REXGPU_INFO("Native renderer: Vulkan swapchain ready");
       } else {
         REXGPU_ERROR("Native renderer: failed to initialize the Vulkan immediate drawer");
+        return;
       }
+
+      // Phase 3: hand decoded PM4 packets from the headless ring buffer to a
+      // game-specific interpreter, which presents through this same
+      // swapchain. Must be set before the guest starts submitting GPU
+      // commands, per SetNativeGpuCommandCallback's contract.
+      native_command_processor_ = std::make_unique<nocturne::NativeCommandProcessor>(
+          vulkan_provider_.get(), vulkan_presenter_.get());
+      rex::system::kernel_state()->SetNativeGpuCommandCallback(
+          [this](const rex::graphics::PacketInfo& info, const uint8_t* packet_base) {
+            native_command_processor_->OnPacket(info, packet_base);
+          });
     });
   }
 
@@ -241,4 +254,5 @@ class NocturnerecompApp : public rex::ReXApp {
   nocturne::NativeImmediateDrawer* native_drawer_ = nullptr;
   std::unique_ptr<rex::ui::vulkan::VulkanProvider> vulkan_provider_;
   std::unique_ptr<rex::ui::Presenter> vulkan_presenter_;
+  std::unique_ptr<nocturne::NativeCommandProcessor> native_command_processor_;
 };
