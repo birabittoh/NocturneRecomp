@@ -54,12 +54,14 @@ class NativeCommandProcessor {
                     bool immediate);
   void OnDraw(const rex::graphics::PacketInfo& info, const uint8_t* packet_base);
 
-  // Milestone 3b step 3: attempts the real draw (pipeline bind, descriptor
-  // sets, shared-memory-backed vertex fetch) for standard primitive
-  // topologies. rex::graphics::xenos::PrimitiveType::kRectangleList and
-  // kQuadList aren't native Vulkan primitives and need translator/host-side
-  // handling this step intentionally doesn't implement yet -- skipped with
-  // a rate-limited log instead of guessing at an incorrect mapping.
+  // Milestone 3b step 3 (+ quad-list follow-up): attempts the real draw
+  // (pipeline bind, descriptor sets, shared-memory-backed vertex fetch) for
+  // standard primitive topologies, plus rex::graphics::xenos::PrimitiveType::
+  // kQuadList via a host-synthesized triangle-list index buffer (two
+  // triangles per quad). kRectangleList isn't a native Vulkan primitive and
+  // needs translator-side handling (Shader::HostVertexShaderType::
+  // kRectangleListAsTriangleStrip) not implemented yet -- skipped with a
+  // rate-limited log instead of guessing at an incorrect mapping.
   void TryDraw(rex::graphics::xenos::PrimitiveType prim_type, uint32_t num_indices);
 
   // Milestone 3b step 3: build the fixed descriptor set layouts / pipeline
@@ -81,13 +83,15 @@ class NativeCommandProcessor {
     std::unique_ptr<rex::graphics::Shader> shader;
     VkShaderModule module = VK_NULL_HANDLE;
   };
-  TranslatedShader* GetOrTranslateShader(rex::graphics::xenos::ShaderType type,
-                                         const std::vector<uint32_t>& ucode);
+  TranslatedShader* GetOrTranslateShader(
+      rex::graphics::xenos::ShaderType type, const std::vector<uint32_t>& ucode,
+      rex::graphics::Shader::HostVertexShaderType host_vertex_shader_type =
+          rex::graphics::Shader::HostVertexShaderType::kVertex);
 
   // Gets (building on first use) a VkPipeline for this exact vertex/pixel
   // shader pair + primitive topology.
   VkPipeline GetOrCreatePipeline(TranslatedShader* vertex_shader, TranslatedShader* pixel_shader,
-                                 VkPrimitiveTopology topology);
+                                 VkPrimitiveTopology topology, bool primitive_restart_enable);
 
   // Begins accumulating a frame's draws into color_target_image_ if this is
   // the first draw since the last present (render pass begin + clear).

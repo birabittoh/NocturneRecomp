@@ -791,35 +791,126 @@ dependency) the layout the SDK's own Vulkan backend builds in
   Freed once `EnsureFrameBegun`'s fence wait (at the start of the *next*
   frame) confirms the GPU is actually done with them.
 
-**Known, intentional gap:** `rex::graphics::xenos::PrimitiveType::kRectangleList`
-(prim_type 8) and `kQuadList` (prim_type 13) aren't native Vulkan
-primitives. Every one of the intro's 10 draws uses one or the other, so
-`TryDraw` currently skips all of them (logged, rate-limited) rather than
-guessing at an incorrect topology mapping — **nothing draws yet**, the
+**Known, intentional gap (at the time of this step):** `rex::graphics::xenos::
+PrimitiveType::kRectangleList` (prim_type 8) and `kQuadList` (prim_type 13)
+aren't native Vulkan primitives. Every one of the intro's 10 draws uses one
+or the other, so `TryDraw` skipped all of them (logged, rate-limited) rather
+than guessing at an incorrect topology mapping — **nothing draws yet**, the
 window still shows milestone 3a's flat clear color. The SDK's real backend
 handles rectangle lists via `Shader::HostVertexShaderType::
 kRectangleListAsTriangleStrip` (changes the shader modification and host
 vertex/topology convention — not yet researched here) and presumably quad
 lists via a host-synthesized triangle-list index buffer (standard
 technique, no translator changes needed, but new code). Confirmed no crash,
-no hang, clean present with all draws skipped.
+no hang, clean present with all draws skipped. **Both `kQuadList` and
+`kRectangleList` are handled as of the steps below.**
+
+### Milestone 3b step 4: quad-list support
+
+`TryDraw` now handles `PrimitiveType::kQuadList` (prim_type 13) instead of
+unconditionally skipping it: for a quad-list draw with `num_indices` quad
+vertices, it host-synthesizes a `VK_INDEX_TYPE_UINT32` index buffer (two
+triangles per quad, `0,1,2,0,2,3`) into a fresh `TransientBuffer` and issues
+`vkCmdDrawIndexed` with `VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST`, instead of the
+non-indexed `vkCmdDraw` standard-topology draws use. No translator or
+`HostVertexShaderType` changes needed — the vertex shader still reads vertex
+`0..num_indices-1` via the shared-memory SSBO exactly as a non-indexed draw
+of the same quad list would.
+
+Enabling these draws (previously always skipped) surfaced two real bugs, not
+hypothetical:
+- The transient descriptor pool was sized for 64 draws/frame, sufficient
+  when quad-list draws were unconditionally skipped. With them now actually
+  drawing, a single frame exceeded that and most draws silently failed with
+  "transient descriptor pool exhausted". Fixed by sizing it for 4096
+  draws/frame.
+- One specific draw in the intro's stream has a garbage-decoded
+  `num_indices` (same root cause as the known fetch-constant/register decode
+  unreliability noted in step 1) that, left unchecked, made the
+  host-synthesized index buffer balloon to hundreds of MB. Fixed with a
+  65536-index sanity cap, matching the existing pattern of skipping
+  (rate-limited log) rather than guessing at corrupt data.
+
+**Known gap surfaced, not yet fixed:** that same garbage-decoded draw's
+shader ucode, once actually reached (rather than skipped as an unsupported
+primitive), makes `SpirvShaderTranslator`/`vkCreateGraphicsPipelines` take
+roughly 20 seconds for that one shader — stalling the frame loop, though not
+hanging or crashing it. A `size_dwords > 4096` sanity cap on shader loads
+(real intro shaders are ~2300 dwords) was added defensively but did not
+catch this particular case, meaning the pathological input is a
+plausible-sized but structurally-corrupt ucode, not an oversized one. Not
+chased further here — same underlying decode-reliability issue as step 1,
+and out of scope for quad-list support specifically.
+
+**Verified:** quad-list draws now reach `vkCreateGraphicsPipelines`
+successfully (`topology=3`/`VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST` pipelines
+created, logged) and no longer hit "transient descriptor pool exhausted".
+
+### Milestone 3b step 5: rectangle-list support
+
+`TryDraw` now handles `PrimitiveType::kRectangleList` (prim_type 8) too,
+replicating what the SDK's real Vulkan backend does
+(`PrimitiveProcessor::InitializeCache`/`Process` in
+`rexglue-sdk/src/graphics/primitive_processor.cpp`) rather than guessing:
+unlike `kQuadList`, this genuinely needs a different vertex shader
+translation, not just a host-side index remap, because the guest only
+provides 3 vertices per rectangle — the 4th corner has to be reconstructed
+as `v0 + v2 - v1` by the shader itself.
+
+- `GetOrTranslateShader` gained a `Shader::HostVertexShaderType` parameter
+  (default `kVertex`), threaded into
+  `SpirvShaderTranslator::GetDefaultVertexShaderModification` and folded
+  into the shader cache key (a shader used both as a plain draw and a
+  rectangle-list draw needs two distinct translations, not one aliased
+  onto the other). For rectangle-list draws, `TryDraw` requests
+  `HostVertexShaderType::kRectangleListAsTriangleStrip` — the SPIR-V that
+  comes back already contains the synthetic-index decode and parallelogram
+  reconstruction, so this step only has to feed it the right index stream,
+  not implement any vertex math itself.
+- `GetOrCreatePipeline` gained a `primitive_restart_enable` parameter
+  (folded into its cache key too): rectangle lists draw as
+  `VK_PRIMITIVE_TOPOLOGY_TRIANGLE_STRIP` with primitive restart enabled,
+  not a plain list.
+- The index buffer follows `PrimitiveProcessor`'s exact pattern: for guest
+  rectangle count `num_indices / 3`, emit a `0xFFFFFFFF` restart index
+  before every rectangle but the first, then 4 synthetic indices
+  `(i<<2)+0..3` per rectangle (host vertex position within the pair in the
+  low 2 bits, rectangle index in the rest) — decoded back into
+  `(primitive_index, vertex_in_primitive)` inside the translated shader,
+  exactly matching `spirv_translator.cpp`'s rectangle-list vertex-index
+  math.
+- `draw_with_synthesized_indices`, a small lambda, now backs both the
+  quad-list and rectangle-list draw paths (upload a `uint32_t` index vector
+  to a fresh transient buffer, bind, `vkCmdDrawIndexed`) instead of
+  duplicating that logic per primitive type.
+
+**Verified:** rectangle-list draws reach `vkCreateGraphicsPipelines`
+successfully (`topology=4`/`VK_PRIMITIVE_TOPOLOGY_TRIANGLE_STRIP` pipelines
+created, logged) with no crash. Full end-to-end pixel correctness (a
+presented frame with real rectangle-list content) wasn't confirmed in this
+step — see the pathological shader translation time gap below, which the
+same test run hit before reaching a clean present.
 
 ## Next
 
 In rough order of what unblocks visible output soonest:
 
-1. **Quad-list support** (prim_type 13, half the intro's draws, including
-   the ones with real non-embedded shaders): host-synthesized index buffer
-   (0,1,2,0,2,3 per quad), `VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST`, no
-   translator/`HostVertexShaderType` changes needed.
-2. **Rectangle-list support** (prim_type 8, the other half): needs
-   researching `Shader::HostVertexShaderType::kRectangleListAsTriangleStrip`'s
-   exact host vertex-count/topology convention.
-3. **Texture upload**: decode the texture fetch constant (format, pitch,
+1. **Pathological shader translation time** (surfaced in step 4, still hit
+   in step 5's test run): one specific garbage-decoded draw's shader ucode
+   makes `SpirvShaderTranslator`/`vkCreateGraphicsPipelines` take roughly
+   20 seconds *per occurrence* — and it recurs repeatedly (the guest appears
+   to reissue the same corrupt draw in a loop), so a run can spend minutes
+   stalled before reaching a clean present. Likely means the shader cache
+   isn't hitting for this draw (its ucode bytes differ slightly each call,
+   perhaps because the "guest_address" or size being read is itself
+   garbage/unstable) rather than a one-time cost. Either fix the underlying
+   fetch-constant/register decode unreliability (step 1's root cause) or add
+   a more targeted guard/cache strategy than the current size cap.
+2. **Texture upload**: decode the texture fetch constant (format, pitch,
    base address, dimensions, tiling), untile guest texture memory, create a
    real `VkImage`/sampler, and populate the (currently hardcoded-empty)
    texture descriptor sets.
-4. **`SystemConstants`/viewport correctness pass**: wire up real
+3. **`SystemConstants`/viewport correctness pass**: wire up real
    viewport/render-target-format/blend state from the register file instead
    of the current mostly-zeroed approximation — needed for correct
    positioning/colors once something actually draws.

@@ -55,12 +55,12 @@ VkPrimitiveTopology PrimitiveTypeToVkTopology(rex::graphics::xenos::PrimitiveTyp
     case PrimitiveType::kTriangleStrip:
       return VK_PRIMITIVE_TOPOLOGY_TRIANGLE_STRIP;
     default:
-      // Notably rex::graphics::xenos::PrimitiveType::kRectangleList and
-      // kQuadList aren't native Vulkan primitives (the SDK's real backend
-      // handles the former via Shader::HostVertexShaderType::
-      // kRectangleListAsTriangleStrip and the latter presumably via a
-      // host-synthesized index buffer) -- intentionally not implemented in
-      // this milestone step, see TryDraw.
+      // Notably rex::graphics::xenos::PrimitiveType::kRectangleList isn't a
+      // native Vulkan primitive (the SDK's real backend handles it via
+      // Shader::HostVertexShaderType::kRectangleListAsTriangleStrip) --
+      // intentionally not implemented yet, see TryDraw. kQuadList is handled
+      // separately in TryDraw via a host-synthesized index buffer, so it
+      // never reaches this function.
       return VK_PRIMITIVE_TOPOLOGY_MAX_ENUM;
   }
 }
@@ -246,14 +246,17 @@ bool NativeCommandProcessor::InitializePipelineResources() {
   }
 
   // Transient descriptor pool for per-draw constants sets -- reset (not
-  // freed individually) once per frame in PresentFrame.
+  // freed individually) once per frame in PresentFrame. Sized generously:
+  // once kQuadList draws stopped being unconditionally skipped, a single
+  // frame was observed issuing far more than the original 64-draw budget.
   {
+    constexpr uint32_t kMaxDrawsPerFrame = 4096;
     VkDescriptorPoolSize pool_sizes[1] = {
         {VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
-         64 * rex::graphics::SpirvShaderTranslator::kConstantBufferCount}};
+         kMaxDrawsPerFrame * rex::graphics::SpirvShaderTranslator::kConstantBufferCount}};
     VkDescriptorPoolCreateInfo pool_info{};
     pool_info.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
-    pool_info.maxSets = 64;
+    pool_info.maxSets = kMaxDrawsPerFrame;
     pool_info.poolSizeCount = 1;
     pool_info.pPoolSizes = pool_sizes;
     if (dfn.vkCreateDescriptorPool(device, &pool_info, nullptr, &transient_descriptor_pool_) !=
@@ -493,6 +496,14 @@ void NativeCommandProcessor::OnShaderLoad(const rex::graphics::PacketInfo& info,
     return rex::memory::load_and_swap<uint32_t>(packet_base + index * 4);
   };
 
+  // Fetch-constant/register decode is known-unreliable for some draws in
+  // this stream (docs/native-renderer-headless-boot.md, milestone 3b step
+  // 1); a garbage-decoded size here was observed making SpirvShaderTranslator
+  // spend ~20s translating one bogus shader, stalling the frame loop. The
+  // real intro shaders translated at ~2300 dwords; reject anything wildly
+  // past that as corrupt rather than paying to translate it.
+  constexpr uint32_t kMaxPlausibleUcodeDwords = 4096;
+
   uint32_t shader_type_raw;
   uint32_t guest_address;
   uint32_t size_dwords;
@@ -501,6 +512,13 @@ void NativeCommandProcessor::OnShaderLoad(const rex::graphics::PacketInfo& info,
     shader_type_raw = payload_dword(1);
     uint32_t start_size = payload_dword(2);
     size_dwords = start_size & 0xFFFF;
+    if (size_dwords > kMaxPlausibleUcodeDwords) {
+      REXGPU_INFO(
+          "NativeCommandProcessor: skipping shader load with implausible size_dwords={} (likely "
+          "a garbage-decoded packet)",
+          size_dwords);
+      size_dwords = 0;
+    }
     guest_address = 0;
     // The microcode is embedded right after the 2-dword header, still in
     // guest/big-endian dword order -- Shader's constructor (milestone 3b
@@ -515,6 +533,13 @@ void NativeCommandProcessor::OnShaderLoad(const rex::graphics::PacketInfo& info,
     guest_address = addr_type & ~0x3u;
     uint32_t start_size = payload_dword(2);
     size_dwords = start_size & 0xFFFF;
+    if (size_dwords > kMaxPlausibleUcodeDwords) {
+      REXGPU_INFO(
+          "NativeCommandProcessor: skipping shader load with implausible size_dwords={} (likely "
+          "a garbage-decoded packet)",
+          size_dwords);
+      size_dwords = 0;
+    }
     if (guest_address != 0 && size_dwords != 0) {
       const uint32_t* guest_ucode =
           rex::system::kernel_state()->memory()->TranslatePhysical<uint32_t*>(guest_address);
@@ -576,13 +601,19 @@ void NativeCommandProcessor::OnDraw(const rex::graphics::PacketInfo& info,
 }
 
 NativeCommandProcessor::TranslatedShader* NativeCommandProcessor::GetOrTranslateShader(
-    rex::graphics::xenos::ShaderType type, const std::vector<uint32_t>& ucode) {
+    rex::graphics::xenos::ShaderType type, const std::vector<uint32_t>& ucode,
+    rex::graphics::Shader::HostVertexShaderType host_vertex_shader_type) {
   if (ucode.empty()) {
     return nullptr;
   }
 
+  // host_vertex_shader_type only varies translation for vertex shaders (see
+  // TryDraw's kRectangleList handling) -- fold it into the cache key so a
+  // shader used both as a plain draw and a rectangle-list draw gets separate
+  // translations/pipelines instead of aliasing onto the wrong one.
   uint64_t key = HashUcode(ucode) ^
-                (type == rex::graphics::xenos::ShaderType::kVertex ? 0x1ull : 0x2ull);
+                (type == rex::graphics::xenos::ShaderType::kVertex ? 0x1ull : 0x2ull) ^
+                (uint64_t(host_vertex_shader_type) << 8);
   auto existing = shader_cache_.find(key);
   if (existing != shader_cache_.end()) {
     return &existing->second;
@@ -604,9 +635,10 @@ NativeCommandProcessor::TranslatedShader* NativeCommandProcessor::GetOrTranslate
   SpirvShaderTranslator translator(features, /*native_2x_msaa_with_attachments=*/false,
                                    /*native_2x_msaa_no_attachments=*/false,
                                    /*edram_fragment_shader_interlock=*/false);
-  uint64_t modification = type == rex::graphics::xenos::ShaderType::kVertex
-                              ? translator.GetDefaultVertexShaderModification(dynamic_regs)
-                              : translator.GetDefaultPixelShaderModification(dynamic_regs);
+  uint64_t modification =
+      type == rex::graphics::xenos::ShaderType::kVertex
+          ? translator.GetDefaultVertexShaderModification(dynamic_regs, host_vertex_shader_type)
+          : translator.GetDefaultPixelShaderModification(dynamic_regs);
   Shader::Translation* translation = shader->GetOrCreateTranslation(modification);
   bool ok = translator.TranslateAnalyzedShader(*translation);
 
@@ -628,9 +660,11 @@ NativeCommandProcessor::TranslatedShader* NativeCommandProcessor::GetOrTranslate
 
 VkPipeline NativeCommandProcessor::GetOrCreatePipeline(TranslatedShader* vertex_shader,
                                                         TranslatedShader* pixel_shader,
-                                                        VkPrimitiveTopology topology) {
+                                                        VkPrimitiveTopology topology,
+                                                        bool primitive_restart_enable) {
   uint64_t key = reinterpret_cast<uintptr_t>(vertex_shader) ^
-                (reinterpret_cast<uintptr_t>(pixel_shader) * 3) ^ (uint64_t(topology) << 1);
+                (reinterpret_cast<uintptr_t>(pixel_shader) * 3) ^ (uint64_t(topology) << 1) ^
+                (primitive_restart_enable ? 0x8000000000000000ull : 0);
   auto existing = pipeline_cache_.find(key);
   if (existing != pipeline_cache_.end()) {
     return existing->second;
@@ -658,6 +692,7 @@ VkPipeline NativeCommandProcessor::GetOrCreatePipeline(TranslatedShader* vertex_
   VkPipelineInputAssemblyStateCreateInfo input_assembly{};
   input_assembly.sType = VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO;
   input_assembly.topology = topology;
+  input_assembly.primitiveRestartEnable = primitive_restart_enable ? VK_TRUE : VK_FALSE;
 
   VkPipelineViewportStateCreateInfo viewport_state{};
   viewport_state.sType = VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO;
@@ -797,21 +832,71 @@ void NativeCommandProcessor::TryDraw(rex::graphics::xenos::PrimitiveType prim_ty
     return;
   }
 
-  VkPrimitiveTopology topology = PrimitiveTypeToVkTopology(prim_type);
-  if (topology == VK_PRIMITIVE_TOPOLOGY_MAX_ENUM) {
+  // Fetch-constant/register decode is known-unreliable for some draws in this
+  // stream (see docs/native-renderer-headless-boot.md, milestone 3b step 1) --
+  // a garbage-decoded num_indices was observed making the quad-list index
+  // buffer below balloon to hundreds of MB and stall the process. No real
+  // draw in this game's UI/intro content needs anywhere near this many
+  // vertices, so treat an implausibly large count as corrupt and skip it.
+  constexpr uint32_t kMaxPlausibleIndices = 65536;
+  if (num_indices > kMaxPlausibleIndices) {
     static uint32_t skipped_logged = 0;
     if (skipped_logged < 20) {
       ++skipped_logged;
       REXGPU_INFO(
-          "NativeCommandProcessor: skipping draw with unsupported primitive type {} (rect/quad "
-          "list handling not implemented yet)",
-          static_cast<uint32_t>(prim_type));
+          "NativeCommandProcessor: skipping draw with implausible num_indices={} (likely a "
+          "garbage-decoded packet)",
+          num_indices);
     }
     return;
   }
 
-  TranslatedShader* vertex_shader =
-      GetOrTranslateShader(rex::graphics::xenos::ShaderType::kVertex, active_vertex_shader_.ucode);
+  // kQuadList (4 vertices/quad, no native Vulkan primitive) is drawn as two
+  // triangles per quad via a host-synthesized index buffer -- built once
+  // num_indices is known, below.
+  bool is_quad_list = prim_type == rex::graphics::xenos::PrimitiveType::kQuadList;
+  uint32_t quad_count = is_quad_list ? num_indices / 4 : 0;
+  if (is_quad_list && quad_count == 0) {
+    return;
+  }
+
+  // kRectangleList (3 guest vertices/rectangle, not native either) is drawn
+  // as a triangle strip with primitive restart, matching the SDK's own
+  // Vulkan backend (PrimitiveProcessor::InitializeCache /
+  // Shader::HostVertexShaderType::kRectangleListAsTriangleStrip): the
+  // translated vertex shader itself reconstructs the missing 4th corner as
+  // v0+v2-v1 from a synthetic gl_VertexIndex this step feeds it via the
+  // index buffer built below, so unlike kQuadList this needs a distinct
+  // shader translation (host_vertex_shader_type), not just host-side index
+  // remapping.
+  bool is_rect_list = prim_type == rex::graphics::xenos::PrimitiveType::kRectangleList;
+  uint32_t rect_count = is_rect_list ? num_indices / 3 : 0;
+  if (is_rect_list && rect_count == 0) {
+    return;
+  }
+
+  VkPrimitiveTopology topology;
+  if (is_quad_list) {
+    topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
+  } else if (is_rect_list) {
+    topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_STRIP;
+  } else {
+    topology = PrimitiveTypeToVkTopology(prim_type);
+  }
+  if (topology == VK_PRIMITIVE_TOPOLOGY_MAX_ENUM) {
+    static uint32_t skipped_logged = 0;
+    if (skipped_logged < 20) {
+      ++skipped_logged;
+      REXGPU_INFO("NativeCommandProcessor: skipping draw with unsupported primitive type {}",
+                 static_cast<uint32_t>(prim_type));
+    }
+    return;
+  }
+
+  TranslatedShader* vertex_shader = GetOrTranslateShader(
+      rex::graphics::xenos::ShaderType::kVertex, active_vertex_shader_.ucode,
+      is_rect_list ? rex::graphics::Shader::HostVertexShaderType::kRectangleListAsTriangleStrip
+                   : rex::graphics::Shader::HostVertexShaderType::kVertex);
   TranslatedShader* pixel_shader =
       GetOrTranslateShader(rex::graphics::xenos::ShaderType::kPixel, active_pixel_shader_.ucode);
   if (!vertex_shader || !pixel_shader || vertex_shader->module == VK_NULL_HANDLE ||
@@ -819,7 +904,9 @@ void NativeCommandProcessor::TryDraw(rex::graphics::xenos::PrimitiveType prim_ty
     return;
   }
 
-  VkPipeline pipeline = GetOrCreatePipeline(vertex_shader, pixel_shader, topology);
+  VkPipeline pipeline =
+      GetOrCreatePipeline(vertex_shader, pixel_shader, topology, /*primitive_restart_enable=*/
+                         is_rect_list);
   if (pipeline == VK_NULL_HANDLE) {
     return;
   }
@@ -941,13 +1028,81 @@ void NativeCommandProcessor::TryDraw(rex::graphics::xenos::PrimitiveType prim_ty
   dfn.vkCmdBindPipeline(command_buffer_, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline);
   dfn.vkCmdBindDescriptorSets(command_buffer_, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline_layout_,
                               0, 4, sets, 0, nullptr);
-  dfn.vkCmdDraw(command_buffer_, num_indices, 1, 0, 0);
+  // Shared by both synthesized-index-buffer paths below: uploads `indices`
+  // as a fresh transient VK_INDEX_TYPE_UINT32 buffer and issues the indexed
+  // draw. Fresh per draw for the same reason the constant buffers are (see
+  // the comment above upload_constant_buffer).
+  auto draw_with_synthesized_indices = [&](const std::vector<uint32_t>& indices) {
+    VkDeviceSize index_buffer_size = indices.size() * sizeof(uint32_t);
+    VkBuffer index_buffer;
+    VkDeviceMemory index_memory;
+    if (!rex::ui::vulkan::util::CreateDedicatedAllocationBuffer(
+            vulkan_device, index_buffer_size, VK_BUFFER_USAGE_INDEX_BUFFER_BIT,
+            rex::ui::vulkan::util::MemoryPurpose::kUpload, index_buffer, index_memory)) {
+      REXGPU_ERROR("NativeCommandProcessor: failed to allocate a synthesized index buffer");
+      return;
+    }
+    void* mapped = nullptr;
+    dfn.vkMapMemory(device, index_memory, 0, index_buffer_size, 0, &mapped);
+    std::memcpy(mapped, indices.data(), index_buffer_size);
+    dfn.vkUnmapMemory(device, index_memory);
+    frame_transient_buffers_.push_back({index_buffer, index_memory});
+
+    dfn.vkCmdBindIndexBuffer(command_buffer_, index_buffer, 0, VK_INDEX_TYPE_UINT32);
+    dfn.vkCmdDrawIndexed(command_buffer_, uint32_t(indices.size()), 1, 0, 0, 0);
+  };
+
+  if (is_quad_list) {
+    // Two triangles per quad (0,1,2,0,2,3), indexing the same autoindex
+    // vertex stream a non-indexed draw of this quad list would have used --
+    // the vertex shader still reads vertex 0..num_indices-1 via the shared
+    // memory SSBO, only the host-side assembly into triangles is synthesized.
+    std::vector<uint32_t> indices(size_t(quad_count) * 6);
+    for (uint32_t quad = 0; quad < quad_count; ++quad) {
+      uint32_t base = quad * 4;
+      uint32_t* out = &indices[size_t(quad) * 6];
+      out[0] = base;
+      out[1] = base + 1;
+      out[2] = base + 2;
+      out[3] = base;
+      out[4] = base + 2;
+      out[5] = base + 3;
+    }
+    draw_with_synthesized_indices(indices);
+  } else if (is_rect_list) {
+    // Two-triangle-strip-per-rectangle synthetic indices, matching
+    // PrimitiveProcessor::InitializeCache exactly: per rectangle i, a
+    // primitive-restart marker (except before i==0) then 4 synthetic
+    // indices (i<<2)+0..3. The translated vertex shader (built with
+    // HostVertexShaderType::kRectangleListAsTriangleStrip above) decodes
+    // each synthetic index back into (primitive_index, vertex_in_primitive)
+    // itself and reconstructs the missing 4th corner -- this step only
+    // needs to feed it the right index sequence, not compute geometry.
+    std::vector<uint32_t> indices;
+    indices.reserve(size_t(rect_count) * 5);
+    for (uint32_t rect = 0; rect < rect_count; ++rect) {
+      if (rect != 0) {
+        indices.push_back(0xFFFFFFFFu);
+      }
+      uint32_t base = rect << 2;
+      indices.push_back(base);
+      indices.push_back(base + 1);
+      indices.push_back(base + 2);
+      indices.push_back(base + 3);
+    }
+    draw_with_synthesized_indices(indices);
+  } else {
+    dfn.vkCmdDraw(command_buffer_, num_indices, 1, 0, 0);
+  }
 
   frame_has_draws_ = true;
   static bool logged_first_draw = false;
   if (!logged_first_draw) {
     logged_first_draw = true;
-    REXGPU_INFO("NativeCommandProcessor: first real draw issued (num_indices={})", num_indices);
+    REXGPU_INFO(
+        "NativeCommandProcessor: first real draw issued (num_indices={} is_quad_list={} "
+        "is_rect_list={})",
+        num_indices, is_quad_list, is_rect_list);
   }
 }
 
