@@ -654,11 +654,172 @@ window's paint loop drives presentation automatically. No visible
 on-screen content yet — that's Phase 3, which needs to actually feed the
 decoded PM4 draw stream from Phase 1 into this swapchain.
 
-## Next: Phase 3, a minimal native command processor
+## Phase 3: a minimal native command processor
 
-Per the phase-2 plan (`C:\Users\<user>\.claude\plans\deep-foraging-lamport.md`),
-the remaining work is a game-specific PM4 interpreter that consumes the
-ring-buffer/indirect-buffer packets Phase 1 can already decode, translates
-the real shaders found there via `SpirvShaderTranslator`, uploads the
-intro's texture(s) via `Memory::TranslatePhysical` on the fetch-constant
-addresses, and presents through the Phase 2 swapchain on `PM4_XE_SWAP`.
+Per the phase-2 plan (`C:\Users\<user>\.claude\plans\deep-foraging-lamport.md`)
+and its phase-3 follow-up (`C:\Users\<user>\.claude\plans\giggly-munching-cook.md`),
+this phase is a game-specific PM4 interpreter — new files
+`src/native_command_processor.{h,cpp}`, class `nocturne::NativeCommandProcessor`
+— that consumes the ring-buffer/indirect-buffer packets Phase 1 decodes,
+translates the real shaders found there via `SpirvShaderTranslator`, and
+presents through the Phase 2 swapchain on swap. Built in verifiable steps,
+each run and checked before moving to the next.
+
+### Milestone 3a: prove the callback -> interpreter -> present loop
+
+`NocturnerecompApp::OnPreLaunchModule` (`src/nocturnerecomp_app.h`)
+constructs a `NativeCommandProcessor` after the Phase 2 Vulkan swapchain is
+ready, then calls `KernelState::SetNativeGpuCommandCallback` (new SDK hook,
+`kernel_state.h:272-274`) to register `NativeCommandProcessor::OnPacket` as
+the consumer of every decoded PM4 packet `HeadlessWriteRegister` produces —
+including indirect-buffer content, unconditionally, independent of the
+debug-log dedup/cap. `OnPacket` folds register-write actions into a local
+`rex::graphics::RegisterFile`, and on a `kSwap`-category packet calls
+`PresentFrame()`, which clears the Phase 2 swapchain's guest-output image to
+a distinctive color via `Presenter::RefreshGuestOutput` (acquire/clear/release
+barrier sequence matching `VulkanPresenter::kGuestOutputInternal*`).
+
+Two real bugs surfaced and were fixed here, not hypothetical:
+- `submit_fence_` was created unsignaled, but `PresentFrame`'s first step
+  waits on it as "the previous frame's fence" — on the very first call there
+  is no previous submission, so it hung forever. Fixed by creating it
+  `VK_FENCE_CREATE_SIGNALED_BIT`.
+- With `HeadlessRingWaitBypass` removing all real GPU backpressure, the
+  guest free-ran the frame loop at thousands of iterations/second once
+  presenting actually started succeeding, flooding logs and burning CPU.
+  Fixed by pacing `PresentFrame` to ~60fps (`std::this_thread::sleep_for`).
+
+**Verified working:** window shows the clear color (not black) and flips
+per guest swap; audio still audible.
+
+### Milestone 3b step 1: decode draws and shader loads
+
+`PacketDisassembler` only turns plain register writes into `PacketAction`
+entries — `PM4_IM_LOAD`/`_IMMEDIATE` (shader loads) and
+`PM4_DRAW_INDX`/`_2` (draws) need their payload dwords re-read directly from
+`packet_base`, mirroring the layouts in
+`CommandProcessor::ExecutePacketType3_IM_LOAD[_IMMEDIATE]`/
+`ExecutePacketType3Draw` (`rexglue-sdk/src/graphics/command_processor.cpp`).
+`OnShaderLoad`/`OnDraw` do this and log the first few draws' decoded state.
+
+Confirmed from the log: all of the intro's draws use `source_select=2`
+(`xenos::SourceSelect::kAutoIndex` — no real index buffer, 3-4 vertices per
+draw), a mix of embedded-immediate and guest-memory shader microcode, and
+fetch constant slot 0 is *not* reliably the vertex/texture source for every
+draw (some draws' slot-0 decode is garbage) — confirming the real shader
+needs to be analyzed to know which fetch-constant slots it actually reads,
+rather than assuming slot 0.
+
+### Milestone 3b step 2: translate the real shaders to SPIR-V
+
+Captures the actual microcode bytes (guest/big-endian, from either
+`PM4_IM_LOAD`'s guest-memory address or `PM4_IM_LOAD_IMMEDIATE`'s embedded
+payload) into `ShaderState::ucode`, then builds `rex::graphics::Shader`
+instances, calls `AnalyzeUcode`, and runs them through
+`SpirvShaderTranslator::TranslateAnalyzedShader` with the default
+modification per stage. Confirmed working end to end: both the intro's
+vertex and pixel shader translate to nonempty, error-free SPIR-V
+(9328 and 8792 bytes respectively, logged at
+`NativeCommandProcessor: shader translation vs_ok=... ps_ok=...`).
+
+**SDK fix required:** `SpirvShaderTranslator`'s public header
+(`include/rex/graphics/pipeline/shader/spirv_builder.h`) does
+`#include <SPIRV/SpvBuilder.h>` (glslang), but glslang's own install rules
+are disabled (`SKIP_GLSLANG_INSTALL`, set when its subdirectory is added —
+`thirdparty/CMakeLists.txt:328`) and nothing installed its headers in their
+place, even though the glslang/SPIRV *library targets* were already
+exported. Any downstream project consuming the installed SDK failed to
+compile the moment it included `spirv_translator.h`. Fixed by adding an
+`install(DIRECTORY thirdparty/glslang/SPIRV/ ...)` block to
+`cmake/rexglue_install.cmake`, matching the existing SPIRV-Tools headers
+install right above it (only `SPIRV/` is actually needed — confirmed by
+grepping the translator/builder `.h`/`.cpp` files for glslang includes).
+
+### Milestone 3b step 3: descriptor sets, pipeline, real draw plumbing
+
+Builds the fixed Vulkan resources `SpirvShaderTranslator`'s SPIR-V output
+expects, replicating (not reusing — no `CommandProcessor`/`PipelineCache`
+dependency) the layout the SDK's own Vulkan backend builds in
+`src/graphics/vulkan/command_processor.cpp`:
+
+- **Set 0** (`kDescriptorSetSharedMemoryAndEdram`): one `VK_DESCRIPTOR_TYPE_STORAGE_BUFFER`
+  binding over a 512 MB host-visible buffer (`shared_memory_buffer_`)
+  mirroring guest physical memory 1:1 by byte offset — translated shaders
+  read vertex data via raw SSBO loads computed from the guest vertex fetch
+  constants, not `VkVertexInputAttributeDescription` bindings (confirmed:
+  `src/graphics/vulkan/pipeline_cache.cpp` uses an all-zero
+  `VkPipelineVertexInputStateCreateInfo` for every guest draw). Only the
+  byte ranges a draw's shader actually references get copied in
+  (`UpdateSharedMemory`, driven by `Shader::vertex_bindings()`'s
+  `fetch_constant` indices), not a blanket copy.
+- **Set 1** (`kConstantBufferSystem/FloatVertex/FloatPixel/BoolLoop/Fetch`):
+  5 uniform buffer bindings, binding index == `SpirvShaderTranslator::
+  ConstantBuffer` enum value. `SystemConstants` is mostly zeroed (just
+  `kSysFlag_XYDividedByW` and identity `ndc_scale`) rather than the real
+  backend's full `UpdateSystemConstantValues` population — a known
+  simplification, not yet verified correct for this game's actual draws.
+  Float constants are tightly packed in ascending register order per
+  `Shader::ConstantRegisterMap::float_bitmap` (only registers the shader
+  actually reads); bool/loop and fetch constants are copied in full,
+  unconditionally (small, fixed size), matching `UpdateBindings` in the
+  real backend exactly.
+- **Sets 2/3** (vertex/pixel textures): a single shared empty
+  (0-binding) `VkDescriptorSetLayout`/`VkDescriptorSet` for both slots —
+  texture upload/sampling isn't implemented yet, so every shader is treated
+  as sampling nothing. **This will produce wrong output once a shader that
+  does sample a texture actually draws** (the intro's shaders may well be
+  among them); it's a known gap, not an oversight.
+- Pipeline: no vertex input state (see set 0 above), dynamic
+  viewport/scissor, no depth/stencil, no blending, no culling (winding
+  convention unverified). One `VkPipeline` cached per (shader pair,
+  primitive topology).
+- A frame's draws accumulate into an offscreen `color_target_image_`
+  (`VK_FORMAT_A2B10G10R10_UNORM_PACK32`, matching
+  `VulkanPresenter::kGuestOutputFormat` exactly so the final copy needs no
+  conversion) via one render pass begun lazily on the first draw
+  (`EnsureFrameBegun`) and ended in `PresentFrame`, which then copies it
+  into the swapchain's guest-output image and presents. Two Vulkan
+  functions assumed available turned out not to be in this SDK's exposed
+  function table (`vkCmdBlitImage`, then `vkCmdCopyImage`) — the final copy
+  is relayed through a staging buffer via `vkCmdCopyImageToBuffer` +
+  `vkCmdCopyBufferToImage` instead.
+- Each draw gets fresh, dedicated buffer objects for its 5 constant buffers
+  (`TransientBuffer`) rather than reusing one buffer across draws: every
+  draw in a frame is *recorded* before any of them execute (the whole frame
+  submits once, on swap), so reusing+overwriting one buffer between draws
+  would make every draw read whichever draw's constants were written last.
+  Freed once `EnsureFrameBegun`'s fence wait (at the start of the *next*
+  frame) confirms the GPU is actually done with them.
+
+**Known, intentional gap:** `rex::graphics::xenos::PrimitiveType::kRectangleList`
+(prim_type 8) and `kQuadList` (prim_type 13) aren't native Vulkan
+primitives. Every one of the intro's 10 draws uses one or the other, so
+`TryDraw` currently skips all of them (logged, rate-limited) rather than
+guessing at an incorrect topology mapping — **nothing draws yet**, the
+window still shows milestone 3a's flat clear color. The SDK's real backend
+handles rectangle lists via `Shader::HostVertexShaderType::
+kRectangleListAsTriangleStrip` (changes the shader modification and host
+vertex/topology convention — not yet researched here) and presumably quad
+lists via a host-synthesized triangle-list index buffer (standard
+technique, no translator changes needed, but new code). Confirmed no crash,
+no hang, clean present with all draws skipped.
+
+## Next
+
+In rough order of what unblocks visible output soonest:
+
+1. **Quad-list support** (prim_type 13, half the intro's draws, including
+   the ones with real non-embedded shaders): host-synthesized index buffer
+   (0,1,2,0,2,3 per quad), `VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST`, no
+   translator/`HostVertexShaderType` changes needed.
+2. **Rectangle-list support** (prim_type 8, the other half): needs
+   researching `Shader::HostVertexShaderType::kRectangleListAsTriangleStrip`'s
+   exact host vertex-count/topology convention.
+3. **Texture upload**: decode the texture fetch constant (format, pitch,
+   base address, dimensions, tiling), untile guest texture memory, create a
+   real `VkImage`/sampler, and populate the (currently hardcoded-empty)
+   texture descriptor sets.
+4. **`SystemConstants`/viewport correctness pass**: wire up real
+   viewport/render-target-format/blend state from the register file instead
+   of the current mostly-zeroed approximation — needed for correct
+   positioning/colors once something actually draws.

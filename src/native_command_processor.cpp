@@ -18,9 +18,54 @@ namespace nocturne {
 
 // Intro sequence resolution isn't known until milestone 3b decodes the
 // guest's render-target/viewport registers; hardcode a common 360 resolution
-// for the 3a clear-color proof.
+// for the 3a clear-color proof (still used as the swapchain's guest-output
+// size in milestone 3b step 3 -- the offscreen color target below is what
+// actually gets blitted into it).
 constexpr uint32_t kPlaceholderWidth = 1280;
 constexpr uint32_t kPlaceholderHeight = 720;
+
+namespace {
+
+uint64_t HashUcode(const std::vector<uint32_t>& ucode) {
+  // FNV-1a over the raw dwords -- only needs to be a good cache key, not
+  // cryptographically strong.
+  uint64_t hash = 0xcbf29ce484222325ull;
+  const uint8_t* bytes = reinterpret_cast<const uint8_t*>(ucode.data());
+  size_t byte_count = ucode.size() * sizeof(uint32_t);
+  for (size_t i = 0; i < byte_count; ++i) {
+    hash ^= bytes[i];
+    hash *= 0x100000001b3ull;
+  }
+  return hash;
+}
+
+VkPrimitiveTopology PrimitiveTypeToVkTopology(rex::graphics::xenos::PrimitiveType prim_type) {
+  using rex::graphics::xenos::PrimitiveType;
+  switch (prim_type) {
+    case PrimitiveType::kPointList:
+      return VK_PRIMITIVE_TOPOLOGY_POINT_LIST;
+    case PrimitiveType::kLineList:
+      return VK_PRIMITIVE_TOPOLOGY_LINE_LIST;
+    case PrimitiveType::kLineStrip:
+      return VK_PRIMITIVE_TOPOLOGY_LINE_STRIP;
+    case PrimitiveType::kTriangleList:
+      return VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
+    case PrimitiveType::kTriangleFan:
+      return VK_PRIMITIVE_TOPOLOGY_TRIANGLE_FAN;
+    case PrimitiveType::kTriangleStrip:
+      return VK_PRIMITIVE_TOPOLOGY_TRIANGLE_STRIP;
+    default:
+      // Notably rex::graphics::xenos::PrimitiveType::kRectangleList and
+      // kQuadList aren't native Vulkan primitives (the SDK's real backend
+      // handles the former via Shader::HostVertexShaderType::
+      // kRectangleListAsTriangleStrip and the latter presumably via a
+      // host-synthesized index buffer) -- intentionally not implemented in
+      // this milestone step, see TryDraw.
+      return VK_PRIMITIVE_TOPOLOGY_MAX_ENUM;
+  }
+}
+
+}  // namespace
 
 NativeCommandProcessor::NativeCommandProcessor(rex::ui::vulkan::VulkanProvider* provider,
                                                 rex::ui::Presenter* presenter)
@@ -63,10 +108,16 @@ NativeCommandProcessor::NativeCommandProcessor(rex::ui::vulkan::VulkanProvider* 
     return;
   }
 
-  REXGPU_INFO("NativeCommandProcessor: ready");
+  pipeline_resources_valid_ = InitializePipelineResources();
+
+  REXGPU_INFO("NativeCommandProcessor: ready (pipeline_resources_valid={})",
+              pipeline_resources_valid_);
 }
 
 NativeCommandProcessor::~NativeCommandProcessor() {
+  FreeTransientBuffers();
+  DestroyPipelineResources();
+
   const rex::ui::vulkan::VulkanDevice* vulkan_device = provider_->vulkan_device();
   const rex::ui::vulkan::VulkanDevice::Functions& dfn = vulkan_device->functions();
   VkDevice device = vulkan_device->device();
@@ -78,6 +129,334 @@ NativeCommandProcessor::~NativeCommandProcessor() {
     // Also frees command_buffer_, allocated from this pool.
     dfn.vkDestroyCommandPool(device, command_pool_, nullptr);
   }
+}
+
+bool NativeCommandProcessor::InitializePipelineResources() {
+  const rex::ui::vulkan::VulkanDevice* vulkan_device = provider_->vulkan_device();
+  const rex::ui::vulkan::VulkanDevice::Functions& dfn = vulkan_device->functions();
+  VkDevice device = vulkan_device->device();
+
+  // Set 0: guest physical memory, mirrored 1:1 -- see kSharedMemorySize.
+  {
+    VkDescriptorSetLayoutBinding binding{};
+    binding.binding = 0;
+    binding.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+    binding.descriptorCount = 1;
+    binding.stageFlags = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT;
+    VkDescriptorSetLayoutCreateInfo layout_info{};
+    layout_info.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
+    layout_info.bindingCount = 1;
+    layout_info.pBindings = &binding;
+    if (dfn.vkCreateDescriptorSetLayout(device, &layout_info, nullptr, &shared_memory_layout_) !=
+        VK_SUCCESS) {
+      REXGPU_ERROR("NativeCommandProcessor: failed to create the shared memory descriptor layout");
+      return false;
+    }
+  }
+
+  // Set 1: the 5 constant buffers, binding index == SpirvShaderTranslator::
+  // ConstantBuffer enum value (see rexglue-sdk's vulkan/command_processor.cpp
+  // descriptor_set_layout_constants_ for the layout this replicates).
+  {
+    using rex::graphics::SpirvShaderTranslator;
+    VkDescriptorSetLayoutBinding bindings[SpirvShaderTranslator::kConstantBufferCount]{};
+    for (uint32_t i = 0; i < SpirvShaderTranslator::kConstantBufferCount; ++i) {
+      bindings[i].binding = i;
+      bindings[i].descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+      bindings[i].descriptorCount = 1;
+    }
+    bindings[SpirvShaderTranslator::kConstantBufferSystem].stageFlags =
+        VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT;
+    bindings[SpirvShaderTranslator::kConstantBufferFloatVertex].stageFlags =
+        VK_SHADER_STAGE_VERTEX_BIT;
+    bindings[SpirvShaderTranslator::kConstantBufferFloatPixel].stageFlags =
+        VK_SHADER_STAGE_FRAGMENT_BIT;
+    bindings[SpirvShaderTranslator::kConstantBufferBoolLoop].stageFlags =
+        VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT;
+    bindings[SpirvShaderTranslator::kConstantBufferFetch].stageFlags =
+        VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT;
+
+    VkDescriptorSetLayoutCreateInfo layout_info{};
+    layout_info.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
+    layout_info.bindingCount = SpirvShaderTranslator::kConstantBufferCount;
+    layout_info.pBindings = bindings;
+    if (dfn.vkCreateDescriptorSetLayout(device, &layout_info, nullptr, &constants_layout_) !=
+        VK_SUCCESS) {
+      REXGPU_ERROR("NativeCommandProcessor: failed to create the constants descriptor layout");
+      return false;
+    }
+  }
+
+  // Sets 2/3 (vertex/pixel textures): this milestone step doesn't implement
+  // texture upload yet, so every shader is treated as sampling nothing --
+  // the same empty (0-binding) layout works for both slots.
+  {
+    VkDescriptorSetLayoutCreateInfo layout_info{};
+    layout_info.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
+    layout_info.bindingCount = 0;
+    layout_info.pBindings = nullptr;
+    if (dfn.vkCreateDescriptorSetLayout(device, &layout_info, nullptr, &empty_texture_layout_) !=
+        VK_SUCCESS) {
+      REXGPU_ERROR("NativeCommandProcessor: failed to create the empty texture descriptor layout");
+      return false;
+    }
+  }
+
+  {
+    VkDescriptorSetLayout set_layouts[4] = {shared_memory_layout_, constants_layout_,
+                                            empty_texture_layout_, empty_texture_layout_};
+    VkPipelineLayoutCreateInfo layout_info{};
+    layout_info.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
+    layout_info.setLayoutCount = 4;
+    layout_info.pSetLayouts = set_layouts;
+    if (dfn.vkCreatePipelineLayout(device, &layout_info, nullptr, &pipeline_layout_) !=
+        VK_SUCCESS) {
+      REXGPU_ERROR("NativeCommandProcessor: failed to create the pipeline layout");
+      return false;
+    }
+  }
+
+  // Persistent descriptor pool: just the shared-memory set and the one
+  // shared empty texture set, allocated once and never freed/reset.
+  {
+    VkDescriptorPoolSize pool_sizes[1] = {{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1}};
+    VkDescriptorPoolCreateInfo pool_info{};
+    pool_info.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
+    pool_info.maxSets = 2;
+    pool_info.poolSizeCount = 1;
+    pool_info.pPoolSizes = pool_sizes;
+    if (dfn.vkCreateDescriptorPool(device, &pool_info, nullptr, &descriptor_pool_) != VK_SUCCESS) {
+      REXGPU_ERROR("NativeCommandProcessor: failed to create the persistent descriptor pool");
+      return false;
+    }
+
+    VkDescriptorSetLayout alloc_layouts[2] = {shared_memory_layout_, empty_texture_layout_};
+    VkDescriptorSetAllocateInfo alloc_info{};
+    alloc_info.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
+    alloc_info.descriptorPool = descriptor_pool_;
+    alloc_info.descriptorSetCount = 2;
+    alloc_info.pSetLayouts = alloc_layouts;
+    VkDescriptorSet allocated_sets[2];
+    if (dfn.vkAllocateDescriptorSets(device, &alloc_info, allocated_sets) != VK_SUCCESS) {
+      REXGPU_ERROR("NativeCommandProcessor: failed to allocate the persistent descriptor sets");
+      return false;
+    }
+    shared_memory_set_ = allocated_sets[0];
+    empty_texture_set_ = allocated_sets[1];
+  }
+
+  // Transient descriptor pool for per-draw constants sets -- reset (not
+  // freed individually) once per frame in PresentFrame.
+  {
+    VkDescriptorPoolSize pool_sizes[1] = {
+        {VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
+         64 * rex::graphics::SpirvShaderTranslator::kConstantBufferCount}};
+    VkDescriptorPoolCreateInfo pool_info{};
+    pool_info.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
+    pool_info.maxSets = 64;
+    pool_info.poolSizeCount = 1;
+    pool_info.pPoolSizes = pool_sizes;
+    if (dfn.vkCreateDescriptorPool(device, &pool_info, nullptr, &transient_descriptor_pool_) !=
+        VK_SUCCESS) {
+      REXGPU_ERROR("NativeCommandProcessor: failed to create the transient descriptor pool");
+      return false;
+    }
+  }
+
+  // Shared memory buffer: guest physical memory, mirrored 1:1 by byte
+  // offset. Host-visible/coherent and persistently mapped so UpdateSharedMemory
+  // is a plain memcpy with no explicit flush bookkeeping.
+  {
+    if (!rex::ui::vulkan::util::CreateDedicatedAllocationBuffer(
+            vulkan_device, kSharedMemorySize, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
+            rex::ui::vulkan::util::MemoryPurpose::kUpload, shared_memory_buffer_,
+            shared_memory_memory_)) {
+      REXGPU_ERROR("NativeCommandProcessor: failed to create the shared memory buffer");
+      return false;
+    }
+    if (dfn.vkMapMemory(device, shared_memory_memory_, 0, kSharedMemorySize, 0,
+                        reinterpret_cast<void**>(&shared_memory_mapped_)) != VK_SUCCESS) {
+      REXGPU_ERROR("NativeCommandProcessor: failed to map the shared memory buffer");
+      return false;
+    }
+
+    VkDescriptorBufferInfo buffer_info{shared_memory_buffer_, 0, kSharedMemorySize};
+    VkWriteDescriptorSet write{};
+    write.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+    write.dstSet = shared_memory_set_;
+    write.dstBinding = 0;
+    write.descriptorCount = 1;
+    write.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+    write.pBufferInfo = &buffer_info;
+    dfn.vkUpdateDescriptorSets(device, 1, &write, 0, nullptr);
+  }
+
+  // Offscreen color target draws accumulate into across a frame.
+  {
+    VkImageCreateInfo image_info{};
+    image_info.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
+    image_info.imageType = VK_IMAGE_TYPE_2D;
+    image_info.format = VK_FORMAT_A2B10G10R10_UNORM_PACK32;
+    image_info.extent = {kColorTargetWidth, kColorTargetHeight, 1};
+    image_info.mipLevels = 1;
+    image_info.arrayLayers = 1;
+    image_info.samples = VK_SAMPLE_COUNT_1_BIT;
+    image_info.tiling = VK_IMAGE_TILING_OPTIMAL;
+    image_info.usage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
+    image_info.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+    image_info.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+    if (!rex::ui::vulkan::util::CreateDedicatedAllocationImage(
+            vulkan_device, image_info, rex::ui::vulkan::util::MemoryPurpose::kDeviceLocal,
+            color_target_image_, color_target_memory_)) {
+      REXGPU_ERROR("NativeCommandProcessor: failed to create the color target image");
+      return false;
+    }
+
+    VkImageViewCreateInfo view_info{};
+    view_info.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
+    view_info.image = color_target_image_;
+    view_info.viewType = VK_IMAGE_VIEW_TYPE_2D;
+    view_info.format = VK_FORMAT_A2B10G10R10_UNORM_PACK32;
+    view_info.subresourceRange = rex::ui::vulkan::util::InitializeSubresourceRange();
+    if (dfn.vkCreateImageView(device, &view_info, nullptr, &color_target_view_) != VK_SUCCESS) {
+      REXGPU_ERROR("NativeCommandProcessor: failed to create the color target image view");
+      return false;
+    }
+  }
+
+  // Render pass: single color attachment, clear on begin, and already in
+  // TRANSFER_SRC_OPTIMAL when the render pass ends so PresentFrame's blit
+  // needs no extra barrier on the source side.
+  {
+    VkAttachmentDescription attachment{};
+    attachment.format = VK_FORMAT_A2B10G10R10_UNORM_PACK32;
+    attachment.samples = VK_SAMPLE_COUNT_1_BIT;
+    attachment.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
+    attachment.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+    attachment.stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
+    attachment.stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
+    attachment.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+    attachment.finalLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+
+    VkAttachmentReference color_ref{0, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL};
+    VkSubpassDescription subpass{};
+    subpass.pipelineBindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS;
+    subpass.colorAttachmentCount = 1;
+    subpass.pColorAttachments = &color_ref;
+
+    VkSubpassDependency dependency{};
+    dependency.srcSubpass = VK_SUBPASS_EXTERNAL;
+    dependency.dstSubpass = 0;
+    dependency.srcStageMask = VK_PIPELINE_STAGE_TRANSFER_BIT;
+    dependency.dstStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
+    dependency.srcAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+    dependency.dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
+
+    VkRenderPassCreateInfo render_pass_info{};
+    render_pass_info.sType = VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO;
+    render_pass_info.attachmentCount = 1;
+    render_pass_info.pAttachments = &attachment;
+    render_pass_info.subpassCount = 1;
+    render_pass_info.pSubpasses = &subpass;
+    render_pass_info.dependencyCount = 1;
+    render_pass_info.pDependencies = &dependency;
+    if (dfn.vkCreateRenderPass(device, &render_pass_info, nullptr, &render_pass_) != VK_SUCCESS) {
+      REXGPU_ERROR("NativeCommandProcessor: failed to create the render pass");
+      return false;
+    }
+
+    VkFramebufferCreateInfo framebuffer_info{};
+    framebuffer_info.sType = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO;
+    framebuffer_info.renderPass = render_pass_;
+    framebuffer_info.attachmentCount = 1;
+    framebuffer_info.pAttachments = &color_target_view_;
+    framebuffer_info.width = kColorTargetWidth;
+    framebuffer_info.height = kColorTargetHeight;
+    framebuffer_info.layers = 1;
+    if (dfn.vkCreateFramebuffer(device, &framebuffer_info, nullptr, &framebuffer_) != VK_SUCCESS) {
+      REXGPU_ERROR("NativeCommandProcessor: failed to create the framebuffer");
+      return false;
+    }
+  }
+
+  // Staging buffer for the image->image copy (see the field comment on
+  // color_target_staging_buffer_). A2B10G10R10_UNORM_PACK32 is 4 bytes/texel.
+  {
+    color_target_staging_size_ =
+        VkDeviceSize(kColorTargetWidth) * kColorTargetHeight * 4;
+    if (!rex::ui::vulkan::util::CreateDedicatedAllocationBuffer(
+            vulkan_device, color_target_staging_size_,
+            VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+            rex::ui::vulkan::util::MemoryPurpose::kDeviceLocal, color_target_staging_buffer_,
+            color_target_staging_memory_)) {
+      REXGPU_ERROR("NativeCommandProcessor: failed to create the color target staging buffer");
+      return false;
+    }
+  }
+
+  return true;
+}
+
+void NativeCommandProcessor::DestroyPipelineResources() {
+  const rex::ui::vulkan::VulkanDevice* vulkan_device = provider_->vulkan_device();
+  const rex::ui::vulkan::VulkanDevice::Functions& dfn = vulkan_device->functions();
+  VkDevice device = vulkan_device->device();
+
+  for (auto& [key, pipeline] : pipeline_cache_) {
+    if (pipeline != VK_NULL_HANDLE) {
+      dfn.vkDestroyPipeline(device, pipeline, nullptr);
+    }
+  }
+  pipeline_cache_.clear();
+  for (auto& [key, entry] : shader_cache_) {
+    if (entry.module != VK_NULL_HANDLE) {
+      dfn.vkDestroyShaderModule(device, entry.module, nullptr);
+    }
+  }
+  shader_cache_.clear();
+
+  if (color_target_staging_buffer_ != VK_NULL_HANDLE)
+    dfn.vkDestroyBuffer(device, color_target_staging_buffer_, nullptr);
+  if (color_target_staging_memory_ != VK_NULL_HANDLE)
+    dfn.vkFreeMemory(device, color_target_staging_memory_, nullptr);
+
+  if (framebuffer_ != VK_NULL_HANDLE) dfn.vkDestroyFramebuffer(device, framebuffer_, nullptr);
+  if (render_pass_ != VK_NULL_HANDLE) dfn.vkDestroyRenderPass(device, render_pass_, nullptr);
+  if (color_target_view_ != VK_NULL_HANDLE)
+    dfn.vkDestroyImageView(device, color_target_view_, nullptr);
+  if (color_target_image_ != VK_NULL_HANDLE) dfn.vkDestroyImage(device, color_target_image_, nullptr);
+  if (color_target_memory_ != VK_NULL_HANDLE) dfn.vkFreeMemory(device, color_target_memory_, nullptr);
+
+  if (shared_memory_mapped_) dfn.vkUnmapMemory(device, shared_memory_memory_);
+  if (shared_memory_buffer_ != VK_NULL_HANDLE)
+    dfn.vkDestroyBuffer(device, shared_memory_buffer_, nullptr);
+  if (shared_memory_memory_ != VK_NULL_HANDLE)
+    dfn.vkFreeMemory(device, shared_memory_memory_, nullptr);
+
+  if (transient_descriptor_pool_ != VK_NULL_HANDLE)
+    dfn.vkDestroyDescriptorPool(device, transient_descriptor_pool_, nullptr);
+  if (descriptor_pool_ != VK_NULL_HANDLE) dfn.vkDestroyDescriptorPool(device, descriptor_pool_, nullptr);
+  if (pipeline_layout_ != VK_NULL_HANDLE) dfn.vkDestroyPipelineLayout(device, pipeline_layout_, nullptr);
+  if (shared_memory_layout_ != VK_NULL_HANDLE)
+    dfn.vkDestroyDescriptorSetLayout(device, shared_memory_layout_, nullptr);
+  if (constants_layout_ != VK_NULL_HANDLE)
+    dfn.vkDestroyDescriptorSetLayout(device, constants_layout_, nullptr);
+  if (empty_texture_layout_ != VK_NULL_HANDLE)
+    dfn.vkDestroyDescriptorSetLayout(device, empty_texture_layout_, nullptr);
+}
+
+void NativeCommandProcessor::FreeTransientBuffers() {
+  if (frame_transient_buffers_.empty()) {
+    return;
+  }
+  const rex::ui::vulkan::VulkanDevice* vulkan_device = provider_->vulkan_device();
+  const rex::ui::vulkan::VulkanDevice::Functions& dfn = vulkan_device->functions();
+  VkDevice device = vulkan_device->device();
+  for (TransientBuffer& buf : frame_transient_buffers_) {
+    if (buf.buffer != VK_NULL_HANDLE) dfn.vkDestroyBuffer(device, buf.buffer, nullptr);
+    if (buf.memory != VK_NULL_HANDLE) dfn.vkFreeMemory(device, buf.memory, nullptr);
+  }
+  frame_transient_buffers_.clear();
 }
 
 void NativeCommandProcessor::OnPacket(const rex::graphics::PacketInfo& info,
@@ -155,10 +534,6 @@ void NativeCommandProcessor::OnShaderLoad(const rex::graphics::PacketInfo& info,
 
 void NativeCommandProcessor::OnDraw(const rex::graphics::PacketInfo& info,
                                     const uint8_t* packet_base) {
-  if (draws_logged_ >= kMaxDrawsLogged) {
-    return;
-  }
-
   const char* name = info.type_info ? info.type_info->name : "";
   bool has_viz_token = std::strcmp(name, "PM4_DRAW_INDX") == 0;
 
@@ -185,86 +560,395 @@ void NativeCommandProcessor::OnDraw(const rex::graphics::PacketInfo& info,
   uint32_t num_indices = initiator.num_indices;
 
   ++draws_logged_;
-  REXGPU_INFO(
-      "NativeCommandProcessor: draw#{} {} prim_type={} source_select={} num_indices={} "
-      "vs_addr={:08X} vs_size_dwords={} ps_addr={:08X} ps_size_dwords={} "
-      "index_buffer_base={:08X} index_buffer_size_words={}",
-      draws_logged_, name, static_cast<uint32_t>(initiator.prim_type),
-      static_cast<uint32_t>(initiator.source_select), num_indices,
-      active_vertex_shader_.guest_address, active_vertex_shader_.ucode.size(),
-      active_pixel_shader_.guest_address, active_pixel_shader_.ucode.size(), index_buffer_base,
-      index_buffer_size_words);
+  if (draws_logged_ <= kMaxDrawsLogged) {
+    REXGPU_INFO(
+        "NativeCommandProcessor: draw#{} {} prim_type={} source_select={} num_indices={} "
+        "vs_addr={:08X} vs_size_dwords={} ps_addr={:08X} ps_size_dwords={} "
+        "index_buffer_base={:08X} index_buffer_size_words={}",
+        draws_logged_, name, static_cast<uint32_t>(initiator.prim_type),
+        static_cast<uint32_t>(initiator.source_select), num_indices,
+        active_vertex_shader_.guest_address, active_vertex_shader_.ucode.size(),
+        active_pixel_shader_.guest_address, active_pixel_shader_.ucode.size(), index_buffer_base,
+        index_buffer_size_words);
+  }
 
-  TryTranslateActiveShaders();
-
-  // Fetch constant 0 is overwhelmingly the vertex buffer / primary texture in
-  // simple D3D9-style titles; log it to eyeball whether it looks sane
-  // (nonzero base address, plausible pitch/format) before building real
-  // vertex/texture upload on top of this decode.
-  rex::graphics::xenos::xe_gpu_vertex_fetch_t vfetch0 = registers_.GetVertexFetch(0);
-  rex::graphics::xenos::xe_gpu_texture_fetch_t tfetch0 = registers_.GetTextureFetch(0);
-  uint32_t vfetch0_address = vfetch0.address;
-  uint32_t vfetch0_size = vfetch0.size;
-  uint32_t tfetch0_base_address = tfetch0.base_address;
-  REXGPU_INFO(
-      "NativeCommandProcessor:   vfetch[0] address={:08X} size_words={} tfetch[0] "
-      "base_address_shifted={:08X}",
-      vfetch0_address, vfetch0_size, tfetch0_base_address);
+  TryDraw(initiator.prim_type, num_indices);
 }
 
-void NativeCommandProcessor::TryTranslateActiveShaders() {
-  if (shaders_translated_once_) {
-    return;
+NativeCommandProcessor::TranslatedShader* NativeCommandProcessor::GetOrTranslateShader(
+    rex::graphics::xenos::ShaderType type, const std::vector<uint32_t>& ucode) {
+  if (ucode.empty()) {
+    return nullptr;
   }
-  if (active_vertex_shader_.ucode.empty() || active_pixel_shader_.ucode.empty()) {
-    return;
+
+  uint64_t key = HashUcode(ucode) ^
+                (type == rex::graphics::xenos::ShaderType::kVertex ? 0x1ull : 0x2ull);
+  auto existing = shader_cache_.find(key);
+  if (existing != shader_cache_.end()) {
+    return &existing->second;
   }
-  shaders_translated_once_ = true;
 
   using rex::graphics::Shader;
   using rex::graphics::SpirvShaderTranslator;
 
-  // ucode_data_hash is only used for translation caching/dumping keys
-  // upstream; irrelevant for this one-shot proof.
-  Shader vertex_shader(rex::graphics::xenos::ShaderType::kVertex, /*ucode_data_hash=*/0,
-                       active_vertex_shader_.ucode.data(), active_vertex_shader_.ucode.size(),
-                       std::endian::big);
-  Shader pixel_shader(rex::graphics::xenos::ShaderType::kPixel, /*ucode_data_hash=*/0,
-                      active_pixel_shader_.ucode.data(), active_pixel_shader_.ucode.size(),
-                      std::endian::big);
-
+  auto shader = std::make_unique<Shader>(type, key, ucode.data(), ucode.size(), std::endian::big);
   rex::string::StringBuffer disasm_buffer;
-  vertex_shader.AnalyzeUcode(disasm_buffer);
-  pixel_shader.AnalyzeUcode(disasm_buffer);
+  shader->AnalyzeUcode(disasm_buffer);
 
   auto program_cntl = registers_.Get<rex::graphics::reg::SQ_PROGRAM_CNTL>();
-  uint32_t vs_dynamic_regs =
-      vertex_shader.GetDynamicAddressableRegisterCount(program_cntl.vs_num_reg);
-  uint32_t ps_dynamic_regs =
-      pixel_shader.GetDynamicAddressableRegisterCount(program_cntl.ps_num_reg);
+  uint32_t num_reg = type == rex::graphics::xenos::ShaderType::kVertex ? program_cntl.vs_num_reg
+                                                                       : program_cntl.ps_num_reg;
+  uint32_t dynamic_regs = shader->GetDynamicAddressableRegisterCount(num_reg);
 
-  // Features(/*all=*/true): this milestone only needs SPIR-V bytes out, not
-  // a device-tailored feature set yet -- pipeline/descriptor set creation
-  // (next step) will need the real VulkanDevice-based Features instead.
-  SpirvShaderTranslator::Features features(/*all=*/true);
+  SpirvShaderTranslator::Features features(provider_->vulkan_device());
   SpirvShaderTranslator translator(features, /*native_2x_msaa_with_attachments=*/false,
                                    /*native_2x_msaa_no_attachments=*/false,
                                    /*edram_fragment_shader_interlock=*/false);
+  uint64_t modification = type == rex::graphics::xenos::ShaderType::kVertex
+                              ? translator.GetDefaultVertexShaderModification(dynamic_regs)
+                              : translator.GetDefaultPixelShaderModification(dynamic_regs);
+  Shader::Translation* translation = shader->GetOrCreateTranslation(modification);
+  bool ok = translator.TranslateAnalyzedShader(*translation);
 
-  uint64_t vs_modification = translator.GetDefaultVertexShaderModification(vs_dynamic_regs);
-  uint64_t ps_modification = translator.GetDefaultPixelShaderModification(ps_dynamic_regs);
+  VkShaderModule module = VK_NULL_HANDLE;
+  if (ok && !translation->translated_binary().empty()) {
+    module = rex::ui::vulkan::util::CreateShaderModule(
+        provider_->vulkan_device(),
+        reinterpret_cast<const uint32_t*>(translation->translated_binary().data()),
+        translation->translated_binary().size());
+  }
+  if (module == VK_NULL_HANDLE) {
+    REXGPU_ERROR("NativeCommandProcessor: failed to translate/compile {} shader",
+                type == rex::graphics::xenos::ShaderType::kVertex ? "vertex" : "pixel");
+  }
 
-  Shader::Translation* vs_translation = vertex_shader.GetOrCreateTranslation(vs_modification);
-  Shader::Translation* ps_translation = pixel_shader.GetOrCreateTranslation(ps_modification);
+  auto [inserted, _] = shader_cache_.emplace(key, TranslatedShader{std::move(shader), module});
+  return &inserted->second;
+}
 
-  bool vs_ok = translator.TranslateAnalyzedShader(*vs_translation);
-  bool ps_ok = translator.TranslateAnalyzedShader(*ps_translation);
+VkPipeline NativeCommandProcessor::GetOrCreatePipeline(TranslatedShader* vertex_shader,
+                                                        TranslatedShader* pixel_shader,
+                                                        VkPrimitiveTopology topology) {
+  uint64_t key = reinterpret_cast<uintptr_t>(vertex_shader) ^
+                (reinterpret_cast<uintptr_t>(pixel_shader) * 3) ^ (uint64_t(topology) << 1);
+  auto existing = pipeline_cache_.find(key);
+  if (existing != pipeline_cache_.end()) {
+    return existing->second;
+  }
 
-  REXGPU_INFO(
-      "NativeCommandProcessor: shader translation vs_ok={} vs_spirv_bytes={} ps_ok={} "
-      "ps_spirv_bytes={}",
-      vs_ok, vs_translation->translated_binary().size(), ps_ok,
-      ps_translation->translated_binary().size());
+  const rex::ui::vulkan::VulkanDevice* vulkan_device = provider_->vulkan_device();
+  const rex::ui::vulkan::VulkanDevice::Functions& dfn = vulkan_device->functions();
+  VkDevice device = vulkan_device->device();
+
+  VkPipelineShaderStageCreateInfo stages[2]{};
+  stages[0].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+  stages[0].stage = VK_SHADER_STAGE_VERTEX_BIT;
+  stages[0].module = vertex_shader->module;
+  stages[0].pName = "main";
+  stages[1] = stages[0];
+  stages[1].stage = VK_SHADER_STAGE_FRAGMENT_BIT;
+  stages[1].module = pixel_shader->module;
+
+  // No classic vertex input state: translated shaders read vertex data via
+  // raw shared-memory (SSBO) loads computed from the guest vertex fetch
+  // constants, not VkVertexInputAttributeDescription bindings.
+  VkPipelineVertexInputStateCreateInfo vertex_input{};
+  vertex_input.sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO;
+
+  VkPipelineInputAssemblyStateCreateInfo input_assembly{};
+  input_assembly.sType = VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO;
+  input_assembly.topology = topology;
+
+  VkPipelineViewportStateCreateInfo viewport_state{};
+  viewport_state.sType = VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO;
+  viewport_state.viewportCount = 1;
+  viewport_state.scissorCount = 1;
+
+  VkPipelineRasterizationStateCreateInfo raster{};
+  raster.sType = VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO;
+  raster.polygonMode = VK_POLYGON_MODE_FILL;
+  // No culling: guest winding convention isn't verified yet, and getting it
+  // wrong would silently drop every triangle instead of just looking wrong.
+  raster.cullMode = VK_CULL_MODE_NONE;
+  raster.frontFace = VK_FRONT_FACE_COUNTER_CLOCKWISE;
+  raster.lineWidth = 1.0f;
+
+  VkPipelineMultisampleStateCreateInfo multisample{};
+  multisample.sType = VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO;
+  multisample.rasterizationSamples = VK_SAMPLE_COUNT_1_BIT;
+
+  VkPipelineColorBlendAttachmentState blend_attachment{};
+  blend_attachment.colorWriteMask = VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT |
+                                    VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT;
+  VkPipelineColorBlendStateCreateInfo blend_state{};
+  blend_state.sType = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO;
+  blend_state.attachmentCount = 1;
+  blend_state.pAttachments = &blend_attachment;
+
+  VkDynamicState dynamic_states[2] = {VK_DYNAMIC_STATE_VIEWPORT, VK_DYNAMIC_STATE_SCISSOR};
+  VkPipelineDynamicStateCreateInfo dynamic_state{};
+  dynamic_state.sType = VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO;
+  dynamic_state.dynamicStateCount = 2;
+  dynamic_state.pDynamicStates = dynamic_states;
+
+  VkGraphicsPipelineCreateInfo pipeline_info{};
+  pipeline_info.sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO;
+  pipeline_info.stageCount = 2;
+  pipeline_info.pStages = stages;
+  pipeline_info.pVertexInputState = &vertex_input;
+  pipeline_info.pInputAssemblyState = &input_assembly;
+  pipeline_info.pViewportState = &viewport_state;
+  pipeline_info.pRasterizationState = &raster;
+  pipeline_info.pMultisampleState = &multisample;
+  pipeline_info.pColorBlendState = &blend_state;
+  pipeline_info.pDynamicState = &dynamic_state;
+  pipeline_info.layout = pipeline_layout_;
+  pipeline_info.renderPass = render_pass_;
+  pipeline_info.subpass = 0;
+
+  VkPipeline pipeline = VK_NULL_HANDLE;
+  VkResult result = dfn.vkCreateGraphicsPipelines(device, VK_NULL_HANDLE, 1, &pipeline_info,
+                                                  nullptr, &pipeline);
+  if (result != VK_SUCCESS) {
+    REXGPU_ERROR("NativeCommandProcessor: vkCreateGraphicsPipelines failed ({})",
+                static_cast<int32_t>(result));
+    pipeline = VK_NULL_HANDLE;
+  } else {
+    REXGPU_INFO("NativeCommandProcessor: created a graphics pipeline (topology={})",
+                static_cast<uint32_t>(topology));
+  }
+  pipeline_cache_.emplace(key, pipeline);
+  return pipeline;
+}
+
+void NativeCommandProcessor::UpdateSharedMemory(uint32_t guest_address_dwords,
+                                                uint32_t size_dwords) {
+  if (size_dwords == 0) {
+    return;
+  }
+  uint64_t byte_offset = uint64_t(guest_address_dwords) * 4;
+  uint64_t byte_size = uint64_t(size_dwords) * 4;
+  if (byte_offset + byte_size > kSharedMemorySize) {
+    REXGPU_ERROR(
+        "NativeCommandProcessor: shared memory range out of bounds (offset={:08X} size={})",
+        byte_offset, byte_size);
+    return;
+  }
+  const void* guest_ptr = rex::system::kernel_state()->memory()->TranslatePhysical<const void*>(
+      uint32_t(byte_offset));
+  std::memcpy(shared_memory_mapped_ + byte_offset, guest_ptr, byte_size);
+}
+
+void NativeCommandProcessor::EnsureFrameBegun() {
+  if (frame_active_) {
+    return;
+  }
+
+  const rex::ui::vulkan::VulkanDevice* vulkan_device = provider_->vulkan_device();
+  const rex::ui::vulkan::VulkanDevice::Functions& dfn = vulkan_device->functions();
+  VkDevice device = vulkan_device->device();
+
+  // Waiting here (rather than in PresentFrame) is what makes it safe to
+  // free last frame's transient buffers/descriptor sets right after: by the
+  // time this returns, the GPU is done with everything submitted last frame.
+  constexpr uint64_t kFenceTimeoutNs = 5'000'000'000ull;
+  if (dfn.vkWaitForFences(device, 1, &submit_fence_, VK_TRUE, kFenceTimeoutNs) != VK_SUCCESS) {
+    REXGPU_ERROR("NativeCommandProcessor: timed out waiting for the previous frame's fence");
+  }
+  dfn.vkResetFences(device, 1, &submit_fence_);
+  FreeTransientBuffers();
+  dfn.vkResetDescriptorPool(device, transient_descriptor_pool_, 0);
+
+  VkCommandBufferBeginInfo begin_info{};
+  begin_info.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+  begin_info.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+  dfn.vkBeginCommandBuffer(command_buffer_, &begin_info);
+
+  // Same blue as milestone 3a's clear -- the visible result when a frame
+  // has zero (or all-skipped) draws.
+  VkClearValue clear_value{};
+  clear_value.color = {{0.05f, 0.05f, 0.35f, 1.0f}};
+  VkRenderPassBeginInfo rp_begin{};
+  rp_begin.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
+  rp_begin.renderPass = render_pass_;
+  rp_begin.framebuffer = framebuffer_;
+  rp_begin.renderArea = {{0, 0}, {kColorTargetWidth, kColorTargetHeight}};
+  rp_begin.clearValueCount = 1;
+  rp_begin.pClearValues = &clear_value;
+  dfn.vkCmdBeginRenderPass(command_buffer_, &rp_begin, VK_SUBPASS_CONTENTS_INLINE);
+
+  VkViewport viewport{0.0f,
+                      0.0f,
+                      float(kColorTargetWidth),
+                      float(kColorTargetHeight),
+                      0.0f,
+                      1.0f};
+  VkRect2D scissor{{0, 0}, {kColorTargetWidth, kColorTargetHeight}};
+  dfn.vkCmdSetViewport(command_buffer_, 0, 1, &viewport);
+  dfn.vkCmdSetScissor(command_buffer_, 0, 1, &scissor);
+
+  frame_active_ = true;
+  frame_has_draws_ = false;
+}
+
+void NativeCommandProcessor::TryDraw(rex::graphics::xenos::PrimitiveType prim_type,
+                                     uint32_t num_indices) {
+  if (!pipeline_resources_valid_ || num_indices == 0) {
+    return;
+  }
+
+  VkPrimitiveTopology topology = PrimitiveTypeToVkTopology(prim_type);
+  if (topology == VK_PRIMITIVE_TOPOLOGY_MAX_ENUM) {
+    static uint32_t skipped_logged = 0;
+    if (skipped_logged < 20) {
+      ++skipped_logged;
+      REXGPU_INFO(
+          "NativeCommandProcessor: skipping draw with unsupported primitive type {} (rect/quad "
+          "list handling not implemented yet)",
+          static_cast<uint32_t>(prim_type));
+    }
+    return;
+  }
+
+  TranslatedShader* vertex_shader =
+      GetOrTranslateShader(rex::graphics::xenos::ShaderType::kVertex, active_vertex_shader_.ucode);
+  TranslatedShader* pixel_shader =
+      GetOrTranslateShader(rex::graphics::xenos::ShaderType::kPixel, active_pixel_shader_.ucode);
+  if (!vertex_shader || !pixel_shader || vertex_shader->module == VK_NULL_HANDLE ||
+      pixel_shader->module == VK_NULL_HANDLE) {
+    return;
+  }
+
+  VkPipeline pipeline = GetOrCreatePipeline(vertex_shader, pixel_shader, topology);
+  if (pipeline == VK_NULL_HANDLE) {
+    return;
+  }
+
+  EnsureFrameBegun();
+
+  // Mirror only the vertex fetch constant ranges this shader pair actually
+  // reads into shared memory (not a blanket copy) -- see UpdateSharedMemory.
+  for (const auto& binding : vertex_shader->shader->vertex_bindings()) {
+    rex::graphics::xenos::xe_gpu_vertex_fetch_t fetch =
+        registers_.GetVertexFetch(binding.fetch_constant);
+    UpdateSharedMemory(fetch.address, fetch.size);
+  }
+
+  const rex::ui::vulkan::VulkanDevice* vulkan_device = provider_->vulkan_device();
+  const rex::ui::vulkan::VulkanDevice::Functions& dfn = vulkan_device->functions();
+  VkDevice device = vulkan_device->device();
+
+  VkDescriptorSetAllocateInfo alloc_info{};
+  alloc_info.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
+  alloc_info.descriptorPool = transient_descriptor_pool_;
+  alloc_info.descriptorSetCount = 1;
+  alloc_info.pSetLayouts = &constants_layout_;
+  VkDescriptorSet constants_set = VK_NULL_HANDLE;
+  if (dfn.vkAllocateDescriptorSets(device, &alloc_info, &constants_set) != VK_SUCCESS) {
+    REXGPU_ERROR("NativeCommandProcessor: transient descriptor pool exhausted, skipping draw");
+    return;
+  }
+
+  // Each draw gets fresh, dedicated buffer objects for its 5 constant
+  // buffers rather than reusing one buffer across draws: all draws within a
+  // frame get *recorded* before any of them actually execute on the GPU (the
+  // whole frame submits once, on swap), so reusing+overwriting one buffer
+  // between draws would make every draw in the frame read whichever draw's
+  // constants were written last, not its own.
+  using rex::graphics::SpirvShaderTranslator;
+  auto upload_constant_buffer = [&](const void* data, size_t size, uint32_t binding) {
+    VkBuffer buffer;
+    VkDeviceMemory memory;
+    if (!rex::ui::vulkan::util::CreateDedicatedAllocationBuffer(
+            vulkan_device, size, VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT,
+            rex::ui::vulkan::util::MemoryPurpose::kUpload, buffer, memory)) {
+      REXGPU_ERROR("NativeCommandProcessor: failed to allocate a constant buffer");
+      return;
+    }
+    void* mapped = nullptr;
+    dfn.vkMapMemory(device, memory, 0, size, 0, &mapped);
+    std::memcpy(mapped, data, size);
+    dfn.vkUnmapMemory(device, memory);
+    frame_transient_buffers_.push_back({buffer, memory});
+
+    VkDescriptorBufferInfo buffer_info{buffer, 0, size};
+    VkWriteDescriptorSet write{};
+    write.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+    write.dstSet = constants_set;
+    write.dstBinding = binding;
+    write.descriptorCount = 1;
+    write.descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+    write.pBufferInfo = &buffer_info;
+    dfn.vkUpdateDescriptorSets(device, 1, &write, 0, nullptr);
+  };
+
+  // System constants: zeroed except the minimum for a simple opaque draw
+  // with no guest viewport remap -- see spirv_translator.h's SystemConstants
+  // and command_processor.cpp's UpdateSystemConstantValues for the full
+  // real-backend population this approximates.
+  SpirvShaderTranslator::SystemConstants system_constants{};
+  system_constants.flags = uint32_t(1) << SpirvShaderTranslator::kSysFlag_XYDividedByW_Shift;
+  system_constants.ndc_scale[0] = system_constants.ndc_scale[1] = system_constants.ndc_scale[2] =
+      1.0f;
+  upload_constant_buffer(&system_constants, sizeof(system_constants),
+                         SpirvShaderTranslator::kConstantBufferSystem);
+
+  // Float constants: tightly packed in ascending register order, only the
+  // registers the shader actually reads -- see shader.h's
+  // ConstantRegisterMap::GetPackedFloatConstantIndex, replicated here.
+  auto upload_float_constants = [&](const rex::graphics::Shader::ConstantRegisterMap& map,
+                                    uint32_t base_register, uint32_t binding) {
+    uint32_t count = std::max(map.float_count, 1u);
+    std::vector<float> data(size_t(count) * 4, 0.0f);
+    uint32_t out_index = 0;
+    for (uint32_t block = 0; block < 4; ++block) {
+      uint64_t bits = map.float_bitmap[block];
+      uint32_t bit_index;
+      while (rex::bit_scan_forward(bits, &bit_index)) {
+        bits &= ~(uint64_t(1) << bit_index);
+        uint32_t reg_index = base_register + (block << 8) + (bit_index << 2);
+        if (out_index < count) {
+          std::memcpy(&data[size_t(out_index) * 4], &registers_[reg_index], sizeof(float) * 4);
+        }
+        ++out_index;
+      }
+    }
+    upload_constant_buffer(data.data(), data.size() * sizeof(float), binding);
+  };
+  upload_float_constants(vertex_shader->shader->constant_register_map(),
+                         rex::graphics::XE_GPU_REG_SHADER_CONSTANT_000_X,
+                         SpirvShaderTranslator::kConstantBufferFloatVertex);
+  upload_float_constants(pixel_shader->shader->constant_register_map(),
+                         rex::graphics::XE_GPU_REG_SHADER_CONSTANT_256_X,
+                         SpirvShaderTranslator::kConstantBufferFloatPixel);
+
+  // Bool/loop and fetch constants: always copied in full (small, fixed size),
+  // no packing -- see command_processor.cpp's UpdateBindings.
+  uint32_t bool_loop[8 + 32];
+  std::memcpy(bool_loop, &registers_[rex::graphics::XE_GPU_REG_SHADER_CONSTANT_BOOL_000_031],
+              sizeof(bool_loop));
+  upload_constant_buffer(bool_loop, sizeof(bool_loop),
+                         SpirvShaderTranslator::kConstantBufferBoolLoop);
+
+  uint32_t fetch_constants[6 * 32];
+  std::memcpy(fetch_constants, &registers_[rex::graphics::XE_GPU_REG_SHADER_CONSTANT_FETCH_00_0],
+              sizeof(fetch_constants));
+  upload_constant_buffer(fetch_constants, sizeof(fetch_constants),
+                         SpirvShaderTranslator::kConstantBufferFetch);
+
+  VkDescriptorSet sets[4] = {shared_memory_set_, constants_set, empty_texture_set_,
+                            empty_texture_set_};
+  dfn.vkCmdBindPipeline(command_buffer_, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline);
+  dfn.vkCmdBindDescriptorSets(command_buffer_, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline_layout_,
+                              0, 4, sets, 0, nullptr);
+  dfn.vkCmdDraw(command_buffer_, num_indices, 1, 0, 0);
+
+  frame_has_draws_ = true;
+  static bool logged_first_draw = false;
+  if (!logged_first_draw) {
+    logged_first_draw = true;
+    REXGPU_INFO("NativeCommandProcessor: first real draw issued (num_indices={})", num_indices);
+  }
 }
 
 void NativeCommandProcessor::PresentFrame() {
@@ -280,35 +964,25 @@ void NativeCommandProcessor::PresentFrame() {
   }
   last_present_time_ = std::chrono::steady_clock::now();
 
+  // Guarantees a valid recording command buffer + cleared color target even
+  // if this frame had zero (or all-skipped) draws.
+  EnsureFrameBegun();
+
+  const rex::ui::vulkan::VulkanDevice* vulkan_device = provider_->vulkan_device();
+  const rex::ui::vulkan::VulkanDevice::Functions& dfn = vulkan_device->functions();
+  VkDevice device = vulkan_device->device();
+
+  // Render pass's finalLayout is already TRANSFER_SRC_OPTIMAL, so
+  // color_target_image_ needs no barrier before the blit below.
+  dfn.vkCmdEndRenderPass(command_buffer_);
+
   bool refreshed = presenter_->RefreshGuestOutput(
       kPlaceholderWidth, kPlaceholderHeight, kPlaceholderWidth, kPlaceholderHeight,
-      [this](rex::ui::Presenter::GuestOutputRefreshContext& context) -> bool {
+      [this, vulkan_device, &dfn, device](
+          rex::ui::Presenter::GuestOutputRefreshContext& context) -> bool {
         auto& vulkan_context =
             static_cast<rex::ui::vulkan::VulkanPresenter::VulkanGuestOutputRefreshContext&>(
                 context);
-
-        const rex::ui::vulkan::VulkanDevice* vulkan_device = provider_->vulkan_device();
-        const rex::ui::vulkan::VulkanDevice::Functions& dfn = vulkan_device->functions();
-        VkDevice device = vulkan_device->device();
-
-        // 5s timeout rather than an unbounded wait: a stuck fence should
-        // surface as a loud, diagnosable error, not a silent hang of the
-        // guest thread (which also blocks audio, since both ride the same
-        // command-processor thread's forward progress).
-        constexpr uint64_t kFenceTimeoutNs = 5'000'000'000ull;
-        if (dfn.vkWaitForFences(device, 1, &submit_fence_, VK_TRUE, kFenceTimeoutNs) !=
-            VK_SUCCESS) {
-          REXGPU_ERROR("NativeCommandProcessor: timed out waiting for the previous frame's fence");
-          return false;
-        }
-        dfn.vkResetFences(device, 1, &submit_fence_);
-
-        VkCommandBufferBeginInfo begin_info;
-        begin_info.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
-        begin_info.pNext = nullptr;
-        begin_info.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
-        begin_info.pInheritanceInfo = nullptr;
-        dfn.vkBeginCommandBuffer(command_buffer_, &begin_info);
 
         VkImageSubresourceRange subresource_range = rex::ui::vulkan::util::InitializeSubresourceRange();
 
@@ -335,16 +1009,41 @@ void NativeCommandProcessor::PresentFrame() {
                 : VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
             VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, nullptr, 0, nullptr, 1, &acquire_barrier);
 
-        // Distinctive deep-blue clear, proof the callback -> present loop
-        // works end to end; milestone 3b replaces this with real draws.
-        VkClearColorValue clear_color;
-        clear_color.float32[0] = 0.05f;
-        clear_color.float32[1] = 0.05f;
-        clear_color.float32[2] = 0.35f;
-        clear_color.float32[3] = 1.0f;
-        dfn.vkCmdClearColorImage(command_buffer_, vulkan_context.image(),
-                                  VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, &clear_color, 1,
-                                  &subresource_range);
+        // Copy the offscreen render target (draws accumulated into it this
+        // frame, or just the clear color if there were none) into the guest
+        // output image, relayed through a staging buffer: neither
+        // vkCmdBlitImage nor vkCmdCopyImage (image-to-image) is in this
+        // SDK's exposed Vulkan function table, only buffer<->image copies
+        // are. This is exact (no scaling/format conversion needed) since
+        // color_target_image_ is kColorTargetWidth x kColorTargetHeight ==
+        // kPlaceholderWidth x kPlaceholderHeight and was deliberately
+        // created in kGuestOutputFormat (VK_FORMAT_A2B10G10R10_UNORM_PACK32)
+        // to match.
+        static_assert(kColorTargetWidth == kPlaceholderWidth &&
+                          kColorTargetHeight == kPlaceholderHeight,
+                      "color target and guest output sizes must match for this staged copy");
+        VkBufferImageCopy buffer_image_copy{};
+        buffer_image_copy.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+        buffer_image_copy.imageExtent = {kColorTargetWidth, kColorTargetHeight, 1};
+        dfn.vkCmdCopyImageToBuffer(command_buffer_, color_target_image_,
+                                   VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                                   color_target_staging_buffer_, 1, &buffer_image_copy);
+
+        VkBufferMemoryBarrier staging_barrier{};
+        staging_barrier.sType = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER;
+        staging_barrier.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+        staging_barrier.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+        staging_barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        staging_barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        staging_barrier.buffer = color_target_staging_buffer_;
+        staging_barrier.size = color_target_staging_size_;
+        dfn.vkCmdPipelineBarrier(command_buffer_, VK_PIPELINE_STAGE_TRANSFER_BIT,
+                                 VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, nullptr, 1, &staging_barrier,
+                                 0, nullptr);
+
+        dfn.vkCmdCopyBufferToImage(command_buffer_, color_target_staging_buffer_,
+                                   vulkan_context.image(), VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1,
+                                   &buffer_image_copy);
 
         // Release barrier: back to the layout/stage/access the presenter
         // expects to take over from (see VulkanPresenter::kGuestOutputInternal*).
@@ -393,6 +1092,7 @@ void NativeCommandProcessor::PresentFrame() {
         // The refresher contract requires all submitted work (including the
         // release barrier's signaling) to complete before returning true;
         // simplest correct option for this milestone is a blocking wait.
+        constexpr uint64_t kFenceTimeoutNs = 5'000'000'000ull;
         if (dfn.vkWaitForFences(device, 1, &submit_fence_, VK_TRUE, kFenceTimeoutNs) !=
             VK_SUCCESS) {
           REXGPU_ERROR("NativeCommandProcessor: timed out waiting for this frame's fence");
@@ -402,7 +1102,8 @@ void NativeCommandProcessor::PresentFrame() {
         static bool logged_first_present = false;
         if (!logged_first_present) {
           logged_first_present = true;
-          REXGPU_INFO("NativeCommandProcessor: first frame presented");
+          REXGPU_INFO("NativeCommandProcessor: first frame presented (had_draws={})",
+                      frame_has_draws_);
         }
 
         return true;
@@ -414,6 +1115,14 @@ void NativeCommandProcessor::PresentFrame() {
       REXGPU_ERROR("NativeCommandProcessor: RefreshGuestOutput failed");
     }
   }
+
+  // Whether or not the refresh succeeded, this frame's command buffer has
+  // either been submitted or is unusable garbage either way -- start fresh
+  // next time. frame_transient_buffers_/the transient descriptor pool are
+  // reclaimed at the *start* of next frame's EnsureFrameBegun, once its
+  // fence wait confirms this frame's GPU work (which references them) is
+  // actually done.
+  frame_active_ = false;
 }
 
 }  // namespace nocturne
