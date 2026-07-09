@@ -32,28 +32,41 @@ jobs:
       fail-fast: false
       matrix:
         platform:
-          - windows
-          - linux
+          - windows-x64
+          - linux-x64
+          - linux-arm64
         variant:
           - vanilla
           - tu
         include:
-          - platform: windows
+          - platform: windows-x64
             runner: windows-latest
             sdk_dir: win-amd64
             artifact_suffix: windows-x64
 
-          - platform: linux
+          - platform: linux-x64
             runner: ubuntu-latest
             sdk_dir: linux-amd64
             artifact_suffix: linux-x64
+
+          - platform: linux-arm64
+            runner: ubuntu-24.04-arm
+            sdk_dir: linux-arm64
+            artifact_suffix: linux-arm64
+
+        exclude:
+          # tu+linux-arm64 codegen analysis is non-deterministic on this SDK build
+          # (produces spurious UnresolvedCall errors not seen on other platforms) —
+          # see investigation notes, needs a rexglue-sdk fix before re-enabling.
+          - platform: linux-arm64
+            variant: tu
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
       - name: Install dependencies (Linux)
-        if: matrix.platform == 'linux'
+        if: matrix.platform == 'linux-x64' || matrix.platform == 'linux-arm64'
         run: |
           wget -qO- https://apt.llvm.org/llvm.sh | sudo bash -s -- 20
           sudo apt-get install -y \
@@ -64,7 +77,7 @@ jobs:
           sudo update-alternatives --install /usr/bin/clang++ clang++ /usr/bin/clang++-20 200
 
       - name: Install LLVM, CMake, Ninja (Windows)
-        if: matrix.platform == 'windows'
+        if: matrix.platform == 'windows-x64'
         run: choco install llvm cmake ninja -y
 
       - name: Set up sccache
