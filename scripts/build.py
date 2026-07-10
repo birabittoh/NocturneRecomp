@@ -9,6 +9,10 @@ import subprocess
 import tomllib
 
 
+SHADER_DIR = "shaders"
+SHADER_NAME = "crt.slang"
+
+
 def detect_preset(build_type="release"):
     os_name = platform.system()
     arch = platform.machine().lower()
@@ -126,6 +130,20 @@ def copy_runtime_libs(is_windows, sdk_dir, build_type):
         shutil.copy2(src, name)
 
 
+def copy_post_process_shader(dest_root):
+    src = os.path.join("resources", "shaders", SHADER_NAME)
+    dest_dir = os.path.join(dest_root, SHADER_DIR)
+    os.makedirs(dest_dir, exist_ok=True)
+    dest = os.path.join(dest_dir, SHADER_NAME)
+    print(f"+ cp {src} {dest}")
+    shutil.copy2(src, dest)
+
+
+def post_process_shader_path(is_windows):
+    sep = "\\\\" if is_windows else "/"
+    return f".{sep}{SHADER_DIR}{sep}{SHADER_NAME}"
+
+
 def write_launcher(template_name, dest_path, exe):
     script_dir = os.path.dirname(os.path.abspath(__file__))
     template_path = os.path.join(script_dir, "launch_templates", template_name)
@@ -179,6 +197,10 @@ def do_package(name, project_name, is_windows):
         f.write("texture_dump_enabled = false\n")
         f.write('texture_dump_format = "png"\n')
         f.write('texture_dump_skip_sizes = "512x256,1024x512,2048x1024,1920x1080,1280x720"\n')
+        f.write("\n")
+        f.write(f'post_process_shader_path = "{post_process_shader_path(is_windows)}"\n')
+
+    copy_post_process_shader(pkg_dir)
 
     if is_windows:
         launcher_path = os.path.join(pkg_dir, "run.bat")
@@ -402,6 +424,7 @@ def main():
     shutil.copy2(build_output, exe_name)
 
     copy_runtime_libs(is_windows, sdk_dir, build_type)
+    copy_post_process_shader(root)
 
     if tu_version:
         print(
