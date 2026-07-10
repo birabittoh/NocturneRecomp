@@ -224,8 +224,11 @@ def do_package(name, project_name, is_windows):
         archive_path = f"{name}.zip"
         print(f"+ zip {archive_path}")
         with zipfile.ZipFile(archive_path, "w", zipfile.ZIP_DEFLATED) as zf:
-            for f in sorted(os.listdir(pkg_dir)):
-                zf.write(os.path.join(pkg_dir, f), f)
+            for dirpath, _, filenames in os.walk(pkg_dir):
+                for f in sorted(filenames):
+                    src = os.path.join(dirpath, f)
+                    arcname = os.path.relpath(src, pkg_dir)
+                    zf.write(src, arcname)
     else:
         archive_path = f"{name}.tar.gz"
         print(f"+ tar {archive_path}")
