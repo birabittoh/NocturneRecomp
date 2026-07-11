@@ -4,6 +4,7 @@
 
 #include "native_command_processor.h"
 
+#include <cstdio>
 #include <cstring>
 #include <thread>
 
@@ -65,6 +66,30 @@ VkPrimitiveTopology PrimitiveTypeToVkTopology(rex::graphics::xenos::PrimitiveTyp
   }
 }
 
+// CreateDedicatedAllocationBuffer's kUpload memory type is only guaranteed
+// host-*visible*, not necessarily host-*coherent* (util.h's ChooseHostMemoryType
+// picks by cached/uncached preference, never checks the coherent bit) -- every
+// CPU write to GPU-read mapped memory in this file was missing this flush,
+// which is consistent with the observed symptom (real geometry/constants
+// decode correctly on the CPU side, going by logged values, but literally
+// zero pixels differ from the clear color: the GPU may never have observed
+// the writes at all on a non-coherent memory type). Safe to call unconditionally
+// even if the memory turns out to be coherent -- flushing coherent memory is a
+// harmless no-op per the Vulkan spec.
+// Always flushes the whole allocation (offset 0, VK_WHOLE_SIZE) rather than a
+// sub-range, sidestepping VUID-VkMappedMemoryRange nonCoherentAtomSize
+// alignment requirements entirely -- these are small, short-lived
+// allocations (one buffer per upload), so the lack of partial-flush
+// granularity doesn't matter.
+void FlushMapped(const rex::ui::vulkan::VulkanDevice* vulkan_device, VkDeviceMemory memory) {
+  VkMappedMemoryRange range{};
+  range.sType = VK_STRUCTURE_TYPE_MAPPED_MEMORY_RANGE;
+  range.memory = memory;
+  range.offset = 0;
+  range.size = VK_WHOLE_SIZE;
+  vulkan_device->functions().vkFlushMappedMemoryRanges(vulkan_device->device(), 1, &range);
+}
+
 }  // namespace
 
 NativeCommandProcessor::NativeCommandProcessor(rex::ui::vulkan::VulkanProvider* provider,
@@ -110,8 +135,14 @@ NativeCommandProcessor::NativeCommandProcessor(rex::ui::vulkan::VulkanProvider* 
 
   pipeline_resources_valid_ = InitializePipelineResources();
 
-  REXGPU_INFO("NativeCommandProcessor: ready (pipeline_resources_valid={})",
-              pipeline_resources_valid_);
+  rex::graphics::SpirvShaderTranslator::Features features(provider_->vulkan_device());
+  REXGPU_INFO(
+      "NativeCommandProcessor: ready (pipeline_resources_valid={} depthClamp={} "
+      "max_storage_buffer_range={} shared_memory_binding_count={})",
+      pipeline_resources_valid_, provider_->vulkan_device()->properties().depthClamp,
+      features.max_storage_buffer_range,
+      1u << rex::graphics::SpirvShaderTranslator::GetSharedMemoryStorageBufferCountLog2(
+          features.max_storage_buffer_range));
 }
 
 NativeCommandProcessor::~NativeCommandProcessor() {
@@ -362,13 +393,15 @@ bool NativeCommandProcessor::InitializePipelineResources() {
   }
 
   // Shared memory buffer: guest physical memory, mirrored 1:1 by byte
-  // offset. Host-visible/coherent and persistently mapped so UpdateSharedMemory
-  // is a plain memcpy with no explicit flush bookkeeping.
+  // offset. Persistently mapped; UpdateSharedMemory flushes the written
+  // range explicitly after each memcpy (util::MemoryPurpose::kUpload is only
+  // guaranteed host-*visible*, not host-*coherent* -- see the FlushMapped
+  // comment near the top of this file).
   {
     if (!rex::ui::vulkan::util::CreateDedicatedAllocationBuffer(
             vulkan_device, kSharedMemorySize, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
             rex::ui::vulkan::util::MemoryPurpose::kUpload, shared_memory_buffer_,
-            shared_memory_memory_)) {
+            shared_memory_memory_, &shared_memory_memory_type_)) {
       REXGPU_ERROR("NativeCommandProcessor: failed to create the shared memory buffer");
       return false;
     }
@@ -741,6 +774,13 @@ NativeCommandProcessor::TranslatedShader* NativeCommandProcessor::GetOrTranslate
   auto shader = std::make_unique<Shader>(type, key, ucode.data(), ucode.size(), std::endian::big);
   rex::string::StringBuffer disasm_buffer;
   shader->AnalyzeUcode(disasm_buffer);
+  static uint32_t disasm_logged = 0;
+  if (disasm_logged < 6) {
+    ++disasm_logged;
+    REXGPU_INFO("NativeCommandProcessor: shader disasm ({} dwords, type={}):\n{}", ucode.size(),
+               type == rex::graphics::xenos::ShaderType::kVertex ? "vertex" : "pixel",
+               shader->ucode_disassembly());
+  }
 
   auto program_cntl = registers_.Get<rex::graphics::reg::SQ_PROGRAM_CNTL>();
   uint32_t num_reg = type == rex::graphics::xenos::ShaderType::kVertex ? program_cntl.vs_num_reg
@@ -792,6 +832,7 @@ bool NativeCommandProcessor::UploadTexelsAndTransition(VkImage image, uint32_t w
   void* mapped = nullptr;
   dfn.vkMapMemory(device, staging_memory, 0, data_size, 0, &mapped);
   std::memcpy(mapped, rgba_data, data_size);
+  FlushMapped(vulkan_device, staging_memory);
   dfn.vkUnmapMemory(device, staging_memory);
 
   VkCommandBuffer upload_cmd;
@@ -1139,6 +1180,21 @@ VkPipeline NativeCommandProcessor::GetOrCreatePipeline(TranslatedShader* vertex_
   raster.cullMode = VK_CULL_MODE_NONE;
   raster.frontFace = VK_FRONT_FACE_COUNTER_CLOCKWISE;
   raster.lineWidth = 1.0f;
+  // Depth clamp instead of the default Vulkan behavior of clipping primitives
+  // whose Z falls outside [0,1] after the W-divide: real Xenos GPUs don't
+  // truly clip like that either (see draw_util::GetHostViewportInfo's
+  // comments on WARP vs. real hardware), and our screen-space "clip
+  // disabled" system-constants path (see TryDraw) doesn't attempt to
+  // constrain Z into a valid range at all -- without this, a Z value outside
+  // [0,1] silently discards the whole primitive instead of just drawing with
+  // an out-of-range depth, which was indistinguishable from "nothing
+  // rendered" in earlier testing. Matches the real Vulkan backend's own
+  // condition (pipeline_cache.cpp: depthClamp feature available && guest
+  // clip_disable) rather than always requesting it.
+  raster.depthClampEnable = (provider_->vulkan_device()->properties().depthClamp &&
+                            registers_.Get<rex::graphics::reg::PA_CL_CLIP_CNTL>().clip_disable)
+                               ? VK_TRUE
+                               : VK_FALSE;
 
   VkPipelineMultisampleStateCreateInfo multisample{};
   multisample.sType = VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO;
@@ -1204,6 +1260,9 @@ void NativeCommandProcessor::UpdateSharedMemory(uint32_t guest_address_dwords,
   const void* guest_ptr = rex::system::kernel_state()->memory()->TranslatePhysical<const void*>(
       uint32_t(byte_offset));
   std::memcpy(shared_memory_mapped_ + byte_offset, guest_ptr, byte_size);
+  rex::ui::vulkan::util::FlushMappedMemoryRange(provider_->vulkan_device(), shared_memory_memory_,
+                                                shared_memory_memory_type_, byte_offset,
+                                                kSharedMemorySize, byte_size);
 }
 
 void NativeCommandProcessor::EnsureFrameBegun() {
@@ -1351,6 +1410,74 @@ void NativeCommandProcessor::TryDraw(rex::graphics::xenos::PrimitiveType prim_ty
     rex::graphics::xenos::xe_gpu_vertex_fetch_t fetch =
         registers_.GetVertexFetch(binding.fetch_constant);
     UpdateSharedMemory(fetch.address, fetch.size);
+
+    // TEMPORARY diagnostic: overwrite draw#2's vertex data (known to be a
+    // 2-float-per-vertex, stride=2 rect-list shader per the disasm log) with
+    // a hand-constructed full-screen-covering triangle, to isolate whether
+    // the Vulkan draw/present plumbing itself works at all when fed
+    // known-good data, independent of whether the guest's actual vertex
+    // data/interpretation is correct.
+    if (draws_logged_ == 2) {
+      float debug_verts[6] = {0.0f, 0.0f, 1280.0f, 0.0f, 0.0f, 720.0f};
+      uint64_t byte_offset = uint64_t(fetch.address) * 4;
+      uint8_t* dst = shared_memory_mapped_ + byte_offset;
+      for (int i = 0; i < 6; ++i) {
+        uint32_t bits;
+        std::memcpy(&bits, &debug_verts[i], 4);
+        bits = rex::byte_swap(bits);
+        std::memcpy(dst + i * 4, &bits, 4);
+      }
+      rex::ui::vulkan::util::FlushMappedMemoryRange(provider_->vulkan_device(),
+                                                    shared_memory_memory_,
+                                                    shared_memory_memory_type_, byte_offset,
+                                                    kSharedMemorySize, sizeof(debug_verts));
+      REXGPU_INFO("NativeCommandProcessor: DEBUG overrode draw#2 vertex data with a known triangle");
+    }
+
+    // Same experiment as draw#2's override above, but for the first
+    // kQuadList draw (draw#6, stride=8 dwords/vertex per its disasm log):
+    // isolates whether a *quad-list* draw (a simpler host-side index
+    // synthesis than rect-list's edge-length/barycentric shader logic)
+    // renders when fed known-good full-screen-covering data.
+    if (draws_logged_ == 6) {
+      float quad_verts[4][3] = {
+          {0.0f, 0.0f, 0.5f}, {1280.0f, 0.0f, 0.5f}, {1280.0f, 720.0f, 0.5f}, {0.0f, 720.0f, 0.5f}};
+      uint64_t byte_offset = uint64_t(fetch.address) * 4;
+      uint8_t* dst = shared_memory_mapped_ + byte_offset;
+      constexpr uint32_t kStrideDwords = 8;
+      for (int v = 0; v < 4; ++v) {
+        for (int c = 0; c < 3; ++c) {
+          uint32_t bits;
+          std::memcpy(&bits, &quad_verts[v][c], 4);
+          bits = rex::byte_swap(bits);
+          std::memcpy(dst + (v * kStrideDwords + c) * 4, &bits, 4);
+        }
+      }
+      rex::ui::vulkan::util::FlushMappedMemoryRange(
+          provider_->vulkan_device(), shared_memory_memory_, shared_memory_memory_type_,
+          byte_offset, kSharedMemorySize, 4 * kStrideDwords * 4);
+      REXGPU_INFO("NativeCommandProcessor: DEBUG overrode draw#6 vertex data with a known quad");
+    }
+
+    static uint32_t vfetch_logged = 0;
+    if (vfetch_logged < 10) {
+      ++vfetch_logged;
+      uint32_t address = fetch.address;
+      uint32_t size = fetch.size;
+      const uint32_t* raw_verts = rex::system::kernel_state()->memory()->TranslatePhysical<uint32_t*>(
+          address * 4);
+      float v[8];
+      for (int i = 0; i < 8; ++i) {
+        uint32_t dword = rex::memory::load_and_swap<uint32_t>(
+            reinterpret_cast<const uint8_t*>(raw_verts) + i * 4);
+        std::memcpy(&v[i], &dword, 4);
+      }
+      REXGPU_INFO(
+          "NativeCommandProcessor: vfetch draw#{} fetch_constant={} address={:08X} size={} "
+          "type={} first8floats=({:.2f},{:.2f},{:.2f},{:.2f},{:.2f},{:.2f},{:.2f},{:.2f})",
+          draws_logged_, binding.fetch_constant, address, size,
+          static_cast<uint32_t>(fetch.type), v[0], v[1], v[2], v[3], v[4], v[5], v[6], v[7]);
+    }
   }
 
   const rex::ui::vulkan::VulkanDevice* vulkan_device = provider_->vulkan_device();
@@ -1387,6 +1514,7 @@ void NativeCommandProcessor::TryDraw(rex::graphics::xenos::PrimitiveType prim_ty
     void* mapped = nullptr;
     dfn.vkMapMemory(device, memory, 0, size, 0, &mapped);
     std::memcpy(mapped, data, size);
+    FlushMapped(vulkan_device, memory);
     dfn.vkUnmapMemory(device, memory);
     frame_transient_buffers_.push_back({buffer, memory});
 
@@ -1401,14 +1529,111 @@ void NativeCommandProcessor::TryDraw(rex::graphics::xenos::PrimitiveType prim_ty
     dfn.vkUpdateDescriptorSets(device, 1, &write, 0, nullptr);
   };
 
-  // System constants: zeroed except the minimum for a simple opaque draw
-  // with no guest viewport remap -- see spirv_translator.h's SystemConstants
-  // and command_processor.cpp's UpdateSystemConstantValues for the full
-  // real-backend population this approximates.
+  // System constants: derived from the real PA_CL_VTE_CNTL/PA_CL_CLIP_CNTL/
+  // viewport registers instead of a hardcoded identity guess (which left
+  // every draw rasterizing nothing -- the guest's actual vtx_xy_fmt/viewport
+  // state controls whether vertex shader output is already in NDC/pixel
+  // space or needs the W-divide+viewport-scale path, and getting this wrong
+  // pushes every vertex outside the clip volume). Replicates the two
+  // branches of draw_util::GetHostViewportInfo
+  // (rexglue-sdk/src/graphics/util/draw.cpp) at reduced generality (no
+  // resolution scaling, no depth-range remapping, no MSAA) -- that function
+  // itself isn't callable directly, since draw.cpp also pulls in the
+  // plugin-only TextureCache/TraceWriter headers this renderer deliberately
+  // doesn't link.
   SpirvShaderTranslator::SystemConstants system_constants{};
-  system_constants.flags = uint32_t(1) << SpirvShaderTranslator::kSysFlag_XYDividedByW_Shift;
-  system_constants.ndc_scale[0] = system_constants.ndc_scale[1] = system_constants.ndc_scale[2] =
-      1.0f;
+  {
+    auto pa_cl_clip_cntl = registers_.Get<rex::graphics::reg::PA_CL_CLIP_CNTL>();
+    auto pa_cl_vte_cntl = registers_.Get<rex::graphics::reg::PA_CL_VTE_CNTL>();
+    auto pa_su_sc_mode_cntl = registers_.Get<rex::graphics::reg::PA_SU_SC_MODE_CNTL>();
+    auto pa_su_vtx_cntl = registers_.Get<rex::graphics::reg::PA_SU_VTX_CNTL>();
+
+    if (pa_cl_vte_cntl.vtx_xy_fmt) {
+      system_constants.flags |= SpirvShaderTranslator::kSysFlag_XYDividedByW;
+    }
+    if (pa_cl_vte_cntl.vtx_z_fmt) {
+      system_constants.flags |= SpirvShaderTranslator::kSysFlag_ZDividedByW;
+    }
+    if (pa_cl_vte_cntl.vtx_w0_fmt) {
+      system_constants.flags |= SpirvShaderTranslator::kSysFlag_WNotReciprocal;
+    }
+    if (!is_rect_list) {
+      // kQuadList/standard triangle topologies are polygonal; kRectangleList
+      // isn't (matches command_processor.cpp's primitive_polygonal check).
+      system_constants.flags |= SpirvShaderTranslator::kSysFlag_PrimitivePolygonal;
+    }
+
+    float scale_xy[2] = {
+        pa_cl_vte_cntl.vport_x_scale_ena
+            ? registers_.Get<float>(rex::graphics::XE_GPU_REG_PA_CL_VPORT_XSCALE)
+            : 1.0f,
+        pa_cl_vte_cntl.vport_y_scale_ena
+            ? registers_.Get<float>(rex::graphics::XE_GPU_REG_PA_CL_VPORT_YSCALE)
+            : 1.0f,
+    };
+    float scale_z = pa_cl_vte_cntl.vport_z_scale_ena
+                        ? registers_.Get<float>(rex::graphics::XE_GPU_REG_PA_CL_VPORT_ZSCALE)
+                        : 1.0f;
+    float offset_xy[2] = {
+        pa_cl_vte_cntl.vport_x_offset_ena
+            ? registers_.Get<float>(rex::graphics::XE_GPU_REG_PA_CL_VPORT_XOFFSET)
+            : 0.0f,
+        pa_cl_vte_cntl.vport_y_offset_ena
+            ? registers_.Get<float>(rex::graphics::XE_GPU_REG_PA_CL_VPORT_YOFFSET)
+            : 0.0f,
+    };
+    float offset_z = pa_cl_vte_cntl.vport_z_offset_ena
+                         ? registers_.Get<float>(rex::graphics::XE_GPU_REG_PA_CL_VPORT_ZOFFSET)
+                         : 0.0f;
+
+    float offset_add_xy[2] = {0.0f, 0.0f};
+    if (pa_su_sc_mode_cntl.vtx_window_offset_enable) {
+      auto pa_sc_window_offset = registers_.Get<rex::graphics::reg::PA_SC_WINDOW_OFFSET>();
+      offset_add_xy[0] += float(pa_sc_window_offset.window_x_offset);
+      offset_add_xy[1] += float(pa_sc_window_offset.window_y_offset);
+    }
+    if (pa_su_vtx_cntl.pix_center == rex::graphics::xenos::PixelCenter::kD3DZero) {
+      offset_add_xy[0] += 0.5f;
+      offset_add_xy[1] += 0.5f;
+    }
+
+    if (pa_cl_clip_cntl.clip_disable) {
+      // Screen-space draws (the common case for 2D UI/intro content):
+      // vertex shader output is treated directly as pixel coordinates, no
+      // host clipping -- map [0, extent] pixels to [-1, 1] NDC ourselves.
+      for (uint32_t i = 0; i < 2; ++i) {
+        float extent = i ? float(kColorTargetHeight) : float(kColorTargetWidth);
+        float pixels_to_ndc = 2.0f / extent;
+        system_constants.ndc_scale[i] = scale_xy[i] * pixels_to_ndc;
+        system_constants.ndc_offset[i] =
+            (offset_xy[i] - extent * 0.5f + offset_add_xy[i]) * pixels_to_ndc;
+      }
+      system_constants.ndc_scale[2] = scale_z;
+      system_constants.ndc_offset[2] = offset_z;
+    } else {
+      // Clipping enabled (regular 3D-style draws): the host viewport is
+      // fixed at the full color target, so ndc_scale/offset only need to
+      // carry the guest viewport scale/offset themselves (already
+      // normalized -1..1 input), no extra pixel remap.
+      system_constants.ndc_scale[0] = scale_xy[0];
+      system_constants.ndc_scale[1] = scale_xy[1];
+      system_constants.ndc_scale[2] = scale_z;
+      system_constants.ndc_offset[0] = offset_xy[0];
+      system_constants.ndc_offset[1] = offset_xy[1];
+      system_constants.ndc_offset[2] = offset_z;
+    }
+    static uint32_t logged = 0;
+    if (logged < 10) {
+      ++logged;
+      REXGPU_INFO(
+          "NativeCommandProcessor: sysconst draw#{} clip_cntl={:08X} vte_cntl={:08X} "
+          "flags={:08X} scale=({:.3f},{:.3f},{:.3f}) offset=({:.3f},{:.3f},{:.3f})",
+          draws_logged_, pa_cl_clip_cntl.value, pa_cl_vte_cntl.value, system_constants.flags,
+          system_constants.ndc_scale[0], system_constants.ndc_scale[1],
+          system_constants.ndc_scale[2], system_constants.ndc_offset[0],
+          system_constants.ndc_offset[1], system_constants.ndc_offset[2]);
+    }
+  }
   upload_constant_buffer(&system_constants, sizeof(system_constants),
                          SpirvShaderTranslator::kConstantBufferSystem);
 
@@ -1492,6 +1717,7 @@ void NativeCommandProcessor::TryDraw(rex::graphics::xenos::PrimitiveType prim_ty
     void* mapped = nullptr;
     dfn.vkMapMemory(device, index_memory, 0, index_buffer_size, 0, &mapped);
     std::memcpy(mapped, indices.data(), index_buffer_size);
+    FlushMapped(vulkan_device, index_memory);
     dfn.vkUnmapMemory(device, index_memory);
     frame_transient_buffers_.push_back({index_buffer, index_memory});
 
@@ -1551,6 +1777,85 @@ void NativeCommandProcessor::TryDraw(rex::graphics::xenos::PrimitiveType prim_ty
         "is_rect_list={})",
         num_indices, is_quad_list, is_rect_list);
   }
+}
+
+void NativeCommandProcessor::DebugDumpColorTarget() {
+  const rex::ui::vulkan::VulkanDevice* vulkan_device = provider_->vulkan_device();
+  const rex::ui::vulkan::VulkanDevice::Functions& dfn = vulkan_device->functions();
+  VkDevice device = vulkan_device->device();
+
+  VkBuffer readback_buffer;
+  VkDeviceMemory readback_memory;
+  if (!rex::ui::vulkan::util::CreateDedicatedAllocationBuffer(
+          vulkan_device, color_target_staging_size_, VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+          rex::ui::vulkan::util::MemoryPurpose::kReadback, readback_buffer, readback_memory)) {
+    REXGPU_ERROR("NativeCommandProcessor: debug dump failed to allocate a readback buffer");
+    return;
+  }
+
+  VkCommandBuffer cmd;
+  VkCommandBufferAllocateInfo alloc_info{};
+  alloc_info.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
+  alloc_info.commandPool = command_pool_;
+  alloc_info.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+  alloc_info.commandBufferCount = 1;
+  if (dfn.vkAllocateCommandBuffers(device, &alloc_info, &cmd) == VK_SUCCESS) {
+    VkCommandBufferBeginInfo begin_info{};
+    begin_info.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+    begin_info.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+    dfn.vkBeginCommandBuffer(cmd, &begin_info);
+    VkBufferCopy copy{0, 0, color_target_staging_size_};
+    dfn.vkCmdCopyBuffer(cmd, color_target_staging_buffer_, readback_buffer, 1, &copy);
+    dfn.vkEndCommandBuffer(cmd);
+
+    VkFenceCreateInfo fence_info{};
+    fence_info.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO;
+    VkFence fence = VK_NULL_HANDLE;
+    if (dfn.vkCreateFence(device, &fence_info, nullptr, &fence) == VK_SUCCESS) {
+      VkSubmitInfo submit_info{};
+      submit_info.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+      submit_info.commandBufferCount = 1;
+      submit_info.pCommandBuffers = &cmd;
+      rex::ui::vulkan::VulkanDevice::Queue::Acquisition queue =
+          vulkan_device->AcquireQueue(vulkan_device->queue_family_graphics_compute(), 0);
+      if (dfn.vkQueueSubmit(queue.queue(), 1, &submit_info, fence) == VK_SUCCESS) {
+        constexpr uint64_t kFenceTimeoutNs = 5'000'000'000ull;
+        dfn.vkWaitForFences(device, 1, &fence, VK_TRUE, kFenceTimeoutNs);
+      }
+      dfn.vkDestroyFence(device, fence, nullptr);
+    }
+    // Leaked, same rationale as UploadTexelsAndTransition -- vkFreeCommandBuffers
+    // isn't in this SDK's exposed Vulkan function table, and this is temporary
+    // debug code capped at 3 dumps for the process lifetime.
+  }
+
+  void* mapped = nullptr;
+  if (dfn.vkMapMemory(device, readback_memory, 0, color_target_staging_size_, 0, &mapped) ==
+      VK_SUCCESS) {
+    // CPU reading GPU-written memory needs an invalidate, not a flush (the
+    // opposite direction from FlushMapped's writes) -- otherwise the CPU may
+    // read a stale cached copy on non-coherent memory types.
+    VkMappedMemoryRange range{};
+    range.sType = VK_STRUCTURE_TYPE_MAPPED_MEMORY_RANGE;
+    range.memory = readback_memory;
+    range.offset = 0;
+    range.size = VK_WHOLE_SIZE;
+    dfn.vkInvalidateMappedMemoryRanges(device, 1, &range);
+    char path[256];
+    std::snprintf(path, sizeof(path), "logs/debug_color_target_%u_%ux%u_a2b10g10r10.raw",
+                 debug_frames_dumped_, kColorTargetWidth, kColorTargetHeight);
+    FILE* f = std::fopen(path, "wb");
+    if (f) {
+      std::fwrite(mapped, 1, color_target_staging_size_, f);
+      std::fclose(f);
+      REXGPU_INFO("NativeCommandProcessor: debug-dumped color target to {}", path);
+    }
+    dfn.vkUnmapMemory(device, readback_memory);
+  }
+  ++debug_frames_dumped_;
+
+  dfn.vkDestroyBuffer(device, readback_buffer, nullptr);
+  dfn.vkFreeMemory(device, readback_memory, nullptr);
 }
 
 void NativeCommandProcessor::PresentFrame() {
@@ -1706,6 +2011,10 @@ void NativeCommandProcessor::PresentFrame() {
           logged_first_present = true;
           REXGPU_INFO("NativeCommandProcessor: first frame presented (had_draws={})",
                       frame_has_draws_);
+        }
+
+        if (frame_has_draws_ && debug_frames_dumped_ < 3) {
+          DebugDumpColorTarget();
         }
 
         return true;

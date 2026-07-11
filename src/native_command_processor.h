@@ -207,6 +207,7 @@ class NativeCommandProcessor {
   static constexpr VkDeviceSize kSharedMemorySize = 0x20000000;  // 512 MB
   VkBuffer shared_memory_buffer_ = VK_NULL_HANDLE;
   VkDeviceMemory shared_memory_memory_ = VK_NULL_HANDLE;
+  uint32_t shared_memory_memory_type_ = 0;
   uint8_t* shared_memory_mapped_ = nullptr;
 
   static constexpr uint32_t kColorTargetWidth = 1280;
@@ -227,6 +228,14 @@ class NativeCommandProcessor {
   VkDeviceSize color_target_staging_size_ = 0;
   VkBuffer color_target_staging_buffer_ = VK_NULL_HANDLE;
   VkDeviceMemory color_target_staging_memory_ = VK_NULL_HANDLE;
+
+  // Temporary debug aid: dumps the first few presented frames' color target
+  // to a raw RGBA file under logs/, so pixel content can be inspected
+  // without a display (e.g. from a headless CI-like run). Not gated behind
+  // a cvar -- intended to be removed once on-screen output is confirmed
+  // working, not a permanent feature.
+  uint32_t debug_frames_dumped_ = 0;
+  void DebugDumpColorTarget();
 
   // A garbage-decoded draw's shader ucode (see native-renderer-headless-boot.md,
   // Phase 3 "Next" item 1) hashes differently on every resubmit, so it never

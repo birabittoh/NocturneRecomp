@@ -1007,11 +1007,182 @@ Pixel-level correctness of the sampled output wasn't visually confirmed in
 this pass (no interactive screenshot taken), and most of the dumped textures
 are still `k_DXT4_5` and therefore still rejected — see "Next".
 
+### Milestone 3b step 8 (in progress): the "blue screen" investigation — real draws still rasterize nothing
+
+After step 7, the user reported the game window still shows only the flat
+clear color, never any of the intro's actual geometry, despite the log
+showing real draws/pipelines/textures all succeeding. This step is a deep
+dive into why, and ends with real fixes plus a still-open root cause.
+
+**Two real bugs found and fixed:**
+
+1. **Missing explicit memory flushes.** Every host-visible buffer this
+   renderer writes via `memcpy` (the persistent shared-memory SSBO in
+   `UpdateSharedMemory`, per-draw constant buffers, synthesized index
+   buffers, texture staging buffers) was never explicitly flushed.
+   `rex::ui::vulkan::util::MemoryPurpose::kUpload` only guarantees
+   host-*visible* memory, not host-*coherent* — `ChooseHostMemoryType`
+   (`sdk/include/rex/ui/vulkan/util.h`) picks by cached/uncached preference
+   and never checks the coherent bit. Added `FlushMapped` (a small
+   `vkFlushMappedMemoryRanges` helper, whole-range for the short-lived
+   per-draw buffers) and switched the persistent shared-memory buffer to the
+   SDK's own `rex::ui::vulkan::util::FlushMappedMemoryRange` (which handles
+   `nonCoherentAtomSize` alignment correctly for a sub-range flush, needed
+   since that buffer is 512 MB and can't be whole-range-flushed every draw).
+   The debug-readback path added below also needed the opposite direction
+   (`vkInvalidateMappedMemoryRanges` before a CPU read of GPU-written
+   memory), also missing before. **On this specific NVIDIA GPU this turned
+   out to be a no-op** (confirmed via `debugClamp`-style testing — see
+   below) — host-visible memory types on this device are actually coherent
+   — but it's a real, previously-silent correctness bug worth having fixed
+   regardless, and may matter on other GPUs/drivers.
+2. **`SystemConstants` were a hardcoded, wrong approximation.** The
+   original milestone 3b step 3 code set `ndc_scale = (1,1,1)`,
+   `flags = kSysFlag_XYDividedByW` unconditionally, regardless of what the
+   guest's actual `PA_CL_VTE_CNTL`/`PA_CL_CLIP_CNTL`/viewport registers said.
+   Replaced with real register-driven values in `TryDraw`
+   (`native_command_processor.cpp`), replicating (at reduced generality — no
+   resolution scaling, no MSAA) the two branches of
+   `draw_util::GetHostViewportInfo` (`rexglue-sdk/src/graphics/util/draw.cpp`)
+   — that function itself isn't callable directly since `draw.cpp` also
+   pulls in the plugin-only `TextureCache`/`TraceWriter` headers this
+   renderer deliberately doesn't link. Also fixed
+   `kSysFlag_ZDividedByW`/`kSysFlag_WNotReciprocal`/`kSysFlag_PrimitivePolygonal`
+   to be register/topology-driven instead of omitted. Confirmed via logging
+   (`sysconst draw#N ...`) that the intro's actual draws decode as
+   `clip_disable=1` (the "screen-space UI quad" case) with a computed
+   pixel→NDC transform that, checked by hand against the guest's actual
+   vertex data (also logged), is mathematically correct — e.g. a `draw#2`
+   full-screen rect-list quad's three vertices `(-0.5,-0.5)`,
+   `(1279.5,-0.5)`, `(1279.5,719.5)` map to almost exactly `(-1,-1)`,
+   `(1,-1)`, `(1,1)` NDC.
+
+**New tooling: a real screenshot-equivalent debug capture**
+(`NativeCommandProcessor::DebugDumpColorTarget`,
+`native_command_processor.{h,cpp}`) — reads back the offscreen color target
+to a raw RGBA (`A2B10G10R10_UNORM_PACK32`) file under `logs/` for the first 3
+presented frames with real draws, via a one-shot readback buffer + explicit
+`vkInvalidateMappedMemoryRanges`. Converted to PNG for inspection with a
+small numpy/PIL script (not checked in — ad hoc per session). **This is how
+the investigation below was actually driven**, instead of guessing from
+source review alone: it gave a ground-truth answer to "did anything actually
+change on screen" independent of what the log claims. Gated to 3 dumps,
+harmless to leave in, but should eventually be removed or made
+`REXCVAR`-gated once the root cause is fixed and this stops being needed
+every session.
+
+**Decisive finding: even hand-injected, provably-correct vertex data
+produces zero rasterized pixels.** After the two fixes above didn't change
+the outcome, temporary debug code was added directly in `TryDraw` (still in
+the tree, guarded by `draws_logged_ == 2` / `== 6`, clearly marked
+`// TEMPORARY diagnostic` — **should be removed once the real bug is
+found**) that overwrites the guest's actual vertex data in shared memory
+with a hand-constructed, full-screen-covering triangle (for a rect-list
+draw) and quad (for a quad-list draw) just before the draw executes,
+bypassing any question of whether the *guest's* data or *this renderer's
+interpretation* of it is correct. **Neither test produced any visible
+pixels** in the debug dump, across two different shader-side code paths
+(rect-list's `IsSpirvRectangleListVertexLoopEnabled()` GLSL-loop
+reconstruction vs. quad-list's plain host-synthesized-index path). This
+rules out: vertex/NDC math, guest data decode correctness, and anything
+primitive-topology-specific. The failure is generic, downstream of "a
+correctly-created pipeline was fed indisputably-correct vertex data."
+
+**Structural comparison against the real Vulkan backend, audited by hand,
+found no smoking gun:** descriptor set/binding indices for the 5 constant
+buffers (`kConstantBufferSystem`=0 through `kConstantBufferFetch`=4, matches
+`command_processor.cpp`'s `constants_binding.binding = i` exactly); shared
+storage-buffer binding count (`SpirvShaderTranslator::
+GetSharedMemoryStorageBufferCountLog2` — logged as
+`max_storage_buffer_range=4294967295 shared_memory_binding_count=1`,
+confirming the single-buffer setup in `InitializePipelineResources` is
+correct for this device, not an array-of-N mismatch); `vkCmdBindDescriptorSets`
+happens after (not before) the corresponding `vkUpdateDescriptorSets` calls
+in code order (irrelevant to correctness per spec — GPU reads descriptor
+contents at submission, not recording — but checked anyway); rectangle-list
+vertex index decode (`primitive_index = gl_VertexIndex>>2`,
+`vertex_in_primitive = gl_VertexIndex&3`) matches the synthesized index
+buffer scheme in `TryDraw`'s `draw_with_synthesized_indices`. Also
+investigated and ruled out: `depthClampEnable` (this device's
+`VkPhysicalDeviceFeatures.depthClamp` is `false`, so the fix attempted here
+is a no-op — moot, not a real candidate on this GPU).
+
+**Not yet available: Vulkan validation layers.** Passing
+`--vulkan_validation_enabled=true` (a real cvar,
+`rexglue-sdk/src/ui/vulkan/vulkan_provider.cpp`) produced no validation
+output at all — `VK_LAYER_KHRONOS_validation` isn't installed on this
+machine, only vendor/overlay layers (NV Optimus, OBS hook) are present. This
+is the natural tool for "pipeline looks right on paper but silently does the
+wrong thing" bugs and hasn't been tried yet.
+
+**New tooling for next session: a working `renderdoc-mcp` server.**
+Installed [Linkingooo/renderdoc-mcp](https://github.com/Linkingooo/renderdoc-mcp)
+(cloned to `../.tools/renderdoc-mcp` — sibling of this repo, not inside it) —
+but the scoop-installed RenderDoc (and even the official renderdoc.org
+Windows zip/installer) **does not ship `renderdoc.pyd`**, confirmed against
+RenderDoc's own docs: it's only generated by source builds, "not included in
+distributed builds," and explicitly called out as "not supported" as a
+standalone module. Built it from source instead:
+
+- Cloned `baldurk/renderdoc` tag `v1.45` (matching the installed version) to
+  `../.tools/renderdoc`.
+- The repo bundles everything needed for the *default* Python 3.6 build
+  (`qrenderdoc/3rdparty/python`, `qrenderdoc/3rdparty/swig`) — no external
+  SWIG/Python install needed for that path.
+- Built `qrenderdoc/Code/pyrenderdoc/pyrenderdoc_module.vcxproj` directly via
+  MSBuild (not the full `renderdoc.sln`, which pulls in every IHV/driver
+  project and Qt) with `-p:PlatformToolset=v143` (repo targets VS2015's
+  v140, only VS2022 Build Tools are installed here) — this produced a
+  Python-3.6-ABI `renderdoc.pyd`, confirmed working
+  (`import renderdoc; renderdoc.GetVersionString()` → `1.45`) against a
+  freshly-installed Python 3.6.8 (`C:\Python36`, installed standalone,
+  `PrependPath=0` so it doesn't affect the system default).
+- **But the `mcp` Python SDK package requires Python ≥3.10 at every released
+  version back to 0.9.1** — no version supports 3.6, so `renderdoc-mcp`
+  cannot run under the 3.6 interpreter its own `renderdoc.pyd` needs.
+  Resolved by rebuilding the module a second time against the *system*
+  Python 3.12 instead: `pyrenderdoc_module.vcxproj`'s `python.props` supports
+  a custom Python via the `RENDERDOC_PYTHON_PREFIX64` environment variable
+  (checks `include\Python.h` + `pythonMAJMIN.zip` + `libs\pythonMAJMIN.lib`
+  existence; the `.zip` only needs to *exist* for this build-time check, an
+  empty placeholder is fine — it's not what's loaded at runtime once a real
+  `python.exe` is doing the importing). Set up
+  `../.tools/py312_override/{include/,libs/python312.lib,python312.zip}`
+  copied/touched from the system `C:\Python312` install, rebuilt with
+  `RENDERDOC_PYTHON_PREFIX64` set — MSBuild confirmed
+  `Built against python from ...py312_override`, and the resulting
+  `renderdoc.pyd` imports cleanly under plain `python` (3.12).
+- Runtime files (`renderdoc.pyd` + `renderdoc.dll`, the pyd's own
+  dependency) live in `../.tools/renderdoc_runtime/` — a small directory
+  built just for this, not the full build output tree.
+- Registered via `claude mcp add renderdoc -e RENDERDOC_MODULE_PATH="...\renderdoc_runtime" -- python -m renderdoc_mcp`
+  (project-local scope) — confirmed `claude mcp list` shows it Connected.
+  MCP tools only load at the start of a session, so it wasn't usable within
+  the session that set it up; the next session should have `renderdoc-mcp`
+  tools available directly.
+
 ## Next
 
 In rough order of what unblocks visible output soonest:
 
-1. **`k_DXT4_5` support (block decompression + tiling).** Confirmed via
+1. **Use `renderdoc-mcp` to find the "nothing rasterizes" root cause.**
+   Capture a frame from `nocturnerecomp.exe` (RenderDoc's inject/capture
+   wrapper — `renderdoccmd.exe capture` or launching under `qrenderdoc.exe`,
+   both available at `C:\Users\<user>\scoop\apps\renderdoc\current`), open
+   the `.rdc` via the new MCP tools, and inspect the actual pipeline state
+   and post-vertex-shader output for one of the early draws (`draw#1`/`#2`
+   are simplest — small shaders, already-understood vertex layout). This is
+   the highest-leverage next step: step 8's investigation exhausted what
+   paper-auditing against the real backend's source could find, and proved
+   (via hand-injected known-good vertex data) that the bug is generic
+   Vulkan-plumbing-level, not shader/data-specific — exactly the class of
+   bug RenderDoc's mesh viewer and pipeline state inspector are built to
+   surface directly instead of by inference. Once found, **remove the
+   `TEMPORARY diagnostic` vertex-data-override blocks and the verbose
+   per-draw disasm/vfetch/sysconst logging** added during this
+   investigation (all clearly marked in `native_command_processor.cpp`) —
+   they were debugging aids, not permanent features.
+2. **`k_DXT4_5` support (block decompression + tiling).** Confirmed via
    `dumps/textures/` to be the dominant format in the intro's actual content
    (majority of the 22 dumped textures), and it's tiled with packed mips in
    the observed fetch constant, so this needs both a DXT5/BC3 block decode
@@ -1019,8 +1190,10 @@ In rough order of what unblocks visible output soonest:
    natively as `VK_FORMAT_BC3_UNORM_BLOCK` if the device supports it) and
    real tiled-address math via `texture_util::GetTiledOffset2D`/
    `GetGuestTextureLayout` (already linked, not yet called) instead of the
-   linear-row assumption the current three supported formats use.
-2. **Pathological shader translation time — stall now bounded, root cause
+   linear-row assumption the current three supported formats use. Blocked
+   behind item 1 — no point getting texture data right while nothing
+   rasterizes at all.
+3. **Pathological shader translation time — stall now bounded, root cause
    still open.** One specific garbage-decoded draw's shader ucode makes
    `SpirvShaderTranslator`/`vkCreateGraphicsPipelines` take roughly 20
    seconds *per occurrence*, and it recurs repeatedly (the guest appears to
@@ -1030,7 +1203,8 @@ In rough order of what unblocks visible output soonest:
    same draw's "guest_address"/size decode is itself garbage/unstable across
    resubmits) is unfixed — worth chasing directly since it also affects
    draw/texture-fetch reliability elsewhere.
-3. **`SystemConstants`/viewport correctness pass**: wire up real
-   viewport/render-target-format/blend state from the register file instead
-   of the current mostly-zeroed approximation — needed for correct
-   positioning/colors once something actually draws.
+4. **Remaining `SystemConstants` fields** (point sprite sizing, user clip
+   planes, alpha test, gamma conversion, EDRAM/poly-offset fields) are still
+   zeroed/default — fine for now since step 8 confirmed the fields that
+   matter for basic 2D UI positioning are correct, but will need real values
+   once more complex draws (3D gameplay, not just intro UI) are reached.
