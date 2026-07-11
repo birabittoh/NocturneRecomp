@@ -619,6 +619,18 @@ NativeCommandProcessor::TranslatedShader* NativeCommandProcessor::GetOrTranslate
     return &existing->second;
   }
 
+  if (shader_cache_.size() >= kMaxShaderCacheEntries) {
+    if (!shader_cache_limit_logged_) {
+      shader_cache_limit_logged_ = true;
+      REXGPU_ERROR(
+          "NativeCommandProcessor: shader cache exceeded {} distinct entries; skipping further "
+          "translations (likely a garbage-decoded shader rehashing every resubmit -- see "
+          "docs/native-renderer-headless-boot.md Phase 3 'Next' item 1)",
+          kMaxShaderCacheEntries);
+    }
+    return nullptr;
+  }
+
   using rex::graphics::Shader;
   using rex::graphics::SpirvShaderTranslator;
 

@@ -891,21 +891,49 @@ presented frame with real rectangle-list content) wasn't confirmed in this
 step — see the pathological shader translation time gap below, which the
 same test run hit before reaching a clean present.
 
+### Milestone 3b step 6: bound the pathological shader-translation stall
+
+Mitigated (not root-caused) item 1 below: `GetOrTranslateShader`
+(`src/native_command_processor.cpp`) now refuses to translate a *new*
+distinct shader once `shader_cache_` already holds `kMaxShaderCacheEntries`
+(64) entries — logged once via `REXGPU_ERROR("...shader cache exceeded...")`
+and the draw is dropped (same code path as any other unsupported-draw case),
+rather than paying the ~20s `SpirvShaderTranslator`/`vkCreateGraphicsPipelines`
+cost unboundedly. Real intro content only ever needs a handful of distinct
+shaders, so 64 is generous headroom before treating further "new" shaders as
+the known-garbage case. Root cause (why that one draw's ucode/address decode
+is unstable across resubmits) is still open — see item 1 below, now
+re-scoped as "fix the root cause" rather than "stop the stall", since the
+stall itself is now bounded.
+
+Verified via a fresh headless run after redeploying the SDK (the local `sdk/`
+checkout was stale relative to `rexglue-sdk`'s `native` branch and needed
+`deploy-sdk.py` re-run to pick up the glslang/renderdoc install fixes from
+Phase 2/3b step 2): build succeeds, and the log now shows real draws
+executing end-to-end — `NativeCommandProcessor: ready`, multiple
+`created a graphics pipeline` lines (topology=3 and topology=4, i.e. both
+plain and rectangle-list draws), `first real draw issued`, and
+`first frame presented (had_draws=true)` — all within the first second of
+boot, with `XMP: started BGM playlist` still reached normally afterward. The
+shader-cache cap wasn't exercised in this run (didn't hit the pathological
+draw in the ~30s window tested), so it's confirmed as a safe no-op in the
+common case but not yet confirmed to trigger correctly against the
+pathological input itself.
+
 ## Next
 
 In rough order of what unblocks visible output soonest:
 
-1. **Pathological shader translation time** (surfaced in step 4, still hit
-   in step 5's test run): one specific garbage-decoded draw's shader ucode
-   makes `SpirvShaderTranslator`/`vkCreateGraphicsPipelines` take roughly
-   20 seconds *per occurrence* — and it recurs repeatedly (the guest appears
-   to reissue the same corrupt draw in a loop), so a run can spend minutes
-   stalled before reaching a clean present. Likely means the shader cache
-   isn't hitting for this draw (its ucode bytes differ slightly each call,
-   perhaps because the "guest_address" or size being read is itself
-   garbage/unstable) rather than a one-time cost. Either fix the underlying
-   fetch-constant/register decode unreliability (step 1's root cause) or add
-   a more targeted guard/cache strategy than the current size cap.
+1. **Pathological shader translation time — stall now bounded, root cause
+   still open.** One specific garbage-decoded draw's shader ucode makes
+   `SpirvShaderTranslator`/`vkCreateGraphicsPipelines` take roughly 20
+   seconds *per occurrence*, and it recurs repeatedly (the guest appears to
+   reissue the same corrupt draw in a loop). Step 6 above caps total
+   translations so this can no longer stall a run for minutes, but the
+   underlying fetch-constant/register decode unreliability (step 1's root
+   cause: the same draw's "guest_address"/size decode is itself
+   garbage/unstable across resubmits) is unfixed — worth chasing directly
+   next since it also affects draw/texture-fetch reliability elsewhere.
 2. **Texture upload**: decode the texture fetch constant (format, pitch,
    base address, dimensions, tiling), untile guest texture memory, create a
    real `VkImage`/sampler, and populate the (currently hardcoded-empty)

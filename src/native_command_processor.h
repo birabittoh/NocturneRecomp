@@ -165,6 +165,17 @@ class NativeCommandProcessor {
   VkBuffer color_target_staging_buffer_ = VK_NULL_HANDLE;
   VkDeviceMemory color_target_staging_memory_ = VK_NULL_HANDLE;
 
+  // A garbage-decoded draw's shader ucode (see native-renderer-headless-boot.md,
+  // Phase 3 "Next" item 1) hashes differently on every resubmit, so it never
+  // hits shader_cache_ and instead pays SpirvShaderTranslator's ~20s cost
+  // every single time it recurs -- stalling the frame loop for minutes. Real
+  // intro content only ever needs a couple of distinct shaders, so once the
+  // cache grows well past that, treat further *new* shaders as suspect and
+  // skip translating them (draw is dropped, same as any other unsupported
+  // case) rather than paying an unbounded number of ~20s translations.
+  static constexpr size_t kMaxShaderCacheEntries = 64;
+  bool shader_cache_limit_logged_ = false;
+
   std::unordered_map<uint64_t, TranslatedShader> shader_cache_;
   std::unordered_map<uint64_t, VkPipeline> pipeline_cache_;
 
