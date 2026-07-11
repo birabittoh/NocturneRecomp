@@ -188,6 +188,37 @@ class NativeCommandProcessor {
 
   void UpdateSharedMemory(uint32_t guest_address_dwords, uint32_t size_dwords);
 
+  // Memexport support (see docs/native-renderer-headless-boot.md, "Next"
+  // item on the gameplay-preview texture): a shader with eM writes (e.g. a
+  // software-rendered screenshot/preview blit) writes its output directly
+  // into the shared-memory SSBO on the GPU rather than through the normal
+  // color-target/rasterizer path. Since shared_memory_buffer_ is only a
+  // per-draw mirror of guest memory (not the guest's actual backing memory),
+  // those writes have to be explicitly read back and copied into real guest
+  // physical memory once the GPU work that produced them has completed --
+  // unlike a normal draw's output, which the guest never reads back itself.
+  struct PendingMemExportRange {
+    uint32_t base_address_dwords;
+    uint32_t size_bytes;
+  };
+  // Scans a just-analyzed shader's memexport_stream_constants() (only
+  // meaningful if shader->memexport_eM_written()) and appends any ranges it
+  // exports to, reimplemented narrowly from draw_util::AddMemExportRanges
+  // (rexglue-sdk/src/graphics/util/draw.cpp) -- that function isn't callable
+  // directly since draw.cpp also pulls in the plugin-only TextureCache/
+  // TraceWriter headers this renderer deliberately doesn't link, same
+  // reasoning as GetHostViewportInfo/SystemConstants above.
+  void CollectMemExportRanges(const rex::graphics::Shader& shader,
+                              std::vector<PendingMemExportRange>& ranges_out);
+  // Ranges written by memexport-capable draws issued so far in the
+  // *currently recording* frame. Only actually read back once
+  // EnsureFrameBegun's fence wait confirms that frame's GPU work (including
+  // these writes) has completed -- see pending_memexport_ranges_ready_.
+  std::vector<PendingMemExportRange> pending_memexport_ranges_;
+  // The previous frame's ranges, guaranteed complete by the time
+  // EnsureFrameBegun's fence wait returns -- processed there, then cleared.
+  std::vector<PendingMemExportRange> memexport_ranges_ready_for_readback_;
+
   rex::ui::vulkan::VulkanProvider* provider_;
   rex::ui::Presenter* presenter_;
 

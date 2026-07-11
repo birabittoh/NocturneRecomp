@@ -1643,6 +1643,55 @@ void NativeCommandProcessor::UpdateSharedMemory(uint32_t guest_address_dwords,
                                                 kSharedMemorySize, byte_size);
 }
 
+void NativeCommandProcessor::CollectMemExportRanges(
+    const rex::graphics::Shader& shader, std::vector<PendingMemExportRange>& ranges_out) {
+  if (!shader.memexport_eM_written()) {
+    return;
+  }
+  uint32_t float_constants_base =
+      shader.type() == rex::graphics::xenos::ShaderType::kVertex
+          ? registers_.Get<rex::graphics::reg::SQ_VS_CONST>().base
+          : registers_.Get<rex::graphics::reg::SQ_PS_CONST>().base;
+  for (uint32_t constant_index : shader.memexport_stream_constants()) {
+    rex::graphics::xenos::xe_gpu_memexport_stream_t stream =
+        registers_.GetMemExportStream(float_constants_base + constant_index);
+    // Same sanity checks as draw_util::AddMemExportRanges -- the constant
+    // slot may not actually have been set up if the export isn't on the
+    // control-flow path the guest actually took.
+    if (stream.const_0x1 != 0x1 || stream.const_0x4b0 != 0x4B0 || stream.const_0x96 != 0x96 ||
+        !stream.index_count) {
+      continue;
+    }
+    // Narrow scope, matching this file's established pattern elsewhere
+    // (texture formats, primitive types): only the common RGBA8 case is
+    // supported for now (also the only format observed so far -- the
+    // gameplay-preview texture this exists for is itself R8G8B8A8). Anything
+    // else falls back to "not exported", same as an unsupported texture
+    // format falls back to the 1x1 default.
+    if (stream.format != rex::graphics::xenos::ColorFormat::k_8_8_8_8) {
+      static uint32_t skipped_logged = 0;
+      if (skipped_logged < 20) {
+        ++skipped_logged;
+        REXGPU_INFO("NativeCommandProcessor: skipping memexport stream with unsupported format={}",
+                   uint32_t(stream.format));
+      }
+      continue;
+    }
+    uint32_t stream_size_bytes = stream.index_count * 4;
+    bool range_reused = false;
+    for (PendingMemExportRange& range : ranges_out) {
+      if (range.base_address_dwords == stream.base_address) {
+        range.size_bytes = std::max(range.size_bytes, stream_size_bytes);
+        range_reused = true;
+        break;
+      }
+    }
+    if (!range_reused) {
+      ranges_out.push_back({stream.base_address, stream_size_bytes});
+    }
+  }
+}
+
 void NativeCommandProcessor::EnsureFrameBegun() {
   if (frame_active_) {
     return;
@@ -1660,6 +1709,46 @@ void NativeCommandProcessor::EnsureFrameBegun() {
     REXGPU_ERROR("NativeCommandProcessor: timed out waiting for the previous frame's fence");
   }
   dfn.vkResetFences(device, 1, &submit_fence_);
+
+  // pending_memexport_ranges_ was being filled by TryDraw calls throughout
+  // the frame that just got fenced above (not the frame before that -- see
+  // the swap at the end of the previous call to this function), so it's
+  // exactly what's now safe to read back. Swap it into
+  // memexport_ranges_ready_for_readback_ before processing (a plain rename,
+  // not a data-flow change) and clear pending_memexport_ranges_ so this new
+  // frame's TryDraw calls start collecting fresh.
+  memexport_ranges_ready_for_readback_.swap(pending_memexport_ranges_);
+  pending_memexport_ranges_.clear();
+
+  // Any memexport writes issued last frame are now guaranteed complete (the
+  // fence wait above is exactly what makes that true) -- read them back out
+  // of the shared-memory mirror and copy them into real guest physical
+  // memory before that mirror gets reused/overwritten by this frame's draws.
+  if (!memexport_ranges_ready_for_readback_.empty()) {
+    for (const PendingMemExportRange& range : memexport_ranges_ready_for_readback_) {
+      uint64_t byte_offset = uint64_t(range.base_address_dwords) * 4;
+      if (byte_offset + range.size_bytes > kSharedMemorySize) {
+        continue;
+      }
+      VkMappedMemoryRange invalidate_range{};
+      invalidate_range.sType = VK_STRUCTURE_TYPE_MAPPED_MEMORY_RANGE;
+      invalidate_range.memory = shared_memory_memory_;
+      invalidate_range.offset = 0;
+      invalidate_range.size = VK_WHOLE_SIZE;
+      dfn.vkInvalidateMappedMemoryRanges(device, 1, &invalidate_range);
+      void* guest_ptr = rex::system::kernel_state()->memory()->TranslatePhysical<void*>(
+          uint32_t(byte_offset));
+      std::memcpy(guest_ptr, shared_memory_mapped_ + byte_offset, range.size_bytes);
+    }
+    static bool logged_readback = false;
+    if (!logged_readback) {
+      logged_readback = true;
+      REXGPU_INFO("NativeCommandProcessor: first memexport readback completed ({} range(s))",
+                 memexport_ranges_ready_for_readback_.size());
+    }
+    memexport_ranges_ready_for_readback_.clear();
+  }
+
   FreeTransientBuffers();
   dfn.vkResetDescriptorPool(device, transient_descriptor_pool_, 0);
 
@@ -2220,6 +2309,17 @@ void NativeCommandProcessor::TryDraw(rex::graphics::xenos::PrimitiveType prim_ty
   if (vertex_texture_set == VK_NULL_HANDLE || pixel_texture_set == VK_NULL_HANDLE) {
     return;
   }
+
+  // Memexport (see docs/native-renderer-headless-boot.md, "Next" -- the
+  // gameplay-preview texture is populated this way, not by a normal
+  // rasterized draw): a shader with eM writes exports data directly to
+  // guest memory via the shared-memory SSBO during this draw's GPU
+  // execution. Collected here, now that the draw is guaranteed to actually
+  // be issued below (registers_ reflects this draw's real state), but not
+  // read back until EnsureFrameBegun confirms the GPU work is complete --
+  // see pending_memexport_ranges_'s doc comment.
+  CollectMemExportRanges(*vertex_shader->shader, pending_memexport_ranges_);
+  CollectMemExportRanges(*pixel_shader->shader, pending_memexport_ranges_);
 
   VkDescriptorSet sets[4] = {shared_memory_set_, constants_set, vertex_texture_set,
                             pixel_texture_set};
