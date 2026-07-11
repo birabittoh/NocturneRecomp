@@ -1878,3 +1878,294 @@ implementing), then implement `RegisterFile::GetMemExportStream`-driven
 memory writes if confirmed. This would be substantially larger in scope than
 anything else done this session (steps 10-15) — a new GPU-write mechanism,
 not another texture-format/binding-count gap.
+
+## Step 16 (2026-07-11, later session): memexport implemented; then found and fixed why it still looked stuck on frame 1
+
+The memexport hypothesis from step 15 was confirmed and implemented
+(`native_command_processor.{h,cpp}`, `CollectMemExportRanges`): a shader
+with `memexport_eM_written()` set has its `memexport_stream_constants()`
+scanned (narrow reimplementation of `draw_util::AddMemExportRanges`, same
+"can't link draw.cpp directly" reasoning as `GetHostViewportInfo`), and any
+range it exports to is queued in `pending_memexport_ranges_` during
+`TryDraw`. `EnsureFrameBegun` — specifically because it already does a
+synchronous fence wait for the *previous* frame's GPU work before reusing
+any per-frame resources — swaps that into
+`memexport_ranges_ready_for_readback_` and, now that the writing GPU work is
+guaranteed complete, `vkInvalidateMappedMemoryRanges` + `memcpy`s each range
+from the shared-memory SSBO mirror back into real guest physical memory via
+`Memory::TranslatePhysical`.
+
+**This alone did not fix the user-visible symptom.** The user supplied two
+fresh RenderDoc captures (`brk1.rdc`, `brk2.rdc`, committed at the repo
+root, taken minutes apart while actually playing) specifically to diagnose
+"the gameplay-preview texture renders once and then never updates, instead
+of refreshing every frame like a live camera feed should." Opened both via
+`renderdoc-mcp`: the `512x256` `R8G8B8A8_UNORM` gameplay-preview texture
+(`ResourceId::34625` in both captures, bound at `event_id=132` in both) now
+has real, non-blank content — confirming memexport writes are landing in
+guest memory correctly — but `read_texture_pixels` on the same 8x8 region
+in both captures returned **bit-for-bit identical values**, despite the
+captures being taken at different points during live gameplay. That's
+direct, ground-truth confirmation of "stuck on the first frame," not
+inference from logs.
+
+**Root cause: `GetOrUploadTexture`'s cache key never accounted for content
+changes at a fixed address.** This was already flagged, unfixed, as a known
+limitation in the header comment on `texture_cache_`
+(`native_command_processor.h`) since milestone 3b step 7: the cache key is a
+hash of the fetch constant's raw dwords only (address+format+dimensions+
+tiling), so once the gameplay-preview texture's fetch constant is set up
+(pointing at a fixed guest address that memexport repopulates every frame),
+every subsequent `GetOrUploadTexture` call for that fetch constant hits the
+cache and returns the very first upload — the fetch constant itself never
+changes, only the guest memory it points at, and nothing was invalidating
+the cache when that happened. This is a completely different bug from
+step 15's "memexport doesn't run at all" — memexport was writing fresh
+data into guest memory every frame the whole time, but the GPU-side texture
+sampling it never re-read that memory after the first upload.
+
+**Fix** (`native_command_processor.{h,cpp}`): `UploadedTexture` gained
+`base_address_bytes`/`size_bytes` (the guest physical byte span the CPU
+decode actually read from, computed per-format — block-pitch-based for
+`k_DXT4_5`, texel-pitch-based otherwise — inside `GetOrUploadTexture`).
+`EnsureFrameBegun`'s memexport-readback loop now also scans `texture_cache_`
+for any entry whose range overlaps the range it just copied into guest
+memory and destroys+erases it (safe to do here specifically because this is
+right after the fence wait that guarantees the GPU is done with last
+frame's draws, same reasoning `FreeTransientBuffers()` right below it
+already relies on) — so the next draw that samples that fetch constant
+takes the cache miss and re-decodes current guest memory instead of serving
+the stale upload. Narrow and targeted: only textures whose source range
+was actually just memexport-written get invalidated, not the whole cache
+every frame (the intro's static DXT textures etc. are unaffected).
+
+**Not yet re-verified with a fresh capture after this fix** (needs a
+rebuild + a new `brk*.rdc` pair taken the same way, at least a few seconds
+apart during live gameplay, to confirm the two captures now differ where
+they didn't before) — the next session should do that first, since this
+fix is code-reviewed and builds clean but wasn't checked against a live
+capture the way steps 8-15's fixes were.
+
+**Not actually fixed -- the user reported "no progress at all" against a
+fresh `brk3.rdc`.** See step 17 immediately below: the memexport hypothesis
+itself (steps 15-16) turned out to be wrong. The cache-invalidation fix in
+this step is real and harmless, but it was invalidating a code path
+(`pending_memexport_ranges_`) that never actually populates for this game.
+
+## Step 17 (2026-07-11, later session): the memexport hypothesis was wrong -- it's an EDRAM resolve-to-texture, not memexport
+
+Diagnosed by adding real logging instead of trusting inference from RenderDoc
+pixel reads (which had misleadingly shown non-blank texture content and been
+read as "memexport must be populating this"). Added a log line inside
+`CollectMemExportRanges` that fires whenever a shader actually has
+`memexport_eM_written()` set. Ran a full boot through the intro **and** a
+real ~80-second interactive session that the user played from boot through
+character-select into actual gameplay (`logs/nocturnerecomp_002.log`) --
+**zero shaders, across the entire session, ever had `eM_written` set.** The
+memexport code added in steps 15-16 is real, correctly-implemented, and
+completely dead for this game's content -- the cache-invalidation fix in
+step 16 was therefore fixing a bug in a path that never executes, which is
+exactly why the user saw "no progress at all."
+
+**What's actually happening, found directly in the same log:** repeated
+writes to `RB_COPY_CONTROL` / `RB_COPY_DEST_BASE` / `RB_COPY_DEST_PITCH` /
+`RB_COPY_DEST_INFO`, with `RB_COPY_DEST_BASE` consistently `0x1F6F8000`.
+This is the standard Xenos **EDRAM resolve-to-texture** mechanism: setting
+`RB_MODECONTROL.edram_mode` to `kCopy` turns what would otherwise be a
+normal draw call into a "copy the current render target (or a rectangle of
+it) into a guest-memory texture" operation instead of rasterizing --
+confirmed against `rexglue-sdk/src/graphics/vulkan/command_processor.cpp`'s
+`IssueDraw`, which checks exactly this register before doing anything else
+and dispatches to `IssueCopy()` when it's set, an entirely separate code
+path from the normal draw pipeline. `NativeCommandProcessor` had no
+handling for this at all -- `TryDraw` always went straight into normal
+draw/pipeline setup, so the resolve trigger silently did nothing and the
+destination memory was never written. This is unrelated to memexport, a
+different Xenos GPU feature entirely.
+
+**Fix implemented (`native_command_processor.{h,cpp}`), `TryResolveCopy`:**
+- `TryDraw` now checks `RB_MODECONTROL.edram_mode` first, before any
+  shader/pipeline work; on `kCopy` it calls `TryResolveCopy()` and returns.
+- The resolve rectangle isn't in a dedicated register -- per real hardware/
+  D3D9 (and confirmed against `rexglue-sdk`'s `GetResolveInfo`, `draw.cpp`),
+  the "draw" that triggers a resolve has its 3 covered-rectangle corners
+  written into vertex fetch constant 0 by the CPU. `GetResolveInfo` itself
+  isn't callable directly (same "pulls in the plugin-only `TextureCache`/
+  `TraceWriter` headers" constraint as `GetHostViewportInfo`/
+  `AddMemExportRanges` elsewhere in this file), but the specific vertex-rect
+  computation it does is register/vertex-only, so it's narrowly
+  reimplemented: read vf0's 3 vertices, fixed-point round per the top-left
+  rasterization rule, apply the window offset, clamp to the scissor rect
+  (`GetScissorRect`, a narrow reimplementation of `draw_util::GetScissor`,
+  same file/same constraint), then clamp again to this renderer's fixed
+  `kColorTargetWidth`x`kColorTargetHeight` bounds (this renderer doesn't
+  emulate a real EDRAM surface sized by `RB_SURFACE_INFO` -- there's only
+  ever the one fixed-size `color_target_image_`).
+- Only `k_8_8_8_8`, non-array, plain-copy resolves are supported (same
+  "narrow allow-list, skip+log the rest" pattern as texture formats/
+  primitive types elsewhere in this file) -- confirmed sufficient since
+  that's the gameplay-preview texture's own format.
+- The actual copy is a synchronous mid-frame readback: ends the current
+  render pass (color_target_image_'s `finalLayout` is already
+  `TRANSFER_SRC_OPTIMAL`, matching `PresentFrame`'s own blit), copies the
+  whole color target to a host-visible buffer via `vkCmdCopyImageToBuffer`,
+  submits and waits on `submit_fence_`, then converts the covered rect from
+  `VK_FORMAT_A2B10G10R10_UNORM_PACK32` (this renderer's fixed color-target
+  format) down to RGBA8 on the CPU and writes it into guest memory at
+  `RB_COPY_DEST_BASE` using `texture_util::GetTiledOffset2D` (the same
+  tiled-addressing helper `GetOrUploadTexture` already uses for reads, now
+  used symmetrically for a write) with the pitch from `RB_COPY_DEST_PITCH`
+  (a plain texel pitch for this register, unlike a texture fetch constant's
+  `pitch` field which needs `*32`).
+- Since ending the render pass mid-frame is necessary for the CPU readback,
+  but more draws may follow later in the same guest frame, a second render
+  pass object (`render_pass_continue_`, same attachment but
+  `loadOp=LOAD`/`initialLayout=TRANSFER_SRC_OPTIMAL` instead of
+  `render_pass_`'s `CLEAR`/`UNDEFINED`) reopens recording into the same
+  `framebuffer_`/`color_target_image_` right after the readback, so later
+  draws this frame aren't lost and the existing per-frame present flow
+  (`PresentFrame`, `EnsureFrameBegun`) needs no changes.
+- Reuses the same cache-invalidation fix from step 16 (moved from being
+  memexport-only to also covering resolve writes): any `texture_cache_`
+  entry whose decode range overlaps what a resolve just wrote gets
+  destroyed, so a texture resolved into every frame (like the gameplay
+  preview) doesn't get stuck serving its first-ever upload the same way the
+  (dead) memexport path would have.
+
+**Not yet verified against a live capture/log** -- this was implemented and
+builds clean, but the fix needs the same live-gameplay test that diagnosed
+the bug: play to the gameplay-preview screen, wait a few seconds, and
+confirm (via a fresh `.rdc` or by grepping `logs/*.log` for `"first EDRAM
+resolve copy completed"` and checking the texture's content actually
+changes frame to frame) that the preview is now live instead of frozen.
+
+**Next:**
+1. Verify live: rebuild, play to the gameplay-preview screen, confirm
+   `logs/*.log` shows `"first EDRAM resolve copy completed"` and that a
+   fresh capture's `512x256` texture content differs from `brk1`/`brk2`/
+   `brk3`.
+2. Once confirmed working, remove the now-confirmed-dead memexport code
+   (`CollectMemExportRanges`, `pending_memexport_ranges_`,
+   `memexport_ranges_ready_for_readback_`, and the memexport-specific
+   temporary diagnostic logging added in steps 16-17) -- it's real,
+   correctly-implemented code, but this game never exercises it, and
+   keeping unreachable code around invites exactly the kind of wrong-turn
+   debugging steps 16-17 just went through. Confirm dead (not just
+   "unobserved in one session") before deleting -- e.g. grep across a
+   longer play session, or check whether any other screen in the game might
+   use it -- rather than assuming step 17's one session is exhaustive.
+3. Items 3-4 from step 8's "Next" list (pathological-shader-stall root
+   cause, remaining zeroed `SystemConstants` fields) still apply, along with
+   step 14's still-open "Press &lt;A&gt;" text-rendering gap.
+
+**Not fixed either -- user confirmed "not fixed at all" against a fresh
+`brk4.rdc`.** See step 18: the EDRAM-resolve hypothesis was also wrong, for
+this specific texture.
+
+## Step 18 (2026-07-11, later session): the resolve was real but for a different texture; the actual mechanism is COHER_STATUS_HOST
+
+Added per-resolve (not just first-ever) and per-texture-upload logging
+instead of guessing again, and had the user play to gameplay once more
+(`logs/nocturnerecomp_005.log` + siblings). Two findings, both direct from
+the log:
+
+1. **The EDRAM resolve from step 17 is real and fires every frame, but at
+   `dest_base=0x1f6f8000`, always the full `1280x720` screen -- a
+   completely different, unrelated texture from the gameplay preview.**
+   Grepping `"texture uploaded"` across the whole session shows the actual
+   512x256 gameplay-preview texture lives at **`base=0x1ed40000`** -- a
+   different address that never once appears as an `RB_COPY_DEST_BASE`
+   value anywhere in the log. Step 17's resolve support is legitimate
+   working code for whatever the `0x1f6f8000` full-screen target is (a
+   postprocess/motion-blur source, most likely), but it was never going to
+   fix the gameplay preview -- that was a coincidental correlation from an
+   earlier session's first, too-hasty grep of `RB_COPY_DEST_BASE` values
+   that happened to only show one nonzero address in that shorter capture.
+2. **The real signal was sitting right next to the texture upload log line
+   the whole time:** `reg 0A30 COHER_BASE_HOST = 1ED40000` logged
+   immediately before `texture uploaded 512x256 base=0x1ed40000` -- i.e.
+   the guest issues a cache-coherency invalidation (`COHER_BASE_HOST`/
+   `COHER_SIZE_HOST`/`COHER_STATUS_HOST`) targeting exactly this texture's
+   address right when it wants the GPU to treat that range as freshly
+   written. Confirmed against `rexglue-sdk/src/graphics/command_processor.cpp`'s
+   `CommandProcessor::MakeCoherent()`: this is the real, general,
+   documented Xenos mechanism for "something other than a normal draw (CPU,
+   DMA, any path outside the GPU's own EDRAM pipeline) wrote this guest
+   memory range -- any texture/vertex cache needs to invalidate it,"
+   triggered whenever `COHER_STATUS_HOST.status` is set (typically from a
+   `WAIT_REG_MEM`-adjacent coherency event). This is *not* memexport (step
+   15-16) and *not* an EDRAM resolve (step 17) -- it's the guest explicitly
+   telling the GPU "this memory changed," probably because the actual pixel
+   data is written by something entirely outside this renderer's PM4
+   decode (CPU/software rendering, matching the original step 15 theory
+   from the user's xenos-backend session) and the coherency event is the
+   *only* GPU-visible trace of that write ever happening.
+
+**Fix (`native_command_processor.{h,cpp}`):** `OnPacket`'s existing
+register-write loop (which already mirrors every decoded register write
+into `registers_`) now checks whether the just-written register is
+`COHER_STATUS_HOST`, and if so calls the new `InvalidateTextureCacheRange`
+with the current `COHER_BASE_HOST`/`COHER_SIZE_HOST` values -- this is the
+first general, content-driven texture-cache invalidation in this renderer;
+everything before it (steps 16-17's memexport/resolve-specific paths) only
+covered the two GPU-side write mechanisms this renderer happens to model,
+neither of which turned out to be what this texture actually uses.
+
+**Safety subtlety, worth recording:** `OnPacket` runs live as PM4 packets
+stream in, potentially in the middle of recording the current guest frame's
+command buffer -- a texture invalidated there might already be bound in an
+earlier draw recorded (but not yet submitted/executed) in that same buffer.
+Destroying its `VkImage` immediately, the way step 16/17's fence-adjacent
+invalidations safely could, would be a use-after-free once the GPU actually
+executes that earlier draw. Fixed by making `InvalidateTextureCacheRange`
+only *queue* `(base, size)` pairs (`pending_texture_cache_invalidations_`)
+instead of destroying anything itself; the actual destroy+erase now happens
+only in `EnsureFrameBegun`, right after its existing fence wait -- the same
+point `FreeTransientBuffers()` already relies on for "the GPU is definitely
+done with everything from the previous frame." Steps 16/17's memexport- and
+resolve-specific invalidation call sites were refactored to go through this
+same queued path too (previously they destroyed inline, which happened to
+be safe only because both of those call sites already ran right after their
+own fence waits) -- one mechanism, one safety argument, instead of three
+separate copies of the same destroy loop.
+
+**Verified live by the user:** the gameplay-preview texture now updates
+frame to frame instead of being stuck on its first upload. This is the
+actual fix for the symptom that motivated steps 15-18 -- the
+`COHER_STATUS_HOST` cache-coherency invalidation is the real mechanism, not
+memexport (step 15-16, confirmed dead below) or the EDRAM resolve (step 17,
+real but for an unrelated target).
+
+**Post-fix cleanup (same session):** per user instruction, once the fix was
+confirmed live:
+- **Removed the memexport code entirely.** `CollectMemExportRanges`,
+  `PendingMemExportRange`, `pending_memexport_ranges_`,
+  `memexport_ranges_ready_for_readback_`, and the associated temporary
+  diagnostic logging are gone from `native_command_processor.{h,cpp}`. Two
+  full sessions (step 16's ~80s live-gameplay session and step 18's) never
+  observed a single shader with `eM_written` set across intro, menus, and
+  actual gameplay -- confirmed dead, not just "unobserved once." If a
+  future game/mod actually needs memexport, re-derive it from
+  `rexglue-sdk/src/graphics/util/draw.cpp`'s `AddMemExportRanges` rather
+  than resurrecting this removed version verbatim (worth re-checking the
+  real backend for any changes since).
+- **Kept the EDRAM-resolve support (`TryResolveCopy`, `render_pass_continue_`,
+  `GetScissorRect`).** Unlike memexport, step 18's own logging confirmed
+  this fires every single frame, unconditionally, for a real (if currently
+  unidentified-purpose) `1280x720` target at `dest_base=0x1f6f8000` --
+  genuinely live code, not dead code, even though it turned out to be
+  unrelated to the bug these steps were chasing.
+
+**Next:**
+1. Items 3-4 from step 8's "Next" list (pathological-shader-stall root
+   cause, remaining zeroed `SystemConstants` fields) still apply, along with
+   step 14's still-open "Press &lt;A&gt;" text-rendering gap.
+2. The `0x1f6f8000` full-screen EDRAM-resolve target's actual purpose is
+   still unidentified -- worth investigating if a future visual bug traces
+   back to it (candidates: motion blur, a bloom/postprocess source, or a
+   second full-screen preview elsewhere in the game).
+3. The temporary per-resolve/per-texture-upload diagnostic logging added in
+   step 18 (`debug_resolve_logged`, `debug_upload_logged`) is still in the
+   tree, capped at 100 lines each -- low-impact to leave, but should be
+   removed or `REXCVAR`-gated eventually, matching this file's usual policy
+   on temporary diagnostics.

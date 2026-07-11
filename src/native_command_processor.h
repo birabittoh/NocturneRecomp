@@ -169,6 +169,15 @@ class NativeCommandProcessor {
     VkImage image = VK_NULL_HANDLE;
     VkDeviceMemory memory = VK_NULL_HANDLE;
     VkImageView view = VK_NULL_HANDLE;
+    // Guest physical byte range this upload was decoded from -- used to
+    // invalidate the cache entry when a COHER_STATUS_HOST invalidation (see
+    // InvalidateTextureCacheRange) or an EDRAM resolve (TryResolveCopy)
+    // writes into an overlapping range, since a guest that repopulates a
+    // texture's content in place (the gameplay-preview texture case) never
+    // touches the fetch constant itself and so would otherwise never miss
+    // texture_cache_ again.
+    uint32_t base_address_bytes = 0;
+    uint32_t size_bytes = 0;
   };
   UploadedTexture* GetOrUploadTexture(uint32_t fetch_constant_index);
 
@@ -188,36 +197,41 @@ class NativeCommandProcessor {
 
   void UpdateSharedMemory(uint32_t guest_address_dwords, uint32_t size_dwords);
 
-  // Memexport support (see docs/native-renderer-headless-boot.md, "Next"
-  // item on the gameplay-preview texture): a shader with eM writes (e.g. a
-  // software-rendered screenshot/preview blit) writes its output directly
-  // into the shared-memory SSBO on the GPU rather than through the normal
-  // color-target/rasterizer path. Since shared_memory_buffer_ is only a
-  // per-draw mirror of guest memory (not the guest's actual backing memory),
-  // those writes have to be explicitly read back and copied into real guest
-  // physical memory once the GPU work that produced them has completed --
-  // unlike a normal draw's output, which the guest never reads back itself.
-  struct PendingMemExportRange {
-    uint32_t base_address_dwords;
-    uint32_t size_bytes;
-  };
-  // Scans a just-analyzed shader's memexport_stream_constants() (only
-  // meaningful if shader->memexport_eM_written()) and appends any ranges it
-  // exports to, reimplemented narrowly from draw_util::AddMemExportRanges
-  // (rexglue-sdk/src/graphics/util/draw.cpp) -- that function isn't callable
-  // directly since draw.cpp also pulls in the plugin-only TextureCache/
-  // TraceWriter headers this renderer deliberately doesn't link, same
-  // reasoning as GetHostViewportInfo/SystemConstants above.
-  void CollectMemExportRanges(const rex::graphics::Shader& shader,
-                              std::vector<PendingMemExportRange>& ranges_out);
-  // Ranges written by memexport-capable draws issued so far in the
-  // *currently recording* frame. Only actually read back once
-  // EnsureFrameBegun's fence wait confirms that frame's GPU work (including
-  // these writes) has completed -- see pending_memexport_ranges_ready_.
-  std::vector<PendingMemExportRange> pending_memexport_ranges_;
-  // The previous frame's ranges, guaranteed complete by the time
-  // EnsureFrameBegun's fence wait returns -- processed there, then cleared.
-  std::vector<PendingMemExportRange> memexport_ranges_ready_for_readback_;
+  // EDRAM resolve-to-texture (see docs/native-renderer-headless-boot.md, step
+  // 17): when the guest sets RB_MODECONTROL.edram_mode to kCopy before what
+  // would otherwise be a normal draw, that "draw" is actually a resolve
+  // trigger -- real hardware copies the current render target (or a
+  // rectangle of it, given by the resolve's own 3 vf0 vertices) into a
+  // guest-memory texture instead of rasterizing. Confirmed real and live
+  // (fires every frame for a full-screen 1280x720 target), though it turned
+  // out to be unrelated to the gameplay-preview texture -- see step 18,
+  // whose COHER_STATUS_HOST-based InvalidateTextureCacheRange is what
+  // actually fixed that. Narrow support: only k_8_8_8_8 dest format,
+  // non-array, no depth-copy, no color/depth-clear-only resolves
+  // (all skip-and-log like the rest of this file's format allow-lists).
+  void TryResolveCopy();
+
+  // Queues [base, base+size) to have any overlapping texture_cache_ entry
+  // destroyed+erased once it's actually safe to do so (see
+  // pending_texture_cache_invalidations_'s doc comment). Shared by the
+  // COHER_STATUS_HOST handler in OnPacket (see docs/native-renderer-
+  // headless-boot.md step 18 -- the real, general, content-driven
+  // invalidation signal: the guest's own cache-coherency event marking a
+  // range as written by something outside this renderer's normal draw
+  // path, e.g. CPU/software rendering) and TryResolveCopy (defense in
+  // depth for its own writes, which don't otherwise trigger a coherency
+  // event this renderer observes).
+  void InvalidateTextureCacheRange(uint32_t base, uint32_t size);
+  // OnPacket runs live as PM4 packets stream in, potentially mid-recording
+  // of the current frame's command buffer -- a texture invalidated there
+  // might already be bound in an earlier draw recorded (but not yet
+  // submitted/executed) in that same buffer, so destroying its VkImage
+  // immediately would be a use-after-free once the GPU actually runs that
+  // draw. Collected here instead and only actually applied in
+  // EnsureFrameBegun, right after its fence wait -- the same point
+  // FreeTransientBuffers() already relies on for "the GPU is definitely
+  // done with anything from the previous frame."
+  std::vector<std::pair<uint32_t, uint32_t>> pending_texture_cache_invalidations_;
 
   rex::ui::vulkan::VulkanProvider* provider_;
   rex::ui::Presenter* presenter_;
@@ -265,9 +279,13 @@ class NativeCommandProcessor {
   // Real uploaded textures, cached by a hash of the fetch constant's raw
   // dwords (address+format+dimensions+tiling all fold into that hash, so a
   // guest rewriting a fetch constant to point elsewhere naturally misses the
-  // cache; a guest overwriting texture *content* at the same address without
-  // changing the fetch constant will incorrectly keep serving the stale
-  // upload -- a known limitation, not yet hit by the intro's content).
+  // cache). A guest overwriting texture *content* at the same address without
+  // changing the fetch constant (the gameplay-preview texture case) does NOT
+  // naturally miss this cache on its own -- InvalidateTextureCacheRange
+  // (queued from OnPacket's COHER_STATUS_HOST handling and from
+  // TryResolveCopy, applied in EnsureFrameBegun) explicitly invalidates any
+  // entry whose base_address_bytes/size_bytes range overlaps a just-written
+  // range, so that case still gets a fresh upload next time it's sampled.
   // Capped the same way shader_cache_ is, for the same reason (bound a
   // pathological/garbage-decoded fetch constant that would otherwise hash
   // differently every resubmit).
@@ -299,6 +317,14 @@ class NativeCommandProcessor {
   VkDeviceMemory color_target_memory_ = VK_NULL_HANDLE;
   VkImageView color_target_view_ = VK_NULL_HANDLE;
   VkRenderPass render_pass_ = VK_NULL_HANDLE;
+  // Twin of render_pass_ with loadOp=LOAD instead of CLEAR and
+  // initialLayout=TRANSFER_SRC_OPTIMAL (matching color_target_image_'s
+  // actual layout right after a mid-frame TryResolveCopy readback) --
+  // shares framebuffer_ (load op isn't part of a framebuffer). Used only to
+  // resume recording draws into color_target_image_ after TryResolveCopy
+  // has to end the render pass/command buffer early to read it back; a
+  // normal frame only ever uses render_pass_.
+  VkRenderPass render_pass_continue_ = VK_NULL_HANDLE;
   VkFramebuffer framebuffer_ = VK_NULL_HANDLE;
   bool frame_active_ = false;
   bool frame_has_draws_ = false;

@@ -13,6 +13,7 @@
 #include <rex/logging.h>
 #include <rex/string/buffer.h>
 #include <rex/system/kernel_state.h>
+#include <rex/ui/graphics_util.h>
 #include <rex/ui/vulkan/device.h>
 #include <rex/ui/vulkan/presenter.h>
 #include <rex/ui/vulkan/util.h>
@@ -146,6 +147,40 @@ void GpuSwapBytes(const uint8_t* src, uint8_t* dst, size_t size, rex::graphics::
         break;
     }
   }
+}
+
+// Narrow reimplementation of rex::graphics::util::GetScissor (rexglue-sdk's
+// src/graphics/util/draw.cpp) -- not callable directly for the same reason
+// as GetHostViewportInfo elsewhere in this file (draw.cpp pulls in the
+// plugin-only TextureCache/TraceWriter headers). Only the
+// clamp_to_surface_pitch=false variant used by TryResolveCopy's resolve-rect
+// computation.
+void GetScissorRect(const rex::graphics::RegisterFile& regs, int32_t& x0, int32_t& y0, int32_t& x1,
+                    int32_t& y1) {
+  using namespace rex::graphics;
+  auto window_tl = regs.Get<reg::PA_SC_WINDOW_SCISSOR_TL>();
+  x0 = int32_t(window_tl.tl_x);
+  y0 = int32_t(window_tl.tl_y);
+  auto window_br = regs.Get<reg::PA_SC_WINDOW_SCISSOR_BR>();
+  x1 = int32_t(window_br.br_x);
+  y1 = int32_t(window_br.br_y);
+  if (!window_tl.window_offset_disable) {
+    auto offset = regs.Get<reg::PA_SC_WINDOW_OFFSET>();
+    x0 += offset.window_x_offset;
+    y0 += offset.window_y_offset;
+    x1 += offset.window_x_offset;
+    y1 += offset.window_y_offset;
+  }
+  auto screen_tl = regs.Get<reg::PA_SC_SCREEN_SCISSOR_TL>();
+  x0 = std::max(x0, int32_t(screen_tl.tl_x));
+  y0 = std::max(y0, int32_t(screen_tl.tl_y));
+  auto screen_br = regs.Get<reg::PA_SC_SCREEN_SCISSOR_BR>();
+  x1 = std::min(x1, int32_t(screen_br.br_x));
+  y1 = std::min(y1, int32_t(screen_br.br_y));
+  x0 = std::max(x0, 0);
+  y0 = std::max(y0, 0);
+  x1 = std::max(x1, x0);
+  y1 = std::max(y1, y0);
 }
 
 // Maps the guest's RB_BLENDCONTROL blend-factor/op encoding to the matching
@@ -630,6 +665,20 @@ bool NativeCommandProcessor::InitializePipelineResources() {
       REXGPU_ERROR("NativeCommandProcessor: failed to create the framebuffer");
       return false;
     }
+
+    // render_pass_continue_: same attachment/subpass, but loadOp=LOAD (must
+    // preserve draws already accumulated this guest frame) and
+    // initialLayout=TRANSFER_SRC_OPTIMAL (color_target_image_'s actual
+    // layout after TryResolveCopy's mid-frame vkCmdCopyImageToBuffer, which
+    // doesn't itself change layout). See the field comment on
+    // render_pass_continue_.
+    attachment.loadOp = VK_ATTACHMENT_LOAD_OP_LOAD;
+    attachment.initialLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+    if (dfn.vkCreateRenderPass(device, &render_pass_info, nullptr, &render_pass_continue_) !=
+        VK_SUCCESS) {
+      REXGPU_ERROR("NativeCommandProcessor: failed to create the continue render pass");
+      return false;
+    }
   }
 
   // Staging buffer for the image->image copy (see the field comment on
@@ -688,6 +737,8 @@ void NativeCommandProcessor::DestroyPipelineResources() {
 
   if (framebuffer_ != VK_NULL_HANDLE) dfn.vkDestroyFramebuffer(device, framebuffer_, nullptr);
   if (render_pass_ != VK_NULL_HANDLE) dfn.vkDestroyRenderPass(device, render_pass_, nullptr);
+  if (render_pass_continue_ != VK_NULL_HANDLE)
+    dfn.vkDestroyRenderPass(device, render_pass_continue_, nullptr);
   if (color_target_view_ != VK_NULL_HANDLE)
     dfn.vkDestroyImageView(device, color_target_view_, nullptr);
   if (color_target_image_ != VK_NULL_HANDLE) dfn.vkDestroyImage(device, color_target_image_, nullptr);
@@ -737,6 +788,23 @@ void NativeCommandProcessor::OnPacket(const rex::graphics::PacketInfo& info,
     if (action.type == rex::graphics::PacketAction::Type::kRegisterWrite &&
         action.register_write.index < rex::graphics::RegisterFile::kRegisterCount) {
       registers_[action.register_write.index] = action.register_write.value;
+      // COHER_STATUS_HOST.status is the guest's actual, general "this memory
+      // range was written by something other than a normal draw (CPU, DMA,
+      // any GPU path this renderer doesn't model -- MakeCoherent in
+      // rexglue-sdk's command_processor.cpp treats it the same regardless of
+      // source) and any texture/vertex cache needs to invalidate it" signal
+      // -- see docs/native-renderer-headless-boot.md step 18/19. Confirmed
+      // via a real capture to be exactly what precedes the gameplay-preview
+      // texture's upload (a COHER_BASE_HOST write to its exact fetch
+      // address, immediately before the game re-touches it), which neither
+      // the memexport (step 15-16) nor EDRAM-resolve (step 17) hypotheses
+      // actually were -- this is the real, general mechanism, and
+      // supersedes both of those narrower invalidation paths.
+      if (action.register_write.index == rex::graphics::XE_GPU_REG_COHER_STATUS_HOST) {
+        InvalidateTextureCacheRange(
+            registers_[rex::graphics::XE_GPU_REG_COHER_BASE_HOST],
+            registers_[rex::graphics::XE_GPU_REG_COHER_SIZE_HOST]);
+      }
     }
   }
 
@@ -1172,6 +1240,10 @@ NativeCommandProcessor::UploadedTexture* NativeCommandProcessor::GetOrUploadText
                   fetch.endianness == rex::graphics::xenos::Endian::k8in16;
 
   std::vector<uint8_t> rgba(size_t(width) * height * 4);
+  // Guest-memory byte span this decode actually reads, for
+  // InvalidateTextureCacheRange overlap checks -- set inside each branch
+  // below (differs: block- vs. texel-granularity pitch).
+  uint32_t source_size_bytes = 0;
 
   if (fetch.format == TextureFormat::k_DXT4_5) {
     // Block-compressed: address math operates in block units (a 4x4-texel
@@ -1195,6 +1267,7 @@ NativeCommandProcessor::UploadedTexture* NativeCommandProcessor::GetOrUploadText
     constexpr uint32_t kBytesPerBlock = 16;
     constexpr uint32_t kBytesPerBlockLog2 = 4;
     uint32_t pitch_blocks = std::max((fetch.pitch * 32u) / 4, block_w);
+    source_size_bytes = pitch_blocks * block_h * kBytesPerBlock;
     for (uint32_t by = 0; by < block_h; ++by) {
       for (uint32_t bx = 0; bx < block_w; ++bx) {
         uint32_t block_offset =
@@ -1230,6 +1303,7 @@ NativeCommandProcessor::UploadedTexture* NativeCommandProcessor::GetOrUploadText
                                     : fetch.format == TextureFormat::k_16_16_16_16 ? 3u
                                                                                     : 1u;
     uint32_t pitch_texels = std::max(fetch.pitch * 32u, width);
+    source_size_bytes = pitch_texels * height * bytes_per_texel;
 
     // Replicates the top bits into the low bits when expanding an n-bit
     // channel to 8 bits, instead of a plain shift (which would clip white to
@@ -1290,6 +1364,8 @@ NativeCommandProcessor::UploadedTexture* NativeCommandProcessor::GetOrUploadText
   VkDevice device = vulkan_device->device();
 
   UploadedTexture texture;
+  texture.base_address_bytes = base_address;
+  texture.size_bytes = source_size_bytes;
   VkImageCreateInfo image_info{};
   image_info.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
   image_info.imageType = VK_IMAGE_TYPE_2D;
@@ -1331,12 +1407,25 @@ NativeCommandProcessor::UploadedTexture* NativeCommandProcessor::GetOrUploadText
   }
 
   auto [inserted, _] = texture_cache_.emplace(key, texture);
-  static bool logged_first_texture = false;
-  if (!logged_first_texture) {
-    logged_first_texture = true;
-    REXGPU_INFO("NativeCommandProcessor: first real texture uploaded ({}x{})", width, height);
+  // TEMPORARY diagnostic (see docs/native-renderer-headless-boot.md step 18):
+  // logs every real upload's guest address/size, not just the first one, to
+  // correlate against TryResolveCopy's own dest_base/size logging and find
+  // out whether resolve writes and texture reads are actually hitting the
+  // same guest range. Remove once step 18 is resolved.
+  static uint32_t debug_upload_logged = 0;
+  if (debug_upload_logged < 100) {
+    ++debug_upload_logged;
+    REXGPU_INFO("NativeCommandProcessor: texture uploaded {}x{} base={:#x} size={:#x}", width,
+               height, texture.base_address_bytes, texture.size_bytes);
   }
   return &inserted->second;
+}
+
+void NativeCommandProcessor::InvalidateTextureCacheRange(uint32_t base, uint32_t size) {
+  if (size == 0) {
+    return;
+  }
+  pending_texture_cache_invalidations_.emplace_back(base, size);
 }
 
 void NativeCommandProcessor::DestroyTextureCache() {
@@ -1643,53 +1732,243 @@ void NativeCommandProcessor::UpdateSharedMemory(uint32_t guest_address_dwords,
                                                 kSharedMemorySize, byte_size);
 }
 
-void NativeCommandProcessor::CollectMemExportRanges(
-    const rex::graphics::Shader& shader, std::vector<PendingMemExportRange>& ranges_out) {
-  if (!shader.memexport_eM_written()) {
+void NativeCommandProcessor::TryResolveCopy() {
+  using namespace rex::graphics;
+
+  auto rb_copy_control = registers_.Get<reg::RB_COPY_CONTROL>();
+  // Narrow scope, matching this file's established "support the common case,
+  // skip+log the rest" pattern: only a plain color copy (not a clear-only
+  // resolve, not a depth copy -- copy_src_select >= 4 means depth per
+  // RB_COPY_CONTROL's own field comment).
+  if (rb_copy_control.color_clear_enable || rb_copy_control.depth_clear_enable ||
+      rb_copy_control.copy_src_select >= 4) {
     return;
   }
-  uint32_t float_constants_base =
-      shader.type() == rex::graphics::xenos::ShaderType::kVertex
-          ? registers_.Get<rex::graphics::reg::SQ_VS_CONST>().base
-          : registers_.Get<rex::graphics::reg::SQ_PS_CONST>().base;
-  for (uint32_t constant_index : shader.memexport_stream_constants()) {
-    rex::graphics::xenos::xe_gpu_memexport_stream_t stream =
-        registers_.GetMemExportStream(float_constants_base + constant_index);
-    // Same sanity checks as draw_util::AddMemExportRanges -- the constant
-    // slot may not actually have been set up if the export isn't on the
-    // control-flow path the guest actually took.
-    if (stream.const_0x1 != 0x1 || stream.const_0x4b0 != 0x4B0 || stream.const_0x96 != 0x96 ||
-        !stream.index_count) {
-      continue;
+  if (rb_copy_control.copy_command != xenos::CopyCommand::kRaw &&
+      rb_copy_control.copy_command != xenos::CopyCommand::kConvert) {
+    return;
+  }
+
+  // The resolve rectangle isn't in a dedicated register -- per real
+  // hardware/D3D9 (and rexglue-sdk's GetResolveInfo, draw.cpp), a resolve is
+  // issued as a "draw" whose vf0 vertices (always CPU-written) define the
+  // covered rectangle. Register-only computation (no TextureCache
+  // dependency), so safe to reimplement narrowly here.
+  xenos::xe_gpu_vertex_fetch_t fetch = registers_.GetVertexFetch(0);
+  if (fetch.type != xenos::FetchConstantType::kVertex || fetch.size != 3 * 2) {
+    return;
+  }
+  const float* vertices_guest = rex::system::kernel_state()->memory()->TranslatePhysical<const float*>(
+      fetch.address * 4);
+  if (!vertices_guest) {
+    return;
+  }
+  float half_pixel_offset =
+      registers_.Get<reg::PA_SU_VTX_CNTL>().pix_center == xenos::PixelCenter::kD3DZero ? 0.5f
+                                                                                        : 0.0f;
+  int32_t vf[6];
+  for (int i = 0; i < 6; ++i) {
+    vf[i] = rex::ui::FloatToD3D11Fixed16p8(xenos::GpuSwap(vertices_guest[i], fetch.endian) +
+                                           half_pixel_offset);
+  }
+  int32_t x0 = std::min({vf[0], vf[2], vf[4]});
+  int32_t y0 = std::min({vf[1], vf[3], vf[5]});
+  int32_t x1 = std::max({vf[0], vf[2], vf[4]});
+  int32_t y1 = std::max({vf[1], vf[3], vf[5]});
+  // Top-left rasterization rule: include .5, exclude .5 on the bottom-right.
+  x0 = (x0 + 127) >> 8;
+  y0 = (y0 + 127) >> 8;
+  x1 = (x1 + 127) >> 8;
+  y1 = (y1 + 127) >> 8;
+
+  if (registers_.Get<reg::PA_SU_SC_MODE_CNTL>().vtx_window_offset_enable) {
+    auto offset = registers_.Get<reg::PA_SC_WINDOW_OFFSET>();
+    x0 += offset.window_x_offset;
+    y0 += offset.window_y_offset;
+    x1 += offset.window_x_offset;
+    y1 += offset.window_y_offset;
+  }
+
+  int32_t scissor_x0, scissor_y0, scissor_x1, scissor_y1;
+  GetScissorRect(registers_, scissor_x0, scissor_y0, scissor_x1, scissor_y1);
+  x0 = std::clamp(x0, scissor_x0, scissor_x1);
+  y0 = std::clamp(y0, scissor_y0, scissor_y1);
+  x1 = std::clamp(x1, scissor_x0, scissor_x1);
+  y1 = std::clamp(y1, scissor_y0, scissor_y1);
+
+  // Also clamp to the color target's own bounds -- this renderer's color
+  // target is a fixed kColorTargetWidth x kColorTargetHeight buffer, not a
+  // real EDRAM surface sized by RB_SURFACE_INFO, so a guest-specified
+  // rectangle extending past it would read out of bounds below.
+  x0 = std::clamp(x0, 0, int32_t(kColorTargetWidth));
+  x1 = std::clamp(x1, 0, int32_t(kColorTargetWidth));
+  y0 = std::clamp(y0, 0, int32_t(kColorTargetHeight));
+  y1 = std::clamp(y1, 0, int32_t(kColorTargetHeight));
+  if (x0 >= x1 || y0 >= y1) {
+    return;
+  }
+
+  auto copy_dest_info = registers_.Get<reg::RB_COPY_DEST_INFO>();
+  // Same allow-list as GetOrUploadTexture -- this is the direction guest
+  // textures are actually sampled back as later, so supporting the same
+  // format covers the same real content (confirmed: the gameplay-preview
+  // texture this exists for is k_8_8_8_8).
+  if (copy_dest_info.copy_dest_format != xenos::ColorFormat::k_8_8_8_8 ||
+      copy_dest_info.copy_dest_array) {
+    static uint32_t skipped_logged = 0;
+    if (skipped_logged < 20) {
+      ++skipped_logged;
+      REXGPU_INFO(
+          "NativeCommandProcessor: skipping EDRAM resolve copy with unsupported dest "
+          "format={} array={}",
+          uint32_t(copy_dest_info.copy_dest_format), uint32_t(copy_dest_info.copy_dest_array));
     }
-    // Narrow scope, matching this file's established pattern elsewhere
-    // (texture formats, primitive types): only the common RGBA8 case is
-    // supported for now (also the only format observed so far -- the
-    // gameplay-preview texture this exists for is itself R8G8B8A8). Anything
-    // else falls back to "not exported", same as an unsupported texture
-    // format falls back to the 1x1 default.
-    if (stream.format != rex::graphics::xenos::ColorFormat::k_8_8_8_8) {
-      static uint32_t skipped_logged = 0;
-      if (skipped_logged < 20) {
-        ++skipped_logged;
-        REXGPU_INFO("NativeCommandProcessor: skipping memexport stream with unsupported format={}",
-                   uint32_t(stream.format));
+    return;
+  }
+
+  auto copy_dest_pitch = registers_.Get<reg::RB_COPY_DEST_PITCH>();
+  uint32_t dest_base = registers_[XE_GPU_REG_RB_COPY_DEST_BASE];
+  if (!dest_base) {
+    return;
+  }
+  uint32_t width = uint32_t(x1 - x0);
+  uint32_t height = uint32_t(y1 - y0);
+  uint32_t pitch_texels = std::max(copy_dest_pitch.copy_dest_pitch, width);
+
+  // Read back color_target_image_'s current content -- this must happen now,
+  // synchronously, since the resolve needs the render target's contents as
+  // of exactly this point in the guest's command stream (subsequent draws
+  // this same guest frame may render over the same pixels for a different
+  // purpose). Ends the render pass (color_target_image_'s finalLayout is
+  // already TRANSFER_SRC_OPTIMAL, matching PresentFrame's own blit) and
+  // submits + waits on submit_fence_, then reopens recording via
+  // render_pass_continue_ (loadOp=LOAD) so draws after this resolve in the
+  // same guest frame still land in the same buffer.
+  EnsureFrameBegun();
+
+  const rex::ui::vulkan::VulkanDevice* vulkan_device = provider_->vulkan_device();
+  const rex::ui::vulkan::VulkanDevice::Functions& dfn = vulkan_device->functions();
+  VkDevice device = vulkan_device->device();
+
+  dfn.vkCmdEndRenderPass(command_buffer_);
+
+  VkBuffer readback_buffer = VK_NULL_HANDLE;
+  VkDeviceMemory readback_memory = VK_NULL_HANDLE;
+  if (!rex::ui::vulkan::util::CreateDedicatedAllocationBuffer(
+          vulkan_device, color_target_staging_size_, VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+          rex::ui::vulkan::util::MemoryPurpose::kReadback, readback_buffer, readback_memory)) {
+    REXGPU_ERROR("NativeCommandProcessor: resolve copy failed to allocate a readback buffer");
+    return;
+  }
+
+  VkBufferImageCopy buffer_image_copy{};
+  buffer_image_copy.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+  buffer_image_copy.imageExtent = {kColorTargetWidth, kColorTargetHeight, 1};
+  dfn.vkCmdCopyImageToBuffer(command_buffer_, color_target_image_,
+                             VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, readback_buffer, 1,
+                             &buffer_image_copy);
+  dfn.vkEndCommandBuffer(command_buffer_);
+
+  VkSubmitInfo submit_info{};
+  submit_info.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+  submit_info.commandBufferCount = 1;
+  submit_info.pCommandBuffers = &command_buffer_;
+  rex::ui::vulkan::VulkanDevice::Queue::Acquisition queue =
+      vulkan_device->AcquireQueue(vulkan_device->queue_family_graphics_compute(), 0);
+  dfn.vkQueueSubmit(queue.queue(), 1, &submit_info, submit_fence_);
+  constexpr uint64_t kFenceTimeoutNs = 5'000'000'000ull;
+  if (dfn.vkWaitForFences(device, 1, &submit_fence_, VK_TRUE, kFenceTimeoutNs) != VK_SUCCESS) {
+    REXGPU_ERROR("NativeCommandProcessor: timed out waiting for the resolve copy's fence");
+  }
+  dfn.vkResetFences(device, 1, &submit_fence_);
+
+  void* mapped = nullptr;
+  if (dfn.vkMapMemory(device, readback_memory, 0, color_target_staging_size_, 0, &mapped) ==
+      VK_SUCCESS) {
+    VkMappedMemoryRange range{};
+    range.sType = VK_STRUCTURE_TYPE_MAPPED_MEMORY_RANGE;
+    range.memory = readback_memory;
+    range.offset = 0;
+    range.size = VK_WHOLE_SIZE;
+    dfn.vkInvalidateMappedMemoryRanges(device, 1, &range);
+
+    // color_target_image_ is VK_FORMAT_A2B10G10R10_UNORM_PACK32 -- convert
+    // to RGBA8 (this narrow implementation's only supported dest format) on
+    // the CPU, same "unpack on CPU, reuse the simple uncompressed-format
+    // write path" approach GetOrUploadTexture uses for its packed 16-bit
+    // formats.
+    const uint32_t* src_pixels = reinterpret_cast<const uint32_t*>(mapped);
+    uint8_t* guest_base = rex::system::kernel_state()->memory()->TranslatePhysical<uint8_t*>(dest_base);
+    bool byteswap = copy_dest_info.copy_dest_endian != xenos::Endian128::kNone;
+    for (uint32_t y = 0; y < height; ++y) {
+      for (uint32_t x = 0; x < width; ++x) {
+        uint32_t src_x = x0 + x;
+        uint32_t src_y = y0 + y;
+        uint32_t packed = src_pixels[src_y * kColorTargetWidth + src_x];
+        uint8_t rgba[4];
+        // A2B10G10R10_UNORM_PACK32: R in bits 0-9, G in 10-19, B in 20-29,
+        // A in 30-31 -- downsampled to 8 bits/channel (truncated, not
+        // rounded/dithered, matching this file's other 16-to-8-bit
+        // downsamples).
+        rgba[0] = uint8_t((packed >> 2) & 0xFF);
+        rgba[1] = uint8_t((packed >> 12) & 0xFF);
+        rgba[2] = uint8_t((packed >> 22) & 0xFF);
+        rgba[3] = uint8_t(((packed >> 30) & 0x3) * 85);
+        if (byteswap) {
+          std::swap(rgba[0], rgba[3]);
+          std::swap(rgba[1], rgba[2]);
+        }
+        uint32_t dest_offset = uint32_t(rex::graphics::texture_util::GetTiledOffset2D(
+            int32_t(x), int32_t(y), pitch_texels, /*bytes_per_texel_log2=*/2u));
+        std::memcpy(guest_base + dest_offset, rgba, 4);
       }
-      continue;
     }
-    uint32_t stream_size_bytes = stream.index_count * 4;
-    bool range_reused = false;
-    for (PendingMemExportRange& range : ranges_out) {
-      if (range.base_address_dwords == stream.base_address) {
-        range.size_bytes = std::max(range.size_bytes, stream_size_bytes);
-        range_reused = true;
-        break;
-      }
-    }
-    if (!range_reused) {
-      ranges_out.push_back({stream.base_address, stream_size_bytes});
+    dfn.vkUnmapMemory(device, readback_memory);
+
+    // TEMPORARY diagnostic (see docs/native-renderer-headless-boot.md step
+    // 18): logs every resolve, not just the first, including the source
+    // rectangle -- needed to tell a legitimate small preview-sized resolve
+    // apart from a full-screen one sharing the same dest_base. Remove once
+    // step 18 is resolved.
+    static uint32_t debug_resolve_logged = 0;
+    if (debug_resolve_logged < 100) {
+      ++debug_resolve_logged;
+      REXGPU_INFO(
+          "NativeCommandProcessor: EDRAM resolve copy ({},{})-({},{}) {}x{} -> dest_base={:#x} "
+          "pitch={}",
+          x0, y0, x1, y1, width, height, dest_base, pitch_texels);
     }
   }
+
+  dfn.vkDestroyBuffer(device, readback_buffer, nullptr);
+  dfn.vkFreeMemory(device, readback_memory, nullptr);
+
+  // Invalidate any cached texture upload whose decode source overlaps what
+  // was just written -- same staleness problem the COHER_STATUS_HOST
+  // handler in OnPacket fixes generally, kept here too as defense in depth.
+  uint32_t written_size_bytes = 0;
+  for (uint32_t y = 0; y < height; ++y) {
+    written_size_bytes = std::max(
+        written_size_bytes,
+        uint32_t(rex::graphics::texture_util::GetTiledOffset2D(int32_t(width - 1), int32_t(y),
+                                                                pitch_texels, 2u)) +
+            4);
+  }
+  InvalidateTextureCacheRange(dest_base, written_size_bytes);
+
+  // Reopen recording so subsequent draws in this same guest frame still
+  // land in color_target_image_ -- see render_pass_continue_'s doc comment.
+  VkCommandBufferBeginInfo begin_info{};
+  begin_info.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+  begin_info.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+  dfn.vkBeginCommandBuffer(command_buffer_, &begin_info);
+
+  VkRenderPassBeginInfo rp_begin{};
+  rp_begin.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
+  rp_begin.renderPass = render_pass_continue_;
+  rp_begin.framebuffer = framebuffer_;
+  rp_begin.renderArea.extent = {kColorTargetWidth, kColorTargetHeight};
+  dfn.vkCmdBeginRenderPass(command_buffer_, &rp_begin, VK_SUBPASS_CONTENTS_INLINE);
 }
 
 void NativeCommandProcessor::EnsureFrameBegun() {
@@ -1710,43 +1989,26 @@ void NativeCommandProcessor::EnsureFrameBegun() {
   }
   dfn.vkResetFences(device, 1, &submit_fence_);
 
-  // pending_memexport_ranges_ was being filled by TryDraw calls throughout
-  // the frame that just got fenced above (not the frame before that -- see
-  // the swap at the end of the previous call to this function), so it's
-  // exactly what's now safe to read back. Swap it into
-  // memexport_ranges_ready_for_readback_ before processing (a plain rename,
-  // not a data-flow change) and clear pending_memexport_ranges_ so this new
-  // frame's TryDraw calls start collecting fresh.
-  memexport_ranges_ready_for_readback_.swap(pending_memexport_ranges_);
-  pending_memexport_ranges_.clear();
-
-  // Any memexport writes issued last frame are now guaranteed complete (the
-  // fence wait above is exactly what makes that true) -- read them back out
-  // of the shared-memory mirror and copy them into real guest physical
-  // memory before that mirror gets reused/overwritten by this frame's draws.
-  if (!memexport_ranges_ready_for_readback_.empty()) {
-    for (const PendingMemExportRange& range : memexport_ranges_ready_for_readback_) {
-      uint64_t byte_offset = uint64_t(range.base_address_dwords) * 4;
-      if (byte_offset + range.size_bytes > kSharedMemorySize) {
-        continue;
+  // Now safe to actually destroy anything queued by InvalidateTextureCacheRange
+  // since the fence wait above -- see pending_texture_cache_invalidations_'s
+  // doc comment.
+  if (!pending_texture_cache_invalidations_.empty()) {
+    for (const auto& [inv_base, inv_size] : pending_texture_cache_invalidations_) {
+      uint32_t inv_end = inv_base + inv_size;
+      for (auto it = texture_cache_.begin(); it != texture_cache_.end();) {
+        uint32_t tex_start = it->second.base_address_bytes;
+        uint32_t tex_end = tex_start + it->second.size_bytes;
+        if (tex_start < inv_end && inv_base < tex_end) {
+          if (it->second.view != VK_NULL_HANDLE) dfn.vkDestroyImageView(device, it->second.view, nullptr);
+          if (it->second.image != VK_NULL_HANDLE) dfn.vkDestroyImage(device, it->second.image, nullptr);
+          if (it->second.memory != VK_NULL_HANDLE) dfn.vkFreeMemory(device, it->second.memory, nullptr);
+          it = texture_cache_.erase(it);
+        } else {
+          ++it;
+        }
       }
-      VkMappedMemoryRange invalidate_range{};
-      invalidate_range.sType = VK_STRUCTURE_TYPE_MAPPED_MEMORY_RANGE;
-      invalidate_range.memory = shared_memory_memory_;
-      invalidate_range.offset = 0;
-      invalidate_range.size = VK_WHOLE_SIZE;
-      dfn.vkInvalidateMappedMemoryRanges(device, 1, &invalidate_range);
-      void* guest_ptr = rex::system::kernel_state()->memory()->TranslatePhysical<void*>(
-          uint32_t(byte_offset));
-      std::memcpy(guest_ptr, shared_memory_mapped_ + byte_offset, range.size_bytes);
     }
-    static bool logged_readback = false;
-    if (!logged_readback) {
-      logged_readback = true;
-      REXGPU_INFO("NativeCommandProcessor: first memexport readback completed ({} range(s))",
-                 memexport_ranges_ready_for_readback_.size());
-    }
-    memexport_ranges_ready_for_readback_.clear();
+    pending_texture_cache_invalidations_.clear();
   }
 
   FreeTransientBuffers();
@@ -1786,7 +2048,23 @@ void NativeCommandProcessor::EnsureFrameBegun() {
 
 void NativeCommandProcessor::TryDraw(rex::graphics::xenos::PrimitiveType prim_type,
                                      uint32_t num_indices) {
-  if (!pipeline_resources_valid_ || num_indices == 0) {
+  if (!pipeline_resources_valid_) {
+    return;
+  }
+
+  // EDRAM resolve dispatch: on real hardware, RB_MODECONTROL.edram_mode ==
+  // kCopy turns what would otherwise be a normal draw into a resolve
+  // (render-target -> guest-texture copy) instead -- see TryResolveCopy's
+  // doc comment. Checked before the num_indices==0 early-out below since a
+  // resolve "draw" legitimately has a tiny (3-vertex) index count that
+  // isn't zero, but isn't a real draw either.
+  if (registers_.Get<rex::graphics::reg::RB_MODECONTROL>().edram_mode ==
+      rex::graphics::xenos::EdramMode::kCopy) {
+    TryResolveCopy();
+    return;
+  }
+
+  if (num_indices == 0) {
     return;
   }
 
@@ -2309,17 +2587,6 @@ void NativeCommandProcessor::TryDraw(rex::graphics::xenos::PrimitiveType prim_ty
   if (vertex_texture_set == VK_NULL_HANDLE || pixel_texture_set == VK_NULL_HANDLE) {
     return;
   }
-
-  // Memexport (see docs/native-renderer-headless-boot.md, "Next" -- the
-  // gameplay-preview texture is populated this way, not by a normal
-  // rasterized draw): a shader with eM writes exports data directly to
-  // guest memory via the shared-memory SSBO during this draw's GPU
-  // execution. Collected here, now that the draw is guaranteed to actually
-  // be issued below (registers_ reflects this draw's real state), but not
-  // read back until EnsureFrameBegun confirms the GPU work is complete --
-  // see pending_memexport_ranges_'s doc comment.
-  CollectMemExportRanges(*vertex_shader->shader, pending_memexport_ranges_);
-  CollectMemExportRanges(*pixel_shader->shader, pending_memexport_ranges_);
 
   VkDescriptorSet sets[4] = {shared_memory_set_, constants_set, vertex_texture_set,
                             pixel_texture_set};
