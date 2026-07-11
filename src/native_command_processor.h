@@ -74,37 +74,68 @@ class NativeCommandProcessor {
   bool InitializePipelineResources();
   void DestroyPipelineResources();
 
+  // Gets (running AnalyzeUcode on first use) the Shader object for the given
+  // raw ucode, or nullptr if empty. Cached separately from translation/
+  // VkShaderModule (see GetOrTranslateShader) because the interpolator_mask
+  // a shader needs to be *translated* with depends on its paired vertex/
+  // pixel shader (see TryDraw), but the ucode analysis itself doesn't --
+  // this lets TryDraw inspect writes_interpolators()/GetInterpolatorInputMask()
+  // on both shaders of a pair before deciding what modification to compile
+  // either one with, without re-running AnalyzeUcode every draw.
+  rex::graphics::Shader* GetOrAnalyzeShader(rex::graphics::xenos::ShaderType type,
+                                            const std::vector<uint32_t>& ucode);
+  std::unordered_map<uint64_t, std::unique_ptr<rex::graphics::Shader>> analyzed_shaders_;
+
   // Gets (translating + creating a VkShaderModule on first use) the shader
   // for the given raw ucode, or nullptr if translation failed. Cached by a
-  // hash of the ucode bytes so repeated draws with the same shader (the
-  // overwhelmingly common case -- shaders are loaded once, then reused
-  // across many draws) don't re-translate.
+  // hash of the ucode bytes plus every modification input (host vertex
+  // shader type, interpolator mask) so repeated draws with the same shader
+  // *and* modification (the overwhelmingly common case -- shaders are loaded
+  // once, then reused across many draws) don't re-translate, while a shader
+  // reused with a genuinely different modification gets its own translation
+  // instead of aliasing onto the wrong one. interpolator_mask is the
+  // guest-real intersection of what the vertex shader writes and what the
+  // pixel shader reads (see TryDraw) -- required, not defaulted, because
+  // leaving it 0 (this renderer's original bug) silently drops all
+  // vertex-to-pixel interpolated data, including vertex color, producing
+  // solid-black output for any shader relying on it. See
+  // docs/native-renderer-headless-boot.md.
   struct TranslatedShader {
-    std::unique_ptr<rex::graphics::Shader> shader;
+    rex::graphics::Shader* shader = nullptr;  // Owned by analyzed_shaders_.
     VkShaderModule module = VK_NULL_HANDLE;
   };
   TranslatedShader* GetOrTranslateShader(
       rex::graphics::xenos::ShaderType type, const std::vector<uint32_t>& ucode,
+      uint32_t interpolator_mask,
       rex::graphics::Shader::HostVertexShaderType host_vertex_shader_type =
           rex::graphics::Shader::HostVertexShaderType::kVertex);
 
   // Gets (building on first use) a VkPipeline for this exact vertex/pixel
-  // shader pair + primitive topology.
+  // shader pair + primitive topology + blend state. blend_control is the raw
+  // RB_BLENDCONTROL0 value and color_write_mask the RT0 write-mask bits from
+  // RB_COLOR_MASK (see the doc comment on GetOrCreatePipeline's
+  // blend_attachment setup in native_command_processor.cpp) -- both fold
+  // into the cache key since the guest can reuse the same shader pair with
+  // different blend state across draws (e.g. a fade animating its blend
+  // factors frame to frame with static geometry/shaders).
   VkPipeline GetOrCreatePipeline(TranslatedShader* vertex_shader, TranslatedShader* pixel_shader,
-                                 VkPrimitiveTopology topology, bool primitive_restart_enable);
+                                 VkPrimitiveTopology topology, bool primitive_restart_enable,
+                                 uint32_t blend_control, uint32_t color_write_mask);
 
-  // Milestone 3b step 7 (texture upload): gets (uploading on first use) a
-  // sampled VkImage + descriptor set for the given texture fetch constant
-  // slot, or nullptr if the fetch constant describes something not yet
-  // supported (tiled, mipped/array/3D, or a format outside the small
-  // allow-list -- see native_command_processor.cpp's GetOrUploadTexture) or
-  // is simply unbound (base_address == 0). Scoped deliberately narrow: only
-  // untiled, single-level 2D textures in a few common uncompressed formats,
-  // matching the "skip with a rate-limited log" pattern used elsewhere in
-  // this file for anything wider than what's been verified against the
-  // intro's actual draws. Only the first texture_bindings() entry per stage
-  // is honored (see texture_descriptor_layout_'s comment for why one
-  // binding suffices for now).
+  // Milestone 3b step 7 (+ DXT4/5+tiling follow-up): gets (uploading on
+  // first use) a sampled VkImage + descriptor set for the given texture
+  // fetch constant slot, or nullptr if the fetch constant describes
+  // something not yet supported (mipped/array/3D, or a format outside the
+  // small allow-list -- see native_command_processor.cpp's
+  // GetOrUploadTexture) or is simply unbound (base_address == 0). Scoped
+  // deliberately narrow: only single-level 2D textures in k_8_8_8_8/
+  // k_1_5_5_5/k_4_4_4_4/k_DXT4_5 (both tiled and linear layouts, via
+  // texture_util::GetTiledOffset2D), matching the "skip with a rate-limited
+  // log" pattern used elsewhere in this file for anything wider than what's
+  // been verified against the intro's actual draws. Only the first
+  // texture_bindings() entry per stage is honored (see
+  // texture_descriptor_layout_'s comment for why one binding suffices for
+  // now).
   struct UploadedTexture {
     VkImage image = VK_NULL_HANDLE;
     VkDeviceMemory memory = VK_NULL_HANDLE;

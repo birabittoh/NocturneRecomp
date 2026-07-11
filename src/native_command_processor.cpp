@@ -4,10 +4,12 @@
 
 #include "native_command_processor.h"
 
+#include <cmath>
 #include <cstdio>
 #include <cstring>
 #include <thread>
 
+#include <rex/graphics/pipeline/texture/util.h>
 #include <rex/logging.h>
 #include <rex/string/buffer.h>
 #include <rex/system/kernel_state.h>
@@ -38,6 +40,176 @@ uint64_t HashUcode(const std::vector<uint32_t>& ucode) {
     hash *= 0x100000001b3ull;
   }
   return hash;
+}
+
+// Decodes one 16-byte BC3/DXT5 block (already in host byte order -- see the
+// caller's byteswap handling) into a 4x4 RGBA8 patch, row-major, 4 bytes/texel.
+// No CPU decoder for this exists anywhere in the SDK (it only decodes DXT on
+// the GPU via compute shaders, see docs/native-renderer-headless-boot.md's
+// "Next" item 2) -- standard BC3 layout, written from the format spec.
+void DecompressDXT5Block(const uint8_t block[16], uint8_t out_rgba[4 * 4 * 4]) {
+  uint8_t alpha0 = block[0];
+  uint8_t alpha1 = block[1];
+  uint64_t alpha_bits = 0;
+  for (int i = 0; i < 6; ++i) {
+    alpha_bits |= uint64_t(block[2 + i]) << (8 * i);
+  }
+  uint8_t alpha_lut[8];
+  alpha_lut[0] = alpha0;
+  alpha_lut[1] = alpha1;
+  if (alpha0 > alpha1) {
+    for (int i = 1; i <= 5; ++i) {
+      alpha_lut[1 + i] = uint8_t(((6 - i) * uint32_t(alpha0) + i * uint32_t(alpha1)) / 7);
+    }
+  } else {
+    for (int i = 1; i <= 3; ++i) {
+      alpha_lut[1 + i] = uint8_t(((4 - i) * uint32_t(alpha0) + i * uint32_t(alpha1)) / 5);
+    }
+    alpha_lut[6] = 0;
+    alpha_lut[7] = 255;
+  }
+
+  uint16_t color0 = uint16_t(block[8] | (block[9] << 8));
+  uint16_t color1 = uint16_t(block[10] | (block[11] << 8));
+  uint32_t color_indices =
+      uint32_t(block[12]) | (uint32_t(block[13]) << 8) | (uint32_t(block[14]) << 16) |
+      (uint32_t(block[15]) << 24);
+
+  auto unpack565 = [](uint16_t c, uint8_t& r, uint8_t& g, uint8_t& b) {
+    uint32_t rv = (c >> 11) & 0x1F;
+    uint32_t gv = (c >> 5) & 0x3F;
+    uint32_t bv = c & 0x1F;
+    r = uint8_t((rv << 3) | (rv >> 2));
+    g = uint8_t((gv << 2) | (gv >> 4));
+    b = uint8_t((bv << 3) | (bv >> 2));
+  };
+  uint8_t color_lut[4][3];
+  unpack565(color0, color_lut[0][0], color_lut[0][1], color_lut[0][2]);
+  unpack565(color1, color_lut[1][0], color_lut[1][1], color_lut[1][2]);
+  // BC3's color block is always 4-color mode (unlike BC1, no punch-through
+  // alpha variant), regardless of whether color0 > color1.
+  for (int c = 0; c < 3; ++c) {
+    color_lut[2][c] = uint8_t((2 * uint32_t(color_lut[0][c]) + uint32_t(color_lut[1][c])) / 3);
+    color_lut[3][c] = uint8_t((uint32_t(color_lut[0][c]) + 2 * uint32_t(color_lut[1][c])) / 3);
+  }
+
+  for (int texel = 0; texel < 16; ++texel) {
+    uint32_t ci = (color_indices >> (2 * texel)) & 3;
+    uint32_t ai = uint32_t((alpha_bits >> (3 * texel)) & 7);
+    uint8_t* dst = out_rgba + texel * 4;
+    dst[0] = color_lut[ci][0];
+    dst[1] = color_lut[ci][1];
+    dst[2] = color_lut[ci][2];
+    dst[3] = alpha_lut[ai];
+  }
+}
+
+// Byte-swaps a whole dword-aligned buffer per the guest's Endian field,
+// matching xenos::GpuSwap's semantics exactly (rex/graphics/xenos.h) --
+// applied uniformly to raw bytes with no awareness of sub-field structure
+// (matches how the real Vulkan backend's texture_load_*_cs compute shaders
+// treat compressed blocks: the swap is mechanical over the whole block,
+// not aware of BC3's alpha/color/index sub-layout). k8in16 swaps each
+// 2-byte pair independently (bytes 0<->1, 2<->3); k8in32 fully reverses
+// each 4-byte dword; k16in32 swaps the two 16-bit halves of each dword
+// without touching byte order within each half; kNone copies unchanged.
+// size must be a multiple of 4.
+void GpuSwapBytes(const uint8_t* src, uint8_t* dst, size_t size, rex::graphics::xenos::Endian e) {
+  using rex::graphics::xenos::Endian;
+  for (size_t i = 0; i < size; i += 4) {
+    const uint8_t* s = src + i;
+    uint8_t* d = dst + i;
+    switch (e) {
+      case Endian::k8in16:
+        d[0] = s[1];
+        d[1] = s[0];
+        d[2] = s[3];
+        d[3] = s[2];
+        break;
+      case Endian::k8in32:
+        d[0] = s[3];
+        d[1] = s[2];
+        d[2] = s[1];
+        d[3] = s[0];
+        break;
+      case Endian::k16in32:
+        d[0] = s[2];
+        d[1] = s[3];
+        d[2] = s[0];
+        d[3] = s[1];
+        break;
+      default:
+        d[0] = s[0];
+        d[1] = s[1];
+        d[2] = s[2];
+        d[3] = s[3];
+        break;
+    }
+  }
+}
+
+// Maps the guest's RB_BLENDCONTROL blend-factor/op encoding to the matching
+// Vulkan enum. Xenos::BlendFactor's numeric values don't line up with
+// VkBlendFactor's (e.g. kSrcColor=4 vs. VK_BLEND_FACTOR_SRC_COLOR=2), so this
+// has to be a real table, not a cast -- see rexglue-sdk's
+// VulkanPipelineCache::WritePipelineRenderTargetDescription/kBlendFactorMap
+// (pipeline_cache.cpp) for the reference this replicates (not reused
+// directly -- that's a private method of a plugin-only class this renderer
+// deliberately doesn't link, same rationale as SystemConstants above).
+VkBlendFactor ToVkBlendFactor(rex::graphics::xenos::BlendFactor f) {
+  using BF = rex::graphics::xenos::BlendFactor;
+  switch (f) {
+    case BF::kZero:
+      return VK_BLEND_FACTOR_ZERO;
+    case BF::kOne:
+      return VK_BLEND_FACTOR_ONE;
+    case BF::kSrcColor:
+      return VK_BLEND_FACTOR_SRC_COLOR;
+    case BF::kOneMinusSrcColor:
+      return VK_BLEND_FACTOR_ONE_MINUS_SRC_COLOR;
+    case BF::kSrcAlpha:
+      return VK_BLEND_FACTOR_SRC_ALPHA;
+    case BF::kOneMinusSrcAlpha:
+      return VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA;
+    case BF::kDstColor:
+      return VK_BLEND_FACTOR_DST_COLOR;
+    case BF::kOneMinusDstColor:
+      return VK_BLEND_FACTOR_ONE_MINUS_DST_COLOR;
+    case BF::kDstAlpha:
+      return VK_BLEND_FACTOR_DST_ALPHA;
+    case BF::kOneMinusDstAlpha:
+      return VK_BLEND_FACTOR_ONE_MINUS_DST_ALPHA;
+    case BF::kConstantColor:
+      return VK_BLEND_FACTOR_CONSTANT_COLOR;
+    case BF::kOneMinusConstantColor:
+      return VK_BLEND_FACTOR_ONE_MINUS_CONSTANT_COLOR;
+    case BF::kConstantAlpha:
+      return VK_BLEND_FACTOR_CONSTANT_ALPHA;
+    case BF::kOneMinusConstantAlpha:
+      return VK_BLEND_FACTOR_ONE_MINUS_CONSTANT_ALPHA;
+    case BF::kSrcAlphaSaturate:
+      return VK_BLEND_FACTOR_SRC_ALPHA_SATURATE;
+    default:
+      return VK_BLEND_FACTOR_ONE;
+  }
+}
+
+VkBlendOp ToVkBlendOp(rex::graphics::xenos::BlendOp op) {
+  using BO = rex::graphics::xenos::BlendOp;
+  switch (op) {
+    case BO::kAdd:
+      return VK_BLEND_OP_ADD;
+    case BO::kSubtract:
+      return VK_BLEND_OP_SUBTRACT;
+    case BO::kMin:
+      return VK_BLEND_OP_MIN;
+    case BO::kMax:
+      return VK_BLEND_OP_MAX;
+    case BO::kRevSubtract:
+      return VK_BLEND_OP_REVERSE_SUBTRACT;
+    default:
+      return VK_BLEND_OP_ADD;
+  }
 }
 
 VkPrimitiveTopology PrimitiveTypeToVkTopology(rex::graphics::xenos::PrimitiveType prim_type) {
@@ -545,6 +717,7 @@ void NativeCommandProcessor::DestroyPipelineResources() {
     }
   }
   shader_cache_.clear();
+  analyzed_shaders_.clear();
 
   if (color_target_staging_buffer_ != VK_NULL_HANDLE)
     dfn.vkDestroyBuffer(device, color_target_staging_buffer_, nullptr);
@@ -737,20 +910,50 @@ void NativeCommandProcessor::OnDraw(const rex::graphics::PacketInfo& info,
   TryDraw(initiator.prim_type, num_indices);
 }
 
+rex::graphics::Shader* NativeCommandProcessor::GetOrAnalyzeShader(
+    rex::graphics::xenos::ShaderType type, const std::vector<uint32_t>& ucode) {
+  if (ucode.empty()) {
+    return nullptr;
+  }
+  uint64_t key =
+      HashUcode(ucode) ^ (type == rex::graphics::xenos::ShaderType::kVertex ? 0x1ull : 0x2ull);
+  auto existing = analyzed_shaders_.find(key);
+  if (existing != analyzed_shaders_.end()) {
+    return existing->second.get();
+  }
+  using rex::graphics::Shader;
+  auto shader = std::make_unique<Shader>(type, key, ucode.data(), ucode.size(), std::endian::big);
+  rex::string::StringBuffer disasm_buffer;
+  shader->AnalyzeUcode(disasm_buffer);
+  static uint32_t disasm_logged = 0;
+  if (disasm_logged < 6) {
+    ++disasm_logged;
+    REXGPU_INFO("NativeCommandProcessor: shader disasm ({} dwords, type={}):\n{}", ucode.size(),
+               type == rex::graphics::xenos::ShaderType::kVertex ? "vertex" : "pixel",
+               shader->ucode_disassembly());
+  }
+  Shader* ptr = shader.get();
+  analyzed_shaders_.emplace(key, std::move(shader));
+  return ptr;
+}
+
 NativeCommandProcessor::TranslatedShader* NativeCommandProcessor::GetOrTranslateShader(
     rex::graphics::xenos::ShaderType type, const std::vector<uint32_t>& ucode,
-    rex::graphics::Shader::HostVertexShaderType host_vertex_shader_type) {
-  if (ucode.empty()) {
+    uint32_t interpolator_mask, rex::graphics::Shader::HostVertexShaderType host_vertex_shader_type) {
+  rex::graphics::Shader* shader = GetOrAnalyzeShader(type, ucode);
+  if (!shader) {
     return nullptr;
   }
 
   // host_vertex_shader_type only varies translation for vertex shaders (see
-  // TryDraw's kRectangleList handling) -- fold it into the cache key so a
-  // shader used both as a plain draw and a rectangle-list draw gets separate
-  // translations/pipelines instead of aliasing onto the wrong one.
+  // TryDraw's kRectangleList handling); interpolator_mask matters for both
+  // (see the header comment on GetOrTranslateShader / TryDraw's computation
+  // of it) -- fold both into the cache key so a shader reused with a
+  // genuinely different modification gets its own translation instead of
+  // aliasing onto the wrong one.
   uint64_t key = HashUcode(ucode) ^
                 (type == rex::graphics::xenos::ShaderType::kVertex ? 0x1ull : 0x2ull) ^
-                (uint64_t(host_vertex_shader_type) << 8);
+                (uint64_t(host_vertex_shader_type) << 8) ^ (uint64_t(interpolator_mask) << 16);
   auto existing = shader_cache_.find(key);
   if (existing != shader_cache_.end()) {
     return &existing->second;
@@ -771,17 +974,6 @@ NativeCommandProcessor::TranslatedShader* NativeCommandProcessor::GetOrTranslate
   using rex::graphics::Shader;
   using rex::graphics::SpirvShaderTranslator;
 
-  auto shader = std::make_unique<Shader>(type, key, ucode.data(), ucode.size(), std::endian::big);
-  rex::string::StringBuffer disasm_buffer;
-  shader->AnalyzeUcode(disasm_buffer);
-  static uint32_t disasm_logged = 0;
-  if (disasm_logged < 6) {
-    ++disasm_logged;
-    REXGPU_INFO("NativeCommandProcessor: shader disasm ({} dwords, type={}):\n{}", ucode.size(),
-               type == rex::graphics::xenos::ShaderType::kVertex ? "vertex" : "pixel",
-               shader->ucode_disassembly());
-  }
-
   auto program_cntl = registers_.Get<rex::graphics::reg::SQ_PROGRAM_CNTL>();
   uint32_t num_reg = type == rex::graphics::xenos::ShaderType::kVertex ? program_cntl.vs_num_reg
                                                                        : program_cntl.ps_num_reg;
@@ -791,11 +983,24 @@ NativeCommandProcessor::TranslatedShader* NativeCommandProcessor::GetOrTranslate
   SpirvShaderTranslator translator(features, /*native_2x_msaa_with_attachments=*/false,
                                    /*native_2x_msaa_no_attachments=*/false,
                                    /*edram_fragment_shader_interlock=*/false);
-  uint64_t modification =
+  SpirvShaderTranslator::Modification modification(
       type == rex::graphics::xenos::ShaderType::kVertex
           ? translator.GetDefaultVertexShaderModification(dynamic_regs, host_vertex_shader_type)
-          : translator.GetDefaultPixelShaderModification(dynamic_regs);
-  Shader::Translation* translation = shader->GetOrCreateTranslation(modification);
+          : translator.GetDefaultPixelShaderModification(dynamic_regs));
+  // Real RB_BLENDCONTROL-adjacent bug sibling: the "default" modification
+  // leaves interpolator_mask at 0, meaning no data at all is passed from the
+  // vertex shader's interpolator exports to the pixel shader's inputs --
+  // found via RenderDoc (a 1-instruction "oC0 = r0" pixel shader with no
+  // Input variable at all in its SPIR-V interface) to be why textureless
+  // solid-color draws (e.g. the intro's black quads) rendered as flat black:
+  // the pixel shader's r0 (meant to hold the interpolated vertex color) was
+  // simply never wired up. See docs/native-renderer-headless-boot.md.
+  if (type == rex::graphics::xenos::ShaderType::kVertex) {
+    modification.vertex.interpolator_mask = interpolator_mask;
+  } else {
+    modification.pixel.interpolator_mask = interpolator_mask;
+  }
+  Shader::Translation* translation = shader->GetOrCreateTranslation(modification.value);
   bool ok = translator.TranslateAnalyzedShader(*translation);
 
   VkShaderModule module = VK_NULL_HANDLE;
@@ -810,7 +1015,7 @@ NativeCommandProcessor::TranslatedShader* NativeCommandProcessor::GetOrTranslate
                 type == rex::graphics::xenos::ShaderType::kVertex ? "vertex" : "pixel");
   }
 
-  auto [inserted, _] = shader_cache_.emplace(key, TranslatedShader{std::move(shader), module});
+  auto [inserted, _] = shader_cache_.emplace(key, TranslatedShader{shader, module});
   return &inserted->second;
 }
 
@@ -926,21 +1131,26 @@ NativeCommandProcessor::UploadedTexture* NativeCommandProcessor::GetOrUploadText
   }
 
   // Deliberately narrow support (see the header comment on GetOrUploadTexture):
-  // only untiled, single-level, non-stacked 2D textures in a handful of
-  // simple uncompressed formats -- confirmed against dumps/textures/ (real
-  // texture dumps from a working xenos run, filenames include the decoded
-  // format) that the intro's content is overwhelmingly k_DXT4_5 (needs block
-  // decompression + tiling, not implemented yet) with some k_1_5_5_5/
-  // k_4_4_4_4/k_8_8_8_8 -- those three are what's supported here. Everything
-  // else (including any of these three formats if tiled/mipped) falls back
-  // to the default texture rather than guessing at tiling math or block
-  // decompression not yet implemented.
+  // single-level, non-stacked 2D textures in a handful of formats --
+  // confirmed against dumps/textures/ (real texture dumps from a working
+  // xenos run, filenames include the decoded format) that the intro's
+  // content is overwhelmingly k_DXT4_5 (block-compressed, usually tiled with
+  // packed_mips set) with some uncompressed k_1_5_5_5/k_4_4_4_4/k_8_8_8_8.
+  // Tiled and linear layouts are both handled (via
+  // texture_util::GetTiledOffset2D for the former), for both the compressed
+  // and uncompressed formats -- only dimension/mip-range/stacking and the
+  // format allow-list are actually restrictive here. packed_mips is allowed
+  // even though mip tail addressing isn't implemented, because with
+  // mip_min==mip_max==0 there's no mip level 1+ to address -- packed_mips
+  // only changes where *those* would live, not the base level's own pitch-
+  // based addressing (see texture_util::util.h's big block comment on base
+  // vs. mip addressing).
   bool format_supported = fetch.format == TextureFormat::k_8_8_8_8 ||
                           fetch.format == TextureFormat::k_1_5_5_5 ||
-                          fetch.format == TextureFormat::k_4_4_4_4;
-  if (fetch.dimension != DataDimension::k2DOrStacked || fetch.stacked || fetch.tiled ||
-      fetch.packed_mips || fetch.mip_min_level != 0 || fetch.mip_max_level != 0 ||
-      !format_supported) {
+                          fetch.format == TextureFormat::k_4_4_4_4 ||
+                          fetch.format == TextureFormat::k_DXT4_5;
+  if (fetch.dimension != DataDimension::k2DOrStacked || fetch.stacked ||
+      fetch.mip_min_level != 0 || fetch.mip_max_level != 0 || !format_supported) {
     static uint32_t skipped_logged = 0;
     if (skipped_logged < 20) {
       ++skipped_logged;
@@ -978,58 +1188,111 @@ NativeCommandProcessor::UploadedTexture* NativeCommandProcessor::GetOrUploadText
 
   uint32_t width = fetch.size_2d.width + 1;
   uint32_t height = fetch.size_2d.height + 1;
-  // Bytes per texel in guest memory: 4 for k_8_8_8_8, 2 for the packed
-  // 16-bit formats. Row stride from the fetch constant's pitch (texels >> 5,
-  // per the field comment in xenos.h), falling back to a tightly-packed row
-  // if pitch somehow decodes smaller than the width itself.
-  uint32_t bytes_per_texel = fetch.format == TextureFormat::k_8_8_8_8 ? 4 : 2;
-  uint32_t pitch_texels = std::max(fetch.pitch * 32u, width);
   uint32_t base_address = fetch.base_address << 12;
 
   const uint8_t* guest_base =
       rex::system::kernel_state()->memory()->TranslatePhysical<const uint8_t*>(base_address);
 
   // Xenos textures typically use Endian::k8in32 (4-byte formats) or
-  // Endian::k8in16 (2-byte formats) -- swap each texel to host order before
-  // unpacking; kNone is used as-is.
+  // Endian::k8in16 (2-byte formats/DXT blocks) -- swap each texel (or, for
+  // DXT, each 16-bit field within the block) to host order before unpacking;
+  // kNone is used as-is.
   bool byteswap = fetch.endianness == rex::graphics::xenos::Endian::k8in32 ||
                   fetch.endianness == rex::graphics::xenos::Endian::k8in16;
 
-  // Replicates the top bits into the low bits when expanding an n-bit
-  // channel to 8 bits, instead of a plain shift (which would clip white to
-  // slightly-off-white) -- standard bit-replication expansion.
-  auto expand5 = [](uint32_t v) -> uint8_t { return uint8_t((v << 3) | (v >> 2)); };
-  auto expand4 = [](uint32_t v) -> uint8_t { return uint8_t((v << 4) | v); };
-
   std::vector<uint8_t> rgba(size_t(width) * height * 4);
-  for (uint32_t y = 0; y < height; ++y) {
-    const uint8_t* src_row = guest_base + size_t(y) * pitch_texels * bytes_per_texel;
-    uint8_t* dst_row = &rgba[size_t(y) * width * 4];
-    for (uint32_t x = 0; x < width; ++x) {
-      uint8_t* dst = dst_row + x * 4;
-      if (fetch.format == TextureFormat::k_8_8_8_8) {
-        const uint8_t* src = src_row + x * 4;
-        if (byteswap) {
-          uint32_t texel = rex::memory::load_and_swap<uint32_t>(src);
-          std::memcpy(dst, &texel, 4);
-        } else {
-          std::memcpy(dst, src, 4);
+
+  if (fetch.format == TextureFormat::k_DXT4_5) {
+    // Block-compressed: address math operates in block units (a 4x4-texel
+    // block is the atomic unit for both pitch and tiling), not texel units --
+    // see texture_util::GetTiledOffset2D's doc comment on util.h. The pitch
+    // field ("texels >> 5") is in *texel* units uniformly across formats, not
+    // pre-converted to blocks for compressed ones -- fetch.pitch*32 is a
+    // texel-granularity pitch (D3D9's 32-texel alignment), which must be
+    // divided by the block width (4) to get the block-granularity pitch
+    // GetTiledOffset2D/the linear stride math below actually need. Missing
+    // this /4 was a real, confirmed bug (not a guess): a garbled horizontal
+    // noise band in tiled DXT textures whose top/bottom rows still looked
+    // correct (a periodic corruption pattern -- the wrong pitch, 896 blocks
+    // instead of the correct 224, was an exact 4x multiple, which
+    // GetTiledOffset2D's tile-periodic addressing partially aliases back to
+    // correct-looking output for some row ranges and not others, rather than
+    // a uniform diagonal shear a plain linear-addressing bug would produce).
+    // See docs/native-renderer-headless-boot.md.
+    uint32_t block_w = (width + 3) / 4;
+    uint32_t block_h = (height + 3) / 4;
+    constexpr uint32_t kBytesPerBlock = 16;
+    constexpr uint32_t kBytesPerBlockLog2 = 4;
+    uint32_t pitch_blocks = std::max((fetch.pitch * 32u) / 4, block_w);
+    for (uint32_t by = 0; by < block_h; ++by) {
+      for (uint32_t bx = 0; bx < block_w; ++bx) {
+        uint32_t block_offset =
+            fetch.tiled ? uint32_t(rex::graphics::texture_util::GetTiledOffset2D(
+                              int32_t(bx), int32_t(by), pitch_blocks, kBytesPerBlockLog2))
+                        : (by * pitch_blocks + bx) * kBytesPerBlock;
+        const uint8_t* src = guest_base + block_offset;
+        uint8_t block[16];
+        GpuSwapBytes(src, block, 16, fetch.endianness);
+        uint8_t decoded[4 * 4 * 4];
+        DecompressDXT5Block(block, decoded);
+        uint32_t rows = std::min<uint32_t>(4, height - by * 4);
+        uint32_t cols = std::min<uint32_t>(4, width - bx * 4);
+        for (uint32_t ty = 0; ty < rows; ++ty) {
+          uint32_t y = by * 4 + ty;
+          for (uint32_t tx = 0; tx < cols; ++tx) {
+            uint32_t x = bx * 4 + tx;
+            std::memcpy(&rgba[(size_t(y) * width + x) * 4], &decoded[(ty * 4 + tx) * 4], 4);
+          }
         }
-      } else {
-        uint16_t texel = byteswap ? rex::memory::load_and_swap<uint16_t>(src_row + x * 2)
-                                  : *reinterpret_cast<const uint16_t*>(src_row + x * 2);
-        if (fetch.format == TextureFormat::k_1_5_5_5) {
-          // D3DFMT_A1R5G5B5-style packing: bit15=A, 14-10=R, 9-5=G, 4-0=B.
-          dst[0] = expand5((texel >> 10) & 0x1F);
-          dst[1] = expand5((texel >> 5) & 0x1F);
-          dst[2] = expand5(texel & 0x1F);
-          dst[3] = (texel & 0x8000) ? 0xFF : 0x00;
+      }
+    }
+  } else {
+    // Bytes per texel in guest memory: 4 for k_8_8_8_8, 2 for the packed
+    // 16-bit formats. Row stride from the fetch constant's pitch (texels >>
+    // 5, per the field comment in xenos.h), falling back to a tightly-packed
+    // row if pitch somehow decodes smaller than the width itself.
+    uint32_t bytes_per_texel = fetch.format == TextureFormat::k_8_8_8_8 ? 4 : 2;
+    uint32_t bytes_per_texel_log2 = fetch.format == TextureFormat::k_8_8_8_8 ? 2u : 1u;
+    uint32_t pitch_texels = std::max(fetch.pitch * 32u, width);
+
+    // Replicates the top bits into the low bits when expanding an n-bit
+    // channel to 8 bits, instead of a plain shift (which would clip white to
+    // slightly-off-white) -- standard bit-replication expansion.
+    auto expand5 = [](uint32_t v) -> uint8_t { return uint8_t((v << 3) | (v >> 2)); };
+    auto expand4 = [](uint32_t v) -> uint8_t { return uint8_t((v << 4) | v); };
+
+    for (uint32_t y = 0; y < height; ++y) {
+      uint8_t* dst_row = &rgba[size_t(y) * width * 4];
+      for (uint32_t x = 0; x < width; ++x) {
+        uint32_t texel_offset =
+            fetch.tiled ? uint32_t(rex::graphics::texture_util::GetTiledOffset2D(
+                              int32_t(x), int32_t(y), pitch_texels, bytes_per_texel_log2))
+                        : (y * pitch_texels + x) * bytes_per_texel;
+        const uint8_t* src = guest_base + texel_offset;
+        uint8_t* dst = dst_row + x * 4;
+        if (fetch.format == TextureFormat::k_8_8_8_8) {
+          if (byteswap) {
+            uint32_t texel = rex::memory::load_and_swap<uint32_t>(src);
+            std::memcpy(dst, &texel, 4);
+          } else {
+            std::memcpy(dst, src, 4);
+          }
         } else {
-          // k_4_4_4_4, D3DFMT_A4R4G4B4-style packing: 15-12=A, 11-8=R, 7-4=G, 3-0=B.
-          dst[0] = expand4((texel >> 8) & 0xF);
-          dst[1] = expand4((texel >> 4) & 0xF);
-          dst[2] = expand4(texel & 0xF);
-          dst[3] = expand4((texel >> 12) & 0xF);
+          uint16_t texel = byteswap ? rex::memory::load_and_swap<uint16_t>(src)
+                                    : *reinterpret_cast<const uint16_t*>(src);
+          if (fetch.format == TextureFormat::k_1_5_5_5) {
+            // D3DFMT_A1R5G5B5-style packing: bit15=A, 14-10=R, 9-5=G, 4-0=B.
+            dst[0] = expand5((texel >> 10) & 0x1F);
+            dst[1] = expand5((texel >> 5) & 0x1F);
+            dst[2] = expand5(texel & 0x1F);
+            dst[3] = (texel & 0x8000) ? 0xFF : 0x00;
+          } else {
+            // k_4_4_4_4, D3DFMT_A4R4G4B4-style packing: 15-12=A, 11-8=R, 7-4=G, 3-0=B.
+            dst[0] = expand4((texel >> 8) & 0xF);
+            dst[1] = expand4((texel >> 4) & 0xF);
+            dst[2] = expand4(texel & 0xF);
+            dst[3] = expand4((texel >> 12) & 0xF);
+          }
         }
       }
     }
@@ -1134,10 +1397,13 @@ void NativeCommandProcessor::DestroyTextureCache() {
 VkPipeline NativeCommandProcessor::GetOrCreatePipeline(TranslatedShader* vertex_shader,
                                                         TranslatedShader* pixel_shader,
                                                         VkPrimitiveTopology topology,
-                                                        bool primitive_restart_enable) {
+                                                        bool primitive_restart_enable,
+                                                        uint32_t blend_control,
+                                                        uint32_t color_write_mask) {
   uint64_t key = reinterpret_cast<uintptr_t>(vertex_shader) ^
                 (reinterpret_cast<uintptr_t>(pixel_shader) * 3) ^ (uint64_t(topology) << 1) ^
-                (primitive_restart_enable ? 0x8000000000000000ull : 0);
+                (primitive_restart_enable ? 0x8000000000000000ull : 0) ^
+                (uint64_t(blend_control) << 20) ^ (uint64_t(color_write_mask) << 8);
   auto existing = pipeline_cache_.find(key);
   if (existing != pipeline_cache_.end()) {
     return existing->second;
@@ -1200,9 +1466,36 @@ VkPipeline NativeCommandProcessor::GetOrCreatePipeline(TranslatedShader* vertex_
   multisample.sType = VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO;
   multisample.rasterizationSamples = VK_SAMPLE_COUNT_1_BIT;
 
+  // Real RB_BLENDCONTROL0-driven blend state, replacing what used to be a
+  // hardcoded zero-initialized (i.e. blendEnable=false, opaque overwrite)
+  // attachment -- found via RenderDoc pixel_history to be the root cause of
+  // "black squares" visible over the intro: draws meant to blend
+  // translucently (e.g. fades) were instead unconditionally overwriting the
+  // framebuffer with their raw shader output regardless of alpha, since
+  // nothing ever read the guest's actual blend registers. See
+  // docs/native-renderer-headless-boot.md.
+  rex::graphics::reg::RB_BLENDCONTROL rb_blendcontrol0;
+  rb_blendcontrol0.value = blend_control;
+  VkBlendFactor src_color = ToVkBlendFactor(rb_blendcontrol0.color_srcblend);
+  VkBlendFactor dst_color = ToVkBlendFactor(rb_blendcontrol0.color_destblend);
+  VkBlendOp color_op = ToVkBlendOp(rb_blendcontrol0.color_comb_fcn);
+  VkBlendFactor src_alpha = ToVkBlendFactor(rb_blendcontrol0.alpha_srcblend);
+  VkBlendFactor dst_alpha = ToVkBlendFactor(rb_blendcontrol0.alpha_destblend);
+  VkBlendOp alpha_op = ToVkBlendOp(rb_blendcontrol0.alpha_comb_fcn);
+  bool is_identity_blend = src_color == VK_BLEND_FACTOR_ONE && dst_color == VK_BLEND_FACTOR_ZERO &&
+                           color_op == VK_BLEND_OP_ADD && src_alpha == VK_BLEND_FACTOR_ONE &&
+                           dst_alpha == VK_BLEND_FACTOR_ZERO && alpha_op == VK_BLEND_OP_ADD;
+
   VkPipelineColorBlendAttachmentState blend_attachment{};
-  blend_attachment.colorWriteMask = VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT |
-                                    VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT;
+  blend_attachment.colorWriteMask = VkColorComponentFlags(color_write_mask);
+  blend_attachment.blendEnable =
+      (color_write_mask != 0 && !is_identity_blend) ? VK_TRUE : VK_FALSE;
+  blend_attachment.srcColorBlendFactor = src_color;
+  blend_attachment.dstColorBlendFactor = dst_color;
+  blend_attachment.colorBlendOp = color_op;
+  blend_attachment.srcAlphaBlendFactor = src_alpha;
+  blend_attachment.dstAlphaBlendFactor = dst_alpha;
+  blend_attachment.alphaBlendOp = alpha_op;
   VkPipelineColorBlendStateCreateInfo blend_state{};
   blend_state.sType = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO;
   blend_state.attachmentCount = 1;
@@ -1384,20 +1677,50 @@ void NativeCommandProcessor::TryDraw(rex::graphics::xenos::PrimitiveType prim_ty
     return;
   }
 
+  // Analyze both shaders (cheap, cached independently of modification --
+  // see GetOrAnalyzeShader) before translating either, since the
+  // interpolator_mask each needs to be *translated* with depends on both:
+  // real backend formula (rexglue-sdk's command_processor.cpp) is
+  // "what the vertex shader actually writes" intersected with "what the
+  // pixel shader actually reads" -- getting this right is what makes
+  // per-vertex color/UV/etc. data actually reach the pixel shader at all
+  // (see GetOrTranslateShader's doc comment).
+  rex::graphics::Shader* vertex_shader_analyzed =
+      GetOrAnalyzeShader(rex::graphics::xenos::ShaderType::kVertex, active_vertex_shader_.ucode);
+  rex::graphics::Shader* pixel_shader_analyzed =
+      GetOrAnalyzeShader(rex::graphics::xenos::ShaderType::kPixel, active_pixel_shader_.ucode);
+  if (!vertex_shader_analyzed || !pixel_shader_analyzed) {
+    return;
+  }
+  uint32_t ps_param_gen_pos = UINT32_MAX;
+  uint32_t interpolator_mask =
+      vertex_shader_analyzed->writes_interpolators() &
+      pixel_shader_analyzed->GetInterpolatorInputMask(
+          registers_.Get<rex::graphics::reg::SQ_PROGRAM_CNTL>(),
+          registers_.Get<rex::graphics::reg::SQ_CONTEXT_MISC>(), ps_param_gen_pos);
+
   TranslatedShader* vertex_shader = GetOrTranslateShader(
-      rex::graphics::xenos::ShaderType::kVertex, active_vertex_shader_.ucode,
+      rex::graphics::xenos::ShaderType::kVertex, active_vertex_shader_.ucode, interpolator_mask,
       is_rect_list ? rex::graphics::Shader::HostVertexShaderType::kRectangleListAsTriangleStrip
                    : rex::graphics::Shader::HostVertexShaderType::kVertex);
-  TranslatedShader* pixel_shader =
-      GetOrTranslateShader(rex::graphics::xenos::ShaderType::kPixel, active_pixel_shader_.ucode);
+  TranslatedShader* pixel_shader = GetOrTranslateShader(
+      rex::graphics::xenos::ShaderType::kPixel, active_pixel_shader_.ucode, interpolator_mask);
   if (!vertex_shader || !pixel_shader || vertex_shader->module == VK_NULL_HANDLE ||
       pixel_shader->module == VK_NULL_HANDLE) {
     return;
   }
 
+  auto rb_color_mask = registers_.Get<rex::graphics::reg::RB_COLOR_MASK>();
+  uint32_t color_write_mask = 0;
+  if (rb_color_mask.write_red0) color_write_mask |= VK_COLOR_COMPONENT_R_BIT;
+  if (rb_color_mask.write_green0) color_write_mask |= VK_COLOR_COMPONENT_G_BIT;
+  if (rb_color_mask.write_blue0) color_write_mask |= VK_COLOR_COMPONENT_B_BIT;
+  if (rb_color_mask.write_alpha0) color_write_mask |= VK_COLOR_COMPONENT_A_BIT;
+  uint32_t blend_control = registers_.Get<rex::graphics::reg::RB_BLENDCONTROL>().value;
+
   VkPipeline pipeline =
       GetOrCreatePipeline(vertex_shader, pixel_shader, topology, /*primitive_restart_enable=*/
-                         is_rect_list);
+                         is_rect_list, blend_control, color_write_mask);
   if (pipeline == VK_NULL_HANDLE) {
     return;
   }
@@ -1543,6 +1866,24 @@ void NativeCommandProcessor::TryDraw(rex::graphics::xenos::PrimitiveType prim_ty
   // doesn't link.
   SpirvShaderTranslator::SystemConstants system_constants{};
   {
+    // Every pixel shader unconditionally multiplies its final output color by
+    // system_constants.color_exp_bias[rt] (see SpirvShaderTranslator's
+    // generated SPIR-V) -- value-initializing SystemConstants left this at
+    // 0.0f, silently zeroing every draw's color regardless of texture/vertex
+    // data/blending. Found via RenderDoc after the interpolator_mask fix
+    // (below) didn't change a black-quad draw's output at all, which should
+    // have been impossible if the fix were insufficient by itself -- tracing
+    // the SPIR-V further up from the interpolator load found this multiply.
+    // Real backend (rexglue-sdk's command_processor.cpp) computes this as
+    // 1.0f with RB_COLOR_INFO's 6-bit signed color_exp_bias field added into
+    // the float's exponent bits (equivalent to exp2f(color_exp_bias)); only
+    // RT0 is populated here since this renderer only has one color target.
+    auto rb_color_info = registers_.Get<rex::graphics::reg::RB_COLOR_INFO>();
+    system_constants.color_exp_bias[0] = std::exp2(float(rb_color_info.color_exp_bias));
+    system_constants.color_exp_bias[1] = 1.0f;
+    system_constants.color_exp_bias[2] = 1.0f;
+    system_constants.color_exp_bias[3] = 1.0f;
+
     auto pa_cl_clip_cntl = registers_.Get<rex::graphics::reg::PA_CL_CLIP_CNTL>();
     auto pa_cl_vte_cntl = registers_.Get<rex::graphics::reg::PA_CL_VTE_CNTL>();
     auto pa_su_sc_mode_cntl = registers_.Get<rex::graphics::reg::PA_SU_SC_MODE_CNTL>();
@@ -1657,12 +1998,14 @@ void NativeCommandProcessor::TryDraw(rex::graphics::xenos::PrimitiveType prim_ty
       REXGPU_INFO(
           "NativeCommandProcessor: sysconst draw#{} clip_cntl={:08X} vte_cntl={:08X} "
           "flags={:08X} scale=({:.3f},{:.3f},{:.3f}) offset=({:.3f},{:.3f},{:.3f}) "
-          "vidx_min={} vidx_max={}",
+          "vidx_min={} vidx_max={} blend_control={:08X} color_mask={:08X}",
           draws_logged_, pa_cl_clip_cntl.value, pa_cl_vte_cntl.value, system_constants.flags,
           system_constants.ndc_scale[0], system_constants.ndc_scale[1],
           system_constants.ndc_scale[2], system_constants.ndc_offset[0],
           system_constants.ndc_offset[1], system_constants.ndc_offset[2],
-          system_constants.vertex_index_min, system_constants.vertex_index_max);
+          system_constants.vertex_index_min, system_constants.vertex_index_max,
+          registers_.Get<rex::graphics::reg::RB_BLENDCONTROL>().value,
+          registers_.Get<rex::graphics::reg::RB_COLOR_MASK>().value);
     }
   }
   upload_constant_buffer(&system_constants, sizeof(system_constants),

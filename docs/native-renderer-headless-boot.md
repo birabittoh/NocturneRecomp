@@ -1297,14 +1297,405 @@ anything new. **Item 2 below is now the actual next step, unblocked.**
    in `native_command_processor.cpp` — once a couple of real textures are
    confirmed rendering, so they don't have to be re-diagnosed from scratch
    if something regresses in the meantime.
-2. **`k_DXT4_5` support (block decompression + tiling)** — see step 8's
-   item 2 for the details (unchanged, still accurate). This is the actual
-   next piece of work: `GetOrUploadTexture`'s `format_supported` check needs
-   a DXT5/BC3 path plus real tiled-address math
-   (`texture_util::GetTiledOffset2D`/`GetGuestTextureLayout`, already linked,
-   not yet called).
+2. ~~`k_DXT4_5` support (block decompression + tiling)~~ — **done, see step
+   10 below.**
 3. Items 3-4 from step 8's "Next" list (pathological-shader-stall root
    cause, remaining zeroed `SystemConstants` fields) still apply.
+
+## Step 10 (2026-07-11): `k_DXT4_5` (BC3) decode + tiled addressing for all supported texture formats
+
+Implements item 2 above. `GetOrUploadTexture` (`native_command_processor.cpp`)
+no longer rejects `tiled`/`packed_mips` fetch constants outright, and adds a
+`k_DXT4_5` branch alongside the existing uncompressed formats.
+
+- **No CPU BC1/2/3 decoder existed anywhere in the SDK** (confirmed by
+  research: `rexglue-sdk` only decodes DXT on the GPU via compute shaders,
+  `src/graphics/shaders/vulkan_spirv/texture_load_dxt5_rgba8_cs.h` et al. —
+  no CPU-side equivalent). Added `DecompressDXT5Block` (anonymous namespace,
+  `native_command_processor.cpp`), a standard from-spec BC3 block decoder
+  (8-byte interpolated-alpha block + 8-byte BC1-style always-4-color-mode
+  RGB block) — written from the format spec, not ported from anywhere.
+- **Tiled addressing reuses the SDK's existing (already-linked, previously
+  uncalled) `texture_util::GetTiledOffset2D`**
+  (`rexglue-sdk/include/rex/graphics/pipeline/texture/util.h`). It operates
+  in *block* units generically (a block is 1 texel for uncompressed formats,
+  4x4 texels for DXT), taking `(x, y)` block coordinates, `pitch` in blocks,
+  and `bytes_per_block_log2`, returning a byte offset — so the same function
+  now backs both the new DXT path (`bytes_per_block_log2=4`, i.e. 16
+  bytes/4x4 block) and the existing uncompressed paths (`bytes_per_texel_log2`
+  of 1 or 2), replacing the old linear-only `(y * pitch + x) * bytes_per_texel`
+  math with a `fetch.tiled ? GetTiledOffset2D(...) : linear` branch for every
+  format, not just DXT.
+- `packed_mips` is now allowed (previously an unconditional reject) because
+  with `mip_min_level == mip_max_level == 0` (still required) there's no mip
+  level 1+ for the packed tail to actually affect — packed_mips only changes
+  where mip levels *above* the base live, per `util.h`'s addressing doc
+  comment; the base level's own pitch-based addressing is unaffected. Real
+  intro `k_DXT4_5` fetch constants observed with `tiled=1 packed_mips=1`
+  (from step 7's log) are exactly the case this unblocks.
+- DXT's own "pitch" reuses the same `fetch.pitch * 32` field as uncompressed
+  formats, just interpreted in blocks instead of texels for a compressed
+  format (32-block alignment for both, per D3D9's alignment behavior —
+  documented in `util.h`'s big comment block on base-vs-mip addressing).
+- Byteswapping: DXT blocks are treated as 8 packed 16-bit fields (matching
+  the existing `Endian::k8in16` handling other 16-bit-field formats already
+  use) — swapped in place, 2 bytes at a time, not reordered, before handing
+  the block to the decoder.
+
+**Verified:** headless run with no crash/hang, `XMP: started BGM playlist`
+still reached. `format=20` (`k_DXT4_5`) fetch constants — previously 100% of
+"skipping texture upload for unsupported fetch constant" log lines during
+this run were `format=26` (`k_16_16_16_16`, still unsupported, low priority)
+or `format=20` — **no longer appear in the skip log at all**, confirming
+every `k_DXT4_5` fetch constant hit during boot is now taken through the new
+decode path instead of falling back to the 1x1 default texture.
+
+**Byteswap follow-up, same session:** the initial DXT implementation
+byteswapped every block unconditionally as if `Endian::k8in16` (2-byte-pair
+swap), regardless of the fetch constant's actual `endianness` field.
+Generalized to a proper `GpuSwapBytes` helper matching `xenos::GpuSwap`'s
+real per-`Endian`-value semantics exactly (`k8in16` = swap each 2-byte pair
+independently; `k8in32` = full 4-byte dword reverse; `k16in32` = swap the
+two 16-bit halves without touching in-half byte order; `kNone` = copy) —
+confirmed against `rexglue-sdk`'s `GpuSwap`/`CopySwapBlock` (research, not
+guessed). Applied uniformly to the whole 16-byte DXT block, matching how the
+real Vulkan backend's `texture_load_dxt5_rgba8_cs` compute shader treats it
+(no BC3-sub-field-aware swapping).
+
+**Verification via a real RenderDoc capture (`scripts/capture_frame.py`),
+same session:** a temporary per-texture diagnostic (average/max RGBA of the
+CPU-decoded texel buffer, logged once per distinct texture, since removed)
+confirmed the DXT decode itself produces real, non-degenerate color data —
+e.g. a 512x512 `k_DXT4_5` texture decoded to `avg_rgba=(125.7,100.3,75.3,162.8)
+max_rgb=(255,255,255)`, and RenderDoc's `list_actions`/`get_draw_call_state`
+on the captured frame confirmed this exact texture (the Digital Eclipse
+splash logo, matching `dumps/textures/0fdf4d1cb6e8369d_512x512_k_DXT4_5.png`
+pixel-for-pixel when the dump is viewed directly) is genuinely bound at the
+pixel shader's texture slot for a real draw. **So the DXT5 decode/tiling
+work in this step is confirmed correct and is not the cause of the
+still-visible "black squares" symptom** the user reported after this work
+landed.
+
+**However, that symptom is real and still unexplained** — investigated
+directly in the same session, not yet resolved:
+- The same diagnostic caught a **separate, pre-existing** issue: a *linear*
+  (`tiled=0`) `k_1_5_5_5` fetch constant (`2048x1024`, `base_address=0x1ED80000`,
+  `pitch=64`) decodes to **exactly all-zero RGBA** across every texel. Its
+  addressing math is byte-for-byte the same linear-path formula this file
+  already used before this session (unchanged by the DXT/tiling work), so
+  this isn't a regression from step 10 — it was already reachable before
+  (nothing in the `tiled`/`packed_mips` relaxation touches the linear,
+  non-DXT path's addressing), just not diagnosed until now. Two live
+  hypotheses, neither confirmed: (a) this fetch constant's `base_address`
+  points at a render-target/resolve destination this renderer doesn't
+  implement writing to yet (the real 360 GPU would populate it via a
+  resolve/copy PM4 packet this native command processor doesn't consume),
+  so the memory is genuinely never written; or (b) `base_address`/`pitch`
+  decode is wrong for this specific fetch constant (same class of
+  decode-reliability issue flagged since Phase 3's "Next" item 3).
+- **A second, more surprising finding from the same capture**: despite that
+  texture's texel data being all-zero (fully transparent black), the actual
+  rendered pixels in RenderDoc's saved output for the draw using it are
+  **solid opaque white**, not transparent/black — i.e. the GPU's sampled
+  result doesn't match the CPU-side decoded content at all. `get_shader_bindings`
+  on that draw's pixel stage shows the `xe_sampler0_fff`/`xe_sampler1_fff`
+  separate-sampler bindings reporting empty/`ResourceId::0`, even though the
+  matching `SAMPLED_IMAGE` binding correctly resolves to the real uploaded
+  image resource. Not yet determined whether this is a genuine descriptor
+  binding bug (the code writes both `VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE` and
+  `VK_DESCRIPTOR_TYPE_SAMPLER` in `GetOrUploadTexture`/`InitializePipelineResources`
+  and both look structurally correct on inspection) or a RenderDoc reflection
+  quirk with non-combined image/sampler pairs — needs a `pixel_history` +
+  `disassemble_shader` pass on this exact draw to settle, not done yet this
+  session.
+- **Net:** the "black squares" the user sees are not caused by the DXT5 work
+  in this step, but by one or both of the above — a pre-existing, deeper
+  rendering-pipeline issue (possibly missing resolve-target support, possibly
+  a real sampler-binding bug, possibly both) that predates this session (the
+  same symptom was already described in step 9's "Net visible result").
+
+## Step 11 (2026-07-11, same day): found and fixed a real "no blending at all" bug; the very first black quad is a separate, still-open issue
+
+Followed up on step 10's `pixel_history` lead immediately. At the render
+target pixel under one of the reported black squares, `pixel_history` showed
+`event_id=112` (the frame's first draw, no texture bound at all —
+`texture_count=0`) writing `(0,0,0,0)` directly over the blue clear color,
+with later draws at the same pixel either not touching it or getting
+`shader_discarded`.
+
+**Real bug #1, fixed: blending was unconditionally disabled.**
+`GetOrCreatePipeline`'s `VkPipelineColorBlendAttachmentState` was a bare
+zero-initialized struct (`blendEnable` defaults false) — nothing ever read
+the guest's `RB_BLENDCONTROL0`/`RB_COLOR_MASK` registers, so *every* draw
+wrote its raw shader output opaquely regardless of the guest's actual blend
+intent. Fixed by translating those registers for real: `ToVkBlendFactor`/
+`ToVkBlendOp` (new, `native_command_processor.cpp`) map `xenos::BlendFactor`/
+`xenos::BlendOp`'s guest encoding to `VkBlendFactor`/`VkBlendOp` (the
+numeric values don't line up 1:1 with Vulkan's own enum — a real table,
+matching `rexglue-sdk`'s `VulkanPipelineCache::WritePipelineRenderTargetDescription`/
+`kBlendFactorMap`, reimplemented rather than linked for the same reason
+`SystemConstants` was). `GetOrCreatePipeline` gained `blend_control`/
+`color_write_mask` parameters (raw `RB_BLENDCONTROL0`/RT0 write-mask bits),
+folded into its cache key too (a shader pair can legitimately be reused
+across draws with different blend state, e.g. a fade animating blend
+factors frame to frame over static geometry) — read fresh per-draw in
+`TryDraw` and passed through.
+
+**Confirmed via a real capture, not just code review:** draw#6-10 in the
+intro (the logo's glow/particle overlay, per the new `blend_control`/
+`color_mask` fields added to the existing per-draw `sysconst draw#N` debug
+log) carry `blend_control=07060706` — decodes to `color_srcblend=kSrcAlpha,
+color_destblend=kOneMinusSrcAlpha` (standard "SrcAlpha, InvSrcAlpha" alpha
+blending) — genuinely non-identity blend state that was previously forced
+to opaque overwrite. This is a real, confirmed-live fix, independent of the
+"black squares" symptom below.
+
+**Real bug #2, still open: draw#1 itself outputs literal `(0,0,0,0)`, and
+it's not a blending issue.** Decoded `draw#1`'s own `blend_control=00010001`
+— that's `color_srcblend=kOne, color_destblend=kZero,
+alpha_srcblend=kOne, alpha_destblend=kZero`, i.e. **identity** blend (the
+same "no-op, treat as opaque" case this renderer already special-cases to
+`blendEnable=false`). So draw#1's black pixel isn't a blending bug at all —
+the pixel shader itself is producing `(0,0,0,0)` as its literal fragment
+output, correctly written opaquely. Since this draw has no texture bound
+(`texture_count=0` from `get_draw_call_state`), its color must come from a
+vertex-color attribute or a float/bool constant register — and per the
+now-familiar pattern from Phase 3's "Next" item 3, is a strong candidate for
+the same fetch-constant/register decode-reliability issue already flagged
+there (a specific draw whose decoded address/constants are corrupt across
+resubmits). **Not yet root-caused.** Also can't yet rule out that this
+specific draw is a legitimate black fade-in element (SOTN's intro does fade
+from black) rather than a bug — needs either a longer observation window
+(does a persistent black square from a *fully booted, past-intro* frame
+show the same signature?) or vertex-data/constant inspection via
+`get_post_vs_data`/`debug_shader_at_pixel` on event 112 specifically, which
+wasn't done this session.
+
+**Next:**
+1. `get_post_vs_data`/`debug_shader_at_pixel` on event 112 (or an equivalent
+   black-quad draw captured later in gameplay, not just the intro) to
+   determine whether its vertex color / referenced constants are genuinely
+   zero (decode bug) or intentionally black (legitimate content).
+2. Re-check whether "black squares are the only thing visible... throughout
+   gameplay" (the user's report) still holds now that real blending works —
+   capture a frame well past the intro, not just the first ~1s of boot this
+   session's captures used.
+3. Items 3-4 from step 8's "Next" list (pathological-shader-stall root
+   cause, remaining zeroed `SystemConstants` fields) still apply.
+
+## Step 12 (2026-07-11, same day): the real bug — vertex-to-pixel interpolated data was never wired up at all
+
+Followed item 1 above immediately with `disassemble_shader` instead of
+`debug_shader_at_pixel` (the latter reported `DebugPixel returned no trace
+data` -- shader debugging isn't supported on this API/GPU combo here).
+Disassembling event 112's pixel shader's SPIR-V was decisive: its interface
+block (`EntryPoint(Fragment, main, "main", {..})`) had **no Input variable
+at all** for interpolated data -- just the uniform buffers, shared memory,
+and `gl_FragCoord`. The shader body read `xe_var_registers[0]` (meant to
+hold the vertex shader's interpolated color output) straight from a
+zero-initialized local, with nothing ever loading it from an actual pixel
+shader input. `oC0 = max(r0, r0) = r0 = 0` -- guaranteed black, unconditionally,
+for *any* shader depending on interpolated vertex-stage output.
+
+**Root cause:** `GetOrTranslateShader` used `SpirvShaderTranslator::
+GetDefaultVertexShaderModification`/`GetDefaultPixelShaderModification`
+as-is. Checked the translator source (`spirv_translator.cpp`): both
+"default" functions leave `Modification::vertex.interpolator_mask`/
+`pixel.interpolator_mask` at `0` -- they only set
+`dynamic_addressable_register_count` (+ `host_vertex_shader_type` for
+vertex). Nothing in this renderer ever set `interpolator_mask` to anything
+else, so it was always `0`: zero interpolators declared as needed by the
+pixel shader, zero declared as written by the vertex shader, for every
+single shader pair translated since Phase 3 began. This is a far larger bug
+than anything fixed in steps 10-11 -- it silently zeroed vertex color, UV
+coordinates, and any other per-vertex data for *every* draw in the entire
+game that relies on it (which is most non-trivial shaders), not just one
+intro quad.
+
+**The real formula** (confirmed in `rexglue-sdk/src/graphics/vulkan/command_processor.cpp`,
+the real Vulkan backend's per-draw setup):
+```cpp
+uint32_t interpolator_mask =
+    vertex_shader->writes_interpolators() &
+    pixel_shader->GetInterpolatorInputMask(sq_program_cntl, sq_context_misc, ps_param_gen_pos);
+```
+`Shader::writes_interpolators()`/`GetInterpolatorInputMask()` are both real,
+already-linked `Shader` methods (`rex/graphics/pipeline/shader/shader.h`) --
+no reimplementation needed, just actually calling them and threading the
+result through.
+
+**Restructured shader caching to make this possible** (`native_command_processor.{h,cpp}`):
+- Added `GetOrAnalyzeShader` (new) -- runs `AnalyzeUcode` only, cached by
+  ucode hash + type in a new `analyzed_shaders_` map, independent of any
+  translation modification. Needed because `interpolator_mask` depends on
+  *both* shaders in a pair (their `writes_interpolators()`/
+  `GetInterpolatorInputMask()`), so both must be analyzed before either can
+  be translated -- the old `GetOrTranslateShader` did analysis and
+  translation together in one cache keyed only by ucode, which couldn't
+  support this.
+- `GetOrTranslateShader` now takes `interpolator_mask` as a required
+  parameter (not defaulted), folds it into the translation cache key
+  alongside `host_vertex_shader_type` (a shader can legitimately need
+  different masks when paired with different partner shaders), and sets
+  `modification.vertex.interpolator_mask`/`pixel.interpolator_mask`
+  explicitly instead of leaving the "default" (zero) value.
+- `TranslatedShader::shader` changed from an owning `unique_ptr<Shader>` to
+  a non-owning `Shader*` (now owned by `analyzed_shaders_`) -- all existing
+  `->shader->method()` call sites (`vertex_bindings()`, `texture_bindings()`,
+  `constant_register_map()`) needed no changes, since they only ever
+  dereferenced through the pointer.
+- `TryDraw` now analyzes both shaders via `GetOrAnalyzeShader` first,
+  computes `interpolator_mask` from their real usage, then passes it to both
+  `GetOrTranslateShader` calls.
+- `DestroyPipelineResources` clears the new `analyzed_shaders_` map alongside
+  the existing `shader_cache_`/`pipeline_cache_`.
+
+**Verified via a fresh capture:** event 112's pixel shader SPIR-V now
+declares `Input float4* xe_in_interpolator_0 : [[Location(0)]];` and its
+body does `xe_var_registers[0] = *xe_in_interpolator_0` before using it --
+the interpolated data path is real now, confirmed by inspecting the actual
+compiled SPIR-V, not just by reasoning about the source change.
+
+**This specific draw's pixel is still black, but that's now understood to be
+correct, not a bug.** Traced its actual vertex data (from the existing
+`vfetch draw#N` debug log): 3 vertices at 7 floats/vertex (`xyz` position +
+`rgba` color, matching the shader's `vfetch_full`+`vfetch_mini Offset=3`
+layout), vertex 0's color = `(0.0, 0.0, 0.0, 1.0)` -- **the guest explicitly
+wrote opaque black** into this quad's vertex buffer. Its `blend_control`
+(step 11) is identity/opaque, so a genuinely black vertex color renders as a
+solid black rectangle correctly. Likely a letterbox/border or fade-related
+element, not a decode error -- draw#1's black square specifically was never
+the bug; the *absence of any interpolated data for every other draw* was.
+
+**Net:** this is expected to be the highest-impact fix of the session by a
+wide margin -- unlike the DXT/blend fixes (each scoped to specific draws/
+formats), a zeroed `interpolator_mask` affected every shader pair translated
+since native rendering began. Not yet re-verified against a full interactive
+run (only captured frames were inspected this session) -- **the user should
+rebuild and run interactively next** to see whether overall visual
+correctness improved beyond just this one draw's (already-correct) black
+square.
+
+## Step 13 (2026-07-11, same day): the actual root cause of "everything is black" -- `color_exp_bias` left at 0.0 instead of 1.0
+
+The user rebuilt and ran interactively after step 12 and reported **no
+change at all** -- still all-black. That should have been surprising if
+step 12's fix were the whole story (it fixed a real, confirmed bug), which
+motivated tracing the pixel shader's SPIR-V further rather than assuming the
+fix "just needs more testing."
+
+**Found it:** every pixel shader `SpirvShaderTranslator` generates ends with
+an unconditional `output_color = output_color * system_constants.color_exp_bias[rt]`
+after the alpha-test block (visible directly in the SPIR-V dumped in step
+12's investigation, lines building `_143 = _139 * _140` from
+`xe_uniform_system_constants.color_exp_bias.x`). `native_command_processor.cpp`'s
+`SystemConstants system_constants{};` is value-initialized -- every field,
+including `color_exp_bias[4]`, starts at `0.0f`. **Every single draw's final
+output color was being multiplied by zero, unconditionally, regardless of
+texture sampling, vertex color, or blend state** -- this fully explains why
+neither the DXT fix, the blend fix, nor the interpolator_mask fix changed
+anything visible: all three were real, correct fixes operating upstream of
+a final "multiply everything by zero" step nothing had touched yet.
+
+**Real formula** (confirmed in both `rexglue-sdk`'s Vulkan and D3D12
+backends, `command_processor.cpp`): `color_exp_bias[rt]` isn't a plain
+scale factor computed by simple arithmetic -- it's built via direct float
+bit manipulation, taking `RB_COLOR_INFO`/`RB_COLOR[1-3]_INFO`'s 6-bit signed
+`color_exp_bias` field and adding it directly into `1.0f`'s IEEE-754
+exponent bits (`0x3F800000 + (color_exp_bias << 23)`), equivalent to
+`exp2f(color_exp_bias)`. When the guest sets no bias (the common case,
+`color_exp_bias == 0`), this reduces to exactly `1.0f` -- a no-op multiply,
+which is the correct default this renderer was missing entirely.
+
+**Fix** (`native_command_processor.cpp`, `TryDraw`'s `SystemConstants`
+setup): read `RB_COLOR_INFO`'s `color_exp_bias` field and compute
+`std::exp2(float(color_exp_bias))` for RT0 (the only render target this
+renderer has); RTs 1-3 hardcoded to `1.0f` since nothing writes to them.
+
+**Verified with a fresh capture, not just reasoning:** `logs/rt_204_expbias.png`
+(the offscreen color target before the swapchain copy) now shows **real
+rendered content** -- the KONAMI splash screen, rendered correctly: a red
+banner with white "KONAMI" text and its logo shape, over the game's actual
+background, not a flat clear color or a black square. This is the first
+frame since Phase 3 began where recognizable, correct game content has
+rendered on screen.
+
+**Net:** this was the actual root cause of the "black squares"/"all black"
+symptom reported throughout this session -- not the DXT decode, not
+blending, not even the interpolator_mask bug (real as it was). All of
+step 10-12's fixes were still worth making (each is independently a real,
+confirmed correctness bug), but none of them could have produced visible
+non-black output while this one remained. **Next: have the user rebuild and
+run interactively again** -- this is expected to be the fix that finally
+produces a visible difference outside of RenderDoc captures.
+
+**User confirmed interactively: it's rendering.** The KONAMI splash and the
+title screen (moon, spires, gargoyle statues, "Castlevania: Symphony of the
+Night" logo) all appeared on screen for the first time. Reported next issue:
+"past that konami logo, everything looks misplaced and full of glitches."
+
+## Step 14 (2026-07-11, same day): DXT tiled-texture pitch was in the wrong units -- texels, not blocks
+
+Captured a later frame (custom script waiting 90s instead of `capture_frame.py`'s
+45s, to get past the intro into the title screen) and found the title screen
+mostly correct -- KONAMI box, Castlevania logo, moon, spires, gargoyle
+statues all in roughly right positions -- but with a horizontal band of
+colorful static/noise across the middle of the screen, plus a small
+misplaced duplicate logo fragment. `pixel_history` traced the noise to a
+single draw (`event_id=413`) sampling one texture (`852x480`,
+`ResourceId::29100`); saving that texture directly (not just the composited
+frame) showed the corruption was **in the CPU-decoded texture itself**, not
+a compositing bug -- moon/spires/gargoyle content at the top and bottom of
+the 480px-tall image decoded correctly, but a middle band was pure noise.
+Confirmed via `dumps/textures/325984db674889d6_852x480_k_DXT4_5.png` (ground
+truth): this is the intro's tombstone-frame background art, one contiguous
+image, not several composited textures -- so a real per-texture decode bug,
+not a draw-ordering issue.
+
+**Root cause:** added temporary debug logging (`DEBUG tex upload`, since
+removed) of the fetch constant's raw fields for this texture:
+`tiled=1 packed_mips=1 pitch=28`. `pitch=28` decodes via the existing
+`fetch.pitch * 32u` formula to `896` -- but step 10's DXT code then used
+that value directly as the **block**-granularity pitch fed to
+`GetTiledOffset2D`. `896` isn't a plausible block pitch for an 852px-wide
+(213-block) texture; it's `4x` the actually-correct 32-block-aligned block
+pitch (`224`). The fetch constant's `pitch` field is **texel**-granularity
+uniformly across formats (`texels >> 5`, per `xenos.h`'s field comment,
+which step 10 had already read but misapplied) -- for a block-compressed
+format, that texel-pitch must additionally be divided by the block width
+(4) to get the block-pitch tiling math actually needs. Missing that `/4`
+was step 10's real bug: `pitch_blocks = std::max(fetch.pitch * 32u, block_w)`
+should have been `std::max((fetch.pitch * 32u) / 4, block_w)`.
+
+**Why this produced a periodic noise *band* instead of uniform garbage or a
+diagonal shear** (worth recording, since it wasn't obvious going in): the
+wrong pitch (896) was an exact integer multiple (4x) of the correct one
+(224). `GetTiledOffset2D`'s tile-periodic addressing (blocks are grouped
+into 32x32 tiles with address patterns that repeat with a period related to
+bytes-per-block and pitch) partially aliases back to correct-looking output
+for some row ranges under an exact-multiple pitch error and not others --
+unlike a linear-addressing pitch bug, which would produce a monotonically
+increasing diagonal shear instead. This is a useful diagnostic signature for
+next time: **periodic/banded corruption in a tiled texture, with some
+regions decoding perfectly, points at a pitch computed off by an integer
+factor, not a fundamentally wrong tiling algorithm.**
+
+**Fix:** one-line change in `GetOrUploadTexture`'s DXT branch
+(`native_command_processor.cpp`) -- divide the texel-granularity pitch by
+the block width before using it as block-pitch.
+
+**Verified with a fresh capture:** re-ran the same 90s-wait capture recipe
+after the fix; `logs/rt_fixed.png` (see this doc's companion screenshots)
+shows the full title screen rendering correctly -- moon, spires, gargoyle
+statues, tombstone frame, and the Castlevania logo, with **no noise band**.
+Not yet confirmed whether the "misplaced duplicate logo fragment" from the
+step 13 screenshot is a separate, still-open bug or was actually caused by
+this same pitch error (a different draw sampling the same or a
+similarly-tiled texture) -- worth re-checking now that this fix is in.
+Also not yet checked: the "Press <A>" prompt text below the tombstone slab
+is conspicuously absent even in the fixed capture (the slab area is blank
+stone) -- likely a separate, unrelated text/UI-rendering gap, next to
+investigate.
 
 ## Getting a RenderDoc capture (recipe that actually works)
 
