@@ -187,24 +187,36 @@ bool NativeCommandProcessor::InitializePipelineResources() {
     }
   }
 
-  // Sets 2/3 (vertex/pixel textures): this milestone step doesn't implement
-  // texture upload yet, so every shader is treated as sampling nothing --
-  // the same empty (0-binding) layout works for both slots.
+  // Sets 2/3 (vertex/pixel textures): one SAMPLED_IMAGE + one SAMPLER
+  // binding, matching what SpirvShaderTranslator emits for a shader with
+  // exactly one texture_bindings() entry (see the field comment on
+  // texture_layout_ for why this single fixed layout covers both "samples a
+  // texture" and "doesn't sample anything" shaders).
   {
+    VkDescriptorSetLayoutBinding bindings[2]{};
+    bindings[0].binding = 0;
+    bindings[0].descriptorType = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE;
+    bindings[0].descriptorCount = 1;
+    bindings[0].stageFlags = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT;
+    bindings[1].binding = 1;
+    bindings[1].descriptorType = VK_DESCRIPTOR_TYPE_SAMPLER;
+    bindings[1].descriptorCount = 1;
+    bindings[1].stageFlags = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT;
+
     VkDescriptorSetLayoutCreateInfo layout_info{};
     layout_info.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
-    layout_info.bindingCount = 0;
-    layout_info.pBindings = nullptr;
-    if (dfn.vkCreateDescriptorSetLayout(device, &layout_info, nullptr, &empty_texture_layout_) !=
+    layout_info.bindingCount = 2;
+    layout_info.pBindings = bindings;
+    if (dfn.vkCreateDescriptorSetLayout(device, &layout_info, nullptr, &texture_layout_) !=
         VK_SUCCESS) {
-      REXGPU_ERROR("NativeCommandProcessor: failed to create the empty texture descriptor layout");
+      REXGPU_ERROR("NativeCommandProcessor: failed to create the texture descriptor layout");
       return false;
     }
   }
 
   {
     VkDescriptorSetLayout set_layouts[4] = {shared_memory_layout_, constants_layout_,
-                                            empty_texture_layout_, empty_texture_layout_};
+                                            texture_layout_, texture_layout_};
     VkPipelineLayoutCreateInfo layout_info{};
     layout_info.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
     layout_info.setLayoutCount = 4;
@@ -216,21 +228,28 @@ bool NativeCommandProcessor::InitializePipelineResources() {
     }
   }
 
-  // Persistent descriptor pool: just the shared-memory set and the one
-  // shared empty texture set, allocated once and never freed/reset.
+  // Persistent descriptor pool: the shared-memory set, the default (1x1
+  // white) texture set, and every real uploaded texture's set (see
+  // texture_cache_) -- all allocated from here and never freed individually,
+  // just destroyed with the pool in DestroyPipelineResources.
   {
-    VkDescriptorPoolSize pool_sizes[1] = {{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1}};
+    constexpr uint32_t kMaxTextureSets = 1 /* default */ + kMaxTextureCacheEntries;
+    VkDescriptorPoolSize pool_sizes[3] = {
+        {VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1},
+        {VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, kMaxTextureSets},
+        {VK_DESCRIPTOR_TYPE_SAMPLER, kMaxTextureSets},
+    };
     VkDescriptorPoolCreateInfo pool_info{};
     pool_info.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
-    pool_info.maxSets = 2;
-    pool_info.poolSizeCount = 1;
+    pool_info.maxSets = 1 + kMaxTextureSets;
+    pool_info.poolSizeCount = 3;
     pool_info.pPoolSizes = pool_sizes;
     if (dfn.vkCreateDescriptorPool(device, &pool_info, nullptr, &descriptor_pool_) != VK_SUCCESS) {
       REXGPU_ERROR("NativeCommandProcessor: failed to create the persistent descriptor pool");
       return false;
     }
 
-    VkDescriptorSetLayout alloc_layouts[2] = {shared_memory_layout_, empty_texture_layout_};
+    VkDescriptorSetLayout alloc_layouts[2] = {shared_memory_layout_, texture_layout_};
     VkDescriptorSetAllocateInfo alloc_info{};
     alloc_info.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
     alloc_info.descriptorPool = descriptor_pool_;
@@ -242,7 +261,83 @@ bool NativeCommandProcessor::InitializePipelineResources() {
       return false;
     }
     shared_memory_set_ = allocated_sets[0];
-    empty_texture_set_ = allocated_sets[1];
+    default_texture_set_ = allocated_sets[1];
+  }
+
+  // Default sampler: bilinear, clamp-to-edge -- used both for the 1x1
+  // default texture and (for now, see GetOrUploadTexture) every real
+  // uploaded texture, since decoding the fetch constant's actual filter/clamp
+  // state isn't implemented yet.
+  {
+    VkSamplerCreateInfo sampler_info{};
+    sampler_info.sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO;
+    sampler_info.magFilter = VK_FILTER_LINEAR;
+    sampler_info.minFilter = VK_FILTER_LINEAR;
+    sampler_info.mipmapMode = VK_SAMPLER_MIPMAP_MODE_NEAREST;
+    sampler_info.addressModeU = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+    sampler_info.addressModeV = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+    sampler_info.addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+    sampler_info.maxLod = 0.0f;
+    if (dfn.vkCreateSampler(device, &sampler_info, nullptr, &default_sampler_) != VK_SUCCESS) {
+      REXGPU_ERROR("NativeCommandProcessor: failed to create the default sampler");
+      return false;
+    }
+  }
+
+  // Default 1x1 opaque white texture -- see the field comment on
+  // default_texture_set_.
+  {
+    VkImageCreateInfo image_info{};
+    image_info.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
+    image_info.imageType = VK_IMAGE_TYPE_2D;
+    image_info.format = VK_FORMAT_R8G8B8A8_UNORM;
+    image_info.extent = {1, 1, 1};
+    image_info.mipLevels = 1;
+    image_info.arrayLayers = 1;
+    image_info.samples = VK_SAMPLE_COUNT_1_BIT;
+    image_info.tiling = VK_IMAGE_TILING_OPTIMAL;
+    image_info.usage = VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT;
+    image_info.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+    image_info.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+    if (!rex::ui::vulkan::util::CreateDedicatedAllocationImage(
+            vulkan_device, image_info, rex::ui::vulkan::util::MemoryPurpose::kDeviceLocal,
+            default_texture_image_, default_texture_memory_)) {
+      REXGPU_ERROR("NativeCommandProcessor: failed to create the default texture image");
+      return false;
+    }
+
+    VkImageViewCreateInfo view_info{};
+    view_info.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
+    view_info.image = default_texture_image_;
+    view_info.viewType = VK_IMAGE_VIEW_TYPE_2D;
+    view_info.format = VK_FORMAT_R8G8B8A8_UNORM;
+    view_info.subresourceRange = rex::ui::vulkan::util::InitializeSubresourceRange();
+    if (dfn.vkCreateImageView(device, &view_info, nullptr, &default_texture_view_) != VK_SUCCESS) {
+      REXGPU_ERROR("NativeCommandProcessor: failed to create the default texture image view");
+      return false;
+    }
+
+    const uint8_t kWhiteTexel[4] = {0xFF, 0xFF, 0xFF, 0xFF};
+    if (!UploadTexelsAndTransition(default_texture_image_, 1, 1, kWhiteTexel)) {
+      REXGPU_ERROR("NativeCommandProcessor: failed to upload the default texture's pixel");
+      return false;
+    }
+
+    VkDescriptorImageInfo image_write{VK_NULL_HANDLE, default_texture_view_,
+                                      VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL};
+    VkDescriptorImageInfo sampler_write{default_sampler_, VK_NULL_HANDLE, VK_IMAGE_LAYOUT_UNDEFINED};
+    VkWriteDescriptorSet writes[2]{};
+    writes[0].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+    writes[0].dstSet = default_texture_set_;
+    writes[0].dstBinding = 0;
+    writes[0].descriptorCount = 1;
+    writes[0].descriptorType = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE;
+    writes[0].pImageInfo = &image_write;
+    writes[1] = writes[0];
+    writes[1].dstBinding = 1;
+    writes[1].descriptorType = VK_DESCRIPTOR_TYPE_SAMPLER;
+    writes[1].pImageInfo = &sampler_write;
+    dfn.vkUpdateDescriptorSets(device, 2, writes, 0, nullptr);
   }
 
   // Transient descriptor pool for per-draw constants sets -- reset (not
@@ -436,6 +531,15 @@ void NativeCommandProcessor::DestroyPipelineResources() {
   if (shared_memory_memory_ != VK_NULL_HANDLE)
     dfn.vkFreeMemory(device, shared_memory_memory_, nullptr);
 
+  DestroyTextureCache();
+  if (default_texture_view_ != VK_NULL_HANDLE)
+    dfn.vkDestroyImageView(device, default_texture_view_, nullptr);
+  if (default_texture_image_ != VK_NULL_HANDLE)
+    dfn.vkDestroyImage(device, default_texture_image_, nullptr);
+  if (default_texture_memory_ != VK_NULL_HANDLE)
+    dfn.vkFreeMemory(device, default_texture_memory_, nullptr);
+  if (default_sampler_ != VK_NULL_HANDLE) dfn.vkDestroySampler(device, default_sampler_, nullptr);
+
   if (transient_descriptor_pool_ != VK_NULL_HANDLE)
     dfn.vkDestroyDescriptorPool(device, transient_descriptor_pool_, nullptr);
   if (descriptor_pool_ != VK_NULL_HANDLE) dfn.vkDestroyDescriptorPool(device, descriptor_pool_, nullptr);
@@ -444,8 +548,8 @@ void NativeCommandProcessor::DestroyPipelineResources() {
     dfn.vkDestroyDescriptorSetLayout(device, shared_memory_layout_, nullptr);
   if (constants_layout_ != VK_NULL_HANDLE)
     dfn.vkDestroyDescriptorSetLayout(device, constants_layout_, nullptr);
-  if (empty_texture_layout_ != VK_NULL_HANDLE)
-    dfn.vkDestroyDescriptorSetLayout(device, empty_texture_layout_, nullptr);
+  if (texture_layout_ != VK_NULL_HANDLE)
+    dfn.vkDestroyDescriptorSetLayout(device, texture_layout_, nullptr);
 }
 
 void NativeCommandProcessor::FreeTransientBuffers() {
@@ -668,6 +772,285 @@ NativeCommandProcessor::TranslatedShader* NativeCommandProcessor::GetOrTranslate
 
   auto [inserted, _] = shader_cache_.emplace(key, TranslatedShader{std::move(shader), module});
   return &inserted->second;
+}
+
+bool NativeCommandProcessor::UploadTexelsAndTransition(VkImage image, uint32_t width,
+                                                        uint32_t height, const void* rgba_data) {
+  const rex::ui::vulkan::VulkanDevice* vulkan_device = provider_->vulkan_device();
+  const rex::ui::vulkan::VulkanDevice::Functions& dfn = vulkan_device->functions();
+  VkDevice device = vulkan_device->device();
+
+  VkDeviceSize data_size = VkDeviceSize(width) * height * 4;
+  VkBuffer staging_buffer;
+  VkDeviceMemory staging_memory;
+  if (!rex::ui::vulkan::util::CreateDedicatedAllocationBuffer(
+          vulkan_device, data_size, VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
+          rex::ui::vulkan::util::MemoryPurpose::kUpload, staging_buffer, staging_memory)) {
+    REXGPU_ERROR("NativeCommandProcessor: failed to allocate a texture staging buffer");
+    return false;
+  }
+  void* mapped = nullptr;
+  dfn.vkMapMemory(device, staging_memory, 0, data_size, 0, &mapped);
+  std::memcpy(mapped, rgba_data, data_size);
+  dfn.vkUnmapMemory(device, staging_memory);
+
+  VkCommandBuffer upload_cmd;
+  VkCommandBufferAllocateInfo alloc_info{};
+  alloc_info.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
+  alloc_info.commandPool = command_pool_;
+  alloc_info.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+  alloc_info.commandBufferCount = 1;
+  bool ok = dfn.vkAllocateCommandBuffers(device, &alloc_info, &upload_cmd) == VK_SUCCESS;
+  if (ok) {
+    VkCommandBufferBeginInfo begin_info{};
+    begin_info.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+    begin_info.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+    dfn.vkBeginCommandBuffer(upload_cmd, &begin_info);
+
+    VkImageSubresourceRange subresource_range = rex::ui::vulkan::util::InitializeSubresourceRange();
+
+    VkImageMemoryBarrier to_transfer_dst{};
+    to_transfer_dst.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+    to_transfer_dst.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+    to_transfer_dst.oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+    to_transfer_dst.newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+    to_transfer_dst.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    to_transfer_dst.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    to_transfer_dst.image = image;
+    to_transfer_dst.subresourceRange = subresource_range;
+    dfn.vkCmdPipelineBarrier(upload_cmd, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
+                             VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, nullptr, 0, nullptr, 1,
+                             &to_transfer_dst);
+
+    VkBufferImageCopy copy{};
+    copy.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+    copy.imageExtent = {width, height, 1};
+    dfn.vkCmdCopyBufferToImage(upload_cmd, staging_buffer, image,
+                               VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &copy);
+
+    VkImageMemoryBarrier to_shader_read{};
+    to_shader_read.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+    to_shader_read.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+    to_shader_read.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+    to_shader_read.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+    to_shader_read.newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+    to_shader_read.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    to_shader_read.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    to_shader_read.image = image;
+    to_shader_read.subresourceRange = subresource_range;
+    dfn.vkCmdPipelineBarrier(upload_cmd, VK_PIPELINE_STAGE_TRANSFER_BIT,
+                             VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_VERTEX_SHADER_BIT,
+                             0, 0, nullptr, 0, nullptr, 1, &to_shader_read);
+
+    dfn.vkEndCommandBuffer(upload_cmd);
+
+    VkFenceCreateInfo fence_info{};
+    fence_info.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO;
+    VkFence upload_fence = VK_NULL_HANDLE;
+    ok = dfn.vkCreateFence(device, &fence_info, nullptr, &upload_fence) == VK_SUCCESS;
+    if (ok) {
+      VkSubmitInfo submit_info{};
+      submit_info.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+      submit_info.commandBufferCount = 1;
+      submit_info.pCommandBuffers = &upload_cmd;
+      rex::ui::vulkan::VulkanDevice::Queue::Acquisition queue =
+          vulkan_device->AcquireQueue(vulkan_device->queue_family_graphics_compute(), 0);
+      ok = dfn.vkQueueSubmit(queue.queue(), 1, &submit_info, upload_fence) == VK_SUCCESS;
+      if (ok) {
+        constexpr uint64_t kFenceTimeoutNs = 5'000'000'000ull;
+        ok = dfn.vkWaitForFences(device, 1, &upload_fence, VK_TRUE, kFenceTimeoutNs) == VK_SUCCESS;
+      }
+      dfn.vkDestroyFence(device, upload_fence, nullptr);
+    }
+    // vkFreeCommandBuffers isn't in this SDK's exposed Vulkan function table
+    // (same gap as vkCmdBlitImage/vkCmdCopyImage noted elsewhere in this
+    // file) -- leaked instead of freed, but capped by kMaxTextureCacheEntries
+    // uploads for the process lifetime, so negligible. command_pool_'s own
+    // destruction (DestroyPipelineResources) reclaims everything anyway.
+  }
+
+  dfn.vkDestroyBuffer(device, staging_buffer, nullptr);
+  dfn.vkFreeMemory(device, staging_memory, nullptr);
+  return ok;
+}
+
+NativeCommandProcessor::UploadedTexture* NativeCommandProcessor::GetOrUploadTexture(
+    uint32_t fetch_constant_index) {
+  using rex::graphics::xenos::DataDimension;
+  using rex::graphics::xenos::TextureFormat;
+
+  rex::graphics::xenos::xe_gpu_texture_fetch_t fetch = registers_.GetTextureFetch(fetch_constant_index);
+  if (fetch.base_address == 0) {
+    return nullptr;
+  }
+
+  // Deliberately narrow support (see the header comment on GetOrUploadTexture):
+  // only untiled, single-level, non-stacked 2D k_8_8_8_8 textures. Everything
+  // else falls back to the default texture rather than guessing at tiling
+  // math or format conversion not yet implemented.
+  if (fetch.dimension != DataDimension::k2DOrStacked || fetch.stacked || fetch.tiled ||
+      fetch.packed_mips || fetch.mip_min_level != 0 || fetch.mip_max_level != 0 ||
+      fetch.format != TextureFormat::k_8_8_8_8) {
+    static uint32_t skipped_logged = 0;
+    if (skipped_logged < 20) {
+      ++skipped_logged;
+      uint32_t stacked = fetch.stacked;
+      uint32_t tiled = fetch.tiled;
+      uint32_t packed_mips = fetch.packed_mips;
+      uint32_t mip_min = fetch.mip_min_level;
+      uint32_t mip_max = fetch.mip_max_level;
+      REXGPU_INFO(
+          "NativeCommandProcessor: skipping texture upload for unsupported fetch constant "
+          "(dimension={} stacked={} tiled={} packed_mips={} mip_min={} mip_max={} format={})",
+          static_cast<uint32_t>(fetch.dimension), stacked, tiled, packed_mips, mip_min, mip_max,
+          static_cast<uint32_t>(fetch.format));
+    }
+    return nullptr;
+  }
+
+  uint64_t key = HashUcode({fetch.dword_0, fetch.dword_1, fetch.dword_2, fetch.dword_3,
+                           fetch.dword_4, fetch.dword_5});
+  auto existing = texture_cache_.find(key);
+  if (existing != texture_cache_.end()) {
+    return &existing->second;
+  }
+
+  if (texture_cache_.size() >= kMaxTextureCacheEntries) {
+    if (!texture_cache_limit_logged_) {
+      texture_cache_limit_logged_ = true;
+      REXGPU_ERROR(
+          "NativeCommandProcessor: texture cache exceeded {} distinct entries; skipping further "
+          "uploads",
+          kMaxTextureCacheEntries);
+    }
+    return nullptr;
+  }
+
+  uint32_t width = fetch.size_2d.width + 1;
+  uint32_t height = fetch.size_2d.height + 1;
+  // Row stride from the fetch constant's pitch (texels >> 5, per the field
+  // comment in xenos.h), falling back to a tightly-packed row if pitch
+  // somehow decodes smaller than the width itself.
+  uint32_t pitch_texels = std::max(fetch.pitch * 32u, width);
+  uint32_t base_address = fetch.base_address << 12;
+
+  const uint8_t* guest_base =
+      rex::system::kernel_state()->memory()->TranslatePhysical<const uint8_t*>(base_address);
+
+  // k_8_8_8_8 with Endian::k8in32 (the common case for RGBA8 textures) needs
+  // a per-texel dword byteswap; anything else (kNone) is used as-is. Other
+  // endianness modes (k8in16/k16in32) don't apply to a 4-byte-per-texel
+  // format and are treated as kNone.
+  bool byteswap = fetch.endianness == rex::graphics::xenos::Endian::k8in32;
+
+  std::vector<uint8_t> rgba(size_t(width) * height * 4);
+  for (uint32_t y = 0; y < height; ++y) {
+    const uint8_t* src_row = guest_base + size_t(y) * pitch_texels * 4;
+    uint8_t* dst_row = &rgba[size_t(y) * width * 4];
+    if (byteswap) {
+      for (uint32_t x = 0; x < width; ++x) {
+        uint32_t texel = rex::memory::load_and_swap<uint32_t>(src_row + x * 4);
+        std::memcpy(dst_row + x * 4, &texel, 4);
+      }
+    } else {
+      std::memcpy(dst_row, src_row, size_t(width) * 4);
+    }
+  }
+
+  const rex::ui::vulkan::VulkanDevice* vulkan_device = provider_->vulkan_device();
+  const rex::ui::vulkan::VulkanDevice::Functions& dfn = vulkan_device->functions();
+  VkDevice device = vulkan_device->device();
+
+  UploadedTexture texture;
+  VkImageCreateInfo image_info{};
+  image_info.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
+  image_info.imageType = VK_IMAGE_TYPE_2D;
+  image_info.format = VK_FORMAT_R8G8B8A8_UNORM;
+  image_info.extent = {width, height, 1};
+  image_info.mipLevels = 1;
+  image_info.arrayLayers = 1;
+  image_info.samples = VK_SAMPLE_COUNT_1_BIT;
+  image_info.tiling = VK_IMAGE_TILING_OPTIMAL;
+  image_info.usage = VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT;
+  image_info.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+  image_info.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+  if (!rex::ui::vulkan::util::CreateDedicatedAllocationImage(
+          vulkan_device, image_info, rex::ui::vulkan::util::MemoryPurpose::kDeviceLocal,
+          texture.image, texture.memory)) {
+    REXGPU_ERROR("NativeCommandProcessor: failed to create a texture image ({}x{})", width, height);
+    return nullptr;
+  }
+
+  VkImageViewCreateInfo view_info{};
+  view_info.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
+  view_info.image = texture.image;
+  view_info.viewType = VK_IMAGE_VIEW_TYPE_2D;
+  view_info.format = VK_FORMAT_R8G8B8A8_UNORM;
+  view_info.subresourceRange = rex::ui::vulkan::util::InitializeSubresourceRange();
+  if (dfn.vkCreateImageView(device, &view_info, nullptr, &texture.view) != VK_SUCCESS) {
+    REXGPU_ERROR("NativeCommandProcessor: failed to create a texture image view");
+    dfn.vkDestroyImage(device, texture.image, nullptr);
+    dfn.vkFreeMemory(device, texture.memory, nullptr);
+    return nullptr;
+  }
+
+  if (!UploadTexelsAndTransition(texture.image, width, height, rgba.data())) {
+    REXGPU_ERROR("NativeCommandProcessor: failed to upload texture data ({}x{})", width, height);
+    dfn.vkDestroyImageView(device, texture.view, nullptr);
+    dfn.vkDestroyImage(device, texture.image, nullptr);
+    dfn.vkFreeMemory(device, texture.memory, nullptr);
+    return nullptr;
+  }
+
+  VkDescriptorSetAllocateInfo set_alloc{};
+  set_alloc.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
+  set_alloc.descriptorPool = descriptor_pool_;
+  set_alloc.descriptorSetCount = 1;
+  set_alloc.pSetLayouts = &texture_layout_;
+  if (dfn.vkAllocateDescriptorSets(device, &set_alloc, &texture.descriptor_set) != VK_SUCCESS) {
+    REXGPU_ERROR("NativeCommandProcessor: failed to allocate a texture descriptor set");
+    dfn.vkDestroyImageView(device, texture.view, nullptr);
+    dfn.vkDestroyImage(device, texture.image, nullptr);
+    dfn.vkFreeMemory(device, texture.memory, nullptr);
+    return nullptr;
+  }
+
+  VkDescriptorImageInfo image_write{VK_NULL_HANDLE, texture.view,
+                                    VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL};
+  VkDescriptorImageInfo sampler_write{default_sampler_, VK_NULL_HANDLE, VK_IMAGE_LAYOUT_UNDEFINED};
+  VkWriteDescriptorSet writes[2]{};
+  writes[0].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+  writes[0].dstSet = texture.descriptor_set;
+  writes[0].dstBinding = 0;
+  writes[0].descriptorCount = 1;
+  writes[0].descriptorType = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE;
+  writes[0].pImageInfo = &image_write;
+  writes[1] = writes[0];
+  writes[1].dstBinding = 1;
+  writes[1].descriptorType = VK_DESCRIPTOR_TYPE_SAMPLER;
+  writes[1].pImageInfo = &sampler_write;
+  dfn.vkUpdateDescriptorSets(device, 2, writes, 0, nullptr);
+
+  auto [inserted, _] = texture_cache_.emplace(key, texture);
+  static bool logged_first_texture = false;
+  if (!logged_first_texture) {
+    logged_first_texture = true;
+    REXGPU_INFO("NativeCommandProcessor: first real texture uploaded ({}x{})", width, height);
+  }
+  return &inserted->second;
+}
+
+void NativeCommandProcessor::DestroyTextureCache() {
+  const rex::ui::vulkan::VulkanDevice* vulkan_device = provider_->vulkan_device();
+  const rex::ui::vulkan::VulkanDevice::Functions& dfn = vulkan_device->functions();
+  VkDevice device = vulkan_device->device();
+  for (auto& [key, texture] : texture_cache_) {
+    if (texture.view != VK_NULL_HANDLE) dfn.vkDestroyImageView(device, texture.view, nullptr);
+    if (texture.image != VK_NULL_HANDLE) dfn.vkDestroyImage(device, texture.image, nullptr);
+    if (texture.memory != VK_NULL_HANDLE) dfn.vkFreeMemory(device, texture.memory, nullptr);
+    // texture.descriptor_set is freed implicitly when descriptor_pool_ is destroyed.
+  }
+  texture_cache_.clear();
 }
 
 VkPipeline NativeCommandProcessor::GetOrCreatePipeline(TranslatedShader* vertex_shader,
@@ -1035,8 +1418,23 @@ void NativeCommandProcessor::TryDraw(rex::graphics::xenos::PrimitiveType prim_ty
   upload_constant_buffer(fetch_constants, sizeof(fetch_constants),
                          SpirvShaderTranslator::kConstantBufferFetch);
 
-  VkDescriptorSet sets[4] = {shared_memory_set_, constants_set, empty_texture_set_,
-                            empty_texture_set_};
+  // Only the first texture_bindings() entry per stage is honored (see
+  // texture_layout_'s field comment) -- falls back to the default (1x1
+  // white) texture set for shaders that don't sample, or whose fetch
+  // constant isn't in GetOrUploadTexture's narrow supported subset.
+  auto resolve_texture_set = [&](TranslatedShader* shader) {
+    if (shader->shader->texture_bindings().empty()) {
+      return default_texture_set_;
+    }
+    UploadedTexture* texture =
+        GetOrUploadTexture(uint32_t(shader->shader->texture_bindings()[0].fetch_constant));
+    return texture ? texture->descriptor_set : default_texture_set_;
+  };
+  VkDescriptorSet vertex_texture_set = resolve_texture_set(vertex_shader);
+  VkDescriptorSet pixel_texture_set = resolve_texture_set(pixel_shader);
+
+  VkDescriptorSet sets[4] = {shared_memory_set_, constants_set, vertex_texture_set,
+                            pixel_texture_set};
   dfn.vkCmdBindPipeline(command_buffer_, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline);
   dfn.vkCmdBindDescriptorSets(command_buffer_, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline_layout_,
                               0, 4, sets, 0, nullptr);

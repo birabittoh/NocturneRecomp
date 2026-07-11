@@ -920,24 +920,92 @@ draw in the ~30s window tested), so it's confirmed as a safe no-op in the
 common case but not yet confirmed to trigger correctly against the
 pathological input itself.
 
+### Milestone 3b step 7: texture upload (narrow scope)
+
+Adds real texture sampling for a deliberately small subset of formats/layouts
+instead of the previous hardcoded-empty texture descriptor sets.
+
+- **Descriptor layout correction, not just population.** Investigated how
+  `SpirvShaderTranslator` actually expects textures bound (it doesn't use
+  `COMBINED_IMAGE_SAMPLER`): sets 2/3 (`kDescriptorSetTexturesVertex`/
+  `kDescriptorSetTexturesPixel`) get separate `VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE`
+  and `VK_DESCRIPTOR_TYPE_SAMPLER` bindings, with the *binding index* being a
+  compacted, dedup'd position in the shader's own `texture_bindings()`/
+  `sampler_bindings()` (keyed by `(fetch_constant, dimension, is_signed)`),
+  not the guest fetch-constant slot directly. This renderer only supports one
+  texture per shader stage for now, so `texture_layout_`
+  (`native_command_processor.h`) is a single fixed 2-binding layout (0=image,
+  1=sampler) reused for both "samples a texture" and "doesn't sample
+  anything" shaders — a shader with zero `texture_bindings()` simply never
+  statically references the binding, so binding *something* valid (a 1x1
+  default white texture, `default_texture_set_`) there is harmless and avoids
+  needing multiple pipeline-layout variants.
+- **`GetOrUploadTexture`** (`native_command_processor.cpp`) decodes
+  `RegisterFile::GetTextureFetch(fetch_constant_index)` and only proceeds for
+  a narrow allow-list: `DataDimension::k2DOrStacked` and not stacked, not
+  tiled, no packed mips, `mip_min_level == mip_max_level == 0`, format
+  `TextureFormat::k_8_8_8_8`. Anything else falls back to the default texture
+  with a rate-limited log, matching the "skip with a log" pattern used
+  elsewhere in this file for unsupported primitives/formats — deliberately
+  not guessing at tiling (`texture_util::GetTiledOffset2D`/`GetGuestTextureLayout`,
+  investigated but not wired up yet) or compressed-format decode.
+  For the supported case: reads guest memory via `Memory::TranslatePhysical`,
+  using the fetch constant's `pitch` (texels>>5) for row stride, byte-swapping
+  each texel dword when `Endian::k8in32` (the common case for RGBA8 textures),
+  and uploads via a new `UploadTexelsAndTransition` one-shot command
+  buffer/staging-buffer helper into a `VK_FORMAT_R8G8B8A8_UNORM` `VkImage`.
+  Cached by a hash of the fetch constant's raw dwords, capped at
+  `kMaxTextureCacheEntries = 64` (same rationale/pattern as step 6's shader
+  cache cap) — a known limitation of this cache key: a guest that overwrites
+  texture *content* in place without changing the fetch constant itself would
+  incorrectly keep serving the stale upload; not hit by the intro's content.
+- `TryDraw` resolves each stage's first `texture_bindings()` entry (if any)
+  to an uploaded texture's descriptor set, or the default set otherwise, and
+  binds sets 2/3 accordingly instead of always binding the same empty set.
+
+**No SDK-side changes needed** — `rex::graphics::texture_util` (format/tiling
+helper functions) turned out to already be linked into the always-loaded
+`rexruntime` via `rexcore` (an `OBJECT` library `rexruntime` already pulls
+in), discovered by an initial attempt to duplicate `pipeline/texture/util.cpp`
+into `REXSYSTEM_SOURCES` (the established pattern for `register_file.cpp` et
+al.) failing with duplicate-symbol linker errors — reverted once that showed
+the functions were already available via the installed headers.
+
+**Verified:** a real headless run still reaches `XMP: started BGM playlist`
+with no crash/hang, and the texture path is genuinely exercised — the log
+shows real `skipping texture upload for unsupported fetch constant` entries
+with concrete decoded field values (e.g. `tiled=1 packed_mips=1 format=20`,
+`format=26`, `format=3`), confirming the intro's actual fetch constants are
+being read correctly but don't happen to use the one format
+(`k_8_8_8_8`/format 6) this step supports yet — so nothing renders
+differently on screen from step 6 in this run. Not yet confirmed: what the
+intro's real formats (3, 20, 26 — decode these against `TextureFormat` in
+`xenos.h`) are and whether extending the allow-list to cover them is enough
+to get real texture output, or whether tiling support is also required
+(`tiled=1` appeared in the log above).
+
 ## Next
 
 In rough order of what unblocks visible output soonest:
 
-1. **Pathological shader translation time — stall now bounded, root cause
+1. **Extend texture format/tiling support based on what the intro actually
+   uses.** Step 7 confirmed real fetch constants decode as formats 3, 20, and
+   26 (not yet mapped to names here — check `xenos::TextureFormat` in
+   `xenos.h`), and at least one is tiled. Decode which formats these are, add
+   them to `GetOrUploadTexture`'s allow-list (extending the `VkFormat`
+   mapping researched for step 7), and if any are tiled, wire up
+   `texture_util::GetTiledOffset2D`/`GetGuestTextureLayout` (already
+   available, not yet called) instead of assuming linear rows.
+2. **Pathological shader translation time — stall now bounded, root cause
    still open.** One specific garbage-decoded draw's shader ucode makes
    `SpirvShaderTranslator`/`vkCreateGraphicsPipelines` take roughly 20
    seconds *per occurrence*, and it recurs repeatedly (the guest appears to
-   reissue the same corrupt draw in a loop). Step 6 above caps total
-   translations so this can no longer stall a run for minutes, but the
-   underlying fetch-constant/register decode unreliability (step 1's root
-   cause: the same draw's "guest_address"/size decode is itself
-   garbage/unstable across resubmits) is unfixed — worth chasing directly
-   next since it also affects draw/texture-fetch reliability elsewhere.
-2. **Texture upload**: decode the texture fetch constant (format, pitch,
-   base address, dimensions, tiling), untile guest texture memory, create a
-   real `VkImage`/sampler, and populate the (currently hardcoded-empty)
-   texture descriptor sets.
+   reissue the same corrupt draw in a loop). Step 6 caps total translations
+   so this can no longer stall a run for minutes, but the underlying
+   fetch-constant/register decode unreliability (step 1's root cause: the
+   same draw's "guest_address"/size decode is itself garbage/unstable across
+   resubmits) is unfixed — worth chasing directly since it also affects
+   draw/texture-fetch reliability elsewhere.
 3. **`SystemConstants`/viewport correctness pass**: wire up real
    viewport/render-target-format/blend state from the register file instead
    of the current mostly-zeroed approximation — needed for correct

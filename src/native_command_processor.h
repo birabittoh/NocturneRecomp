@@ -93,6 +93,36 @@ class NativeCommandProcessor {
   VkPipeline GetOrCreatePipeline(TranslatedShader* vertex_shader, TranslatedShader* pixel_shader,
                                  VkPrimitiveTopology topology, bool primitive_restart_enable);
 
+  // Milestone 3b step 7 (texture upload): gets (uploading on first use) a
+  // sampled VkImage + descriptor set for the given texture fetch constant
+  // slot, or nullptr if the fetch constant describes something not yet
+  // supported (tiled, mipped/array/3D, or a format outside the small
+  // allow-list -- see native_command_processor.cpp's GetOrUploadTexture) or
+  // is simply unbound (base_address == 0). Scoped deliberately narrow: only
+  // untiled, single-level 2D textures in a few common uncompressed formats,
+  // matching the "skip with a rate-limited log" pattern used elsewhere in
+  // this file for anything wider than what's been verified against the
+  // intro's actual draws. Only the first texture_bindings() entry per stage
+  // is honored (see texture_descriptor_layout_'s comment for why one
+  // binding suffices for now).
+  struct UploadedTexture {
+    VkImage image = VK_NULL_HANDLE;
+    VkDeviceMemory memory = VK_NULL_HANDLE;
+    VkImageView view = VK_NULL_HANDLE;
+    VkDescriptorSet descriptor_set = VK_NULL_HANDLE;
+  };
+  UploadedTexture* GetOrUploadTexture(uint32_t fetch_constant_index);
+
+  // One-shot helper: uploads width*height RGBA8 texels (already host-order,
+  // no further byteswap) into image via a staging buffer on a temporary
+  // command buffer, and leaves image in SHADER_READ_ONLY_OPTIMAL. Used both
+  // for the default 1x1 texture and every real GetOrUploadTexture upload.
+  // Synchronous (waits for completion before returning) -- texture uploads
+  // are rare relative to per-frame draw traffic, so simplicity here matters
+  // more than overlapping this with other GPU work.
+  bool UploadTexelsAndTransition(VkImage image, uint32_t width, uint32_t height,
+                                 const void* rgba_data);
+
   // Begins accumulating a frame's draws into color_target_image_ if this is
   // the first draw since the last present (render pass begin + clear).
   void EnsureFrameBegun();
@@ -124,11 +154,44 @@ class NativeCommandProcessor {
   bool pipeline_resources_valid_ = false;
   VkDescriptorSetLayout shared_memory_layout_ = VK_NULL_HANDLE;
   VkDescriptorSetLayout constants_layout_ = VK_NULL_HANDLE;
-  VkDescriptorSetLayout empty_texture_layout_ = VK_NULL_HANDLE;
+  // Sets 2/3 (vertex/pixel textures): SpirvShaderTranslator emits separate
+  // VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE / VK_DESCRIPTOR_TYPE_SAMPLER bindings
+  // (not a combined-image-sampler), with binding index a compacted,
+  // dedup'd position in the shader's own texture_bindings()/sampler_bindings()
+  // list rather than the guest fetch-constant slot directly. This renderer
+  // only supports one texture per stage for now (see GetOrUploadTexture), so
+  // one fixed 2-binding layout (0=image, 1=sampler) covers every shader that
+  // needs it; a shader that doesn't sample at all simply never statically
+  // references these bindings, so reusing the same non-empty layout/set for
+  // "no texture" draws too (backed by a 1x1 default texture) is harmless.
+  VkDescriptorSetLayout texture_layout_ = VK_NULL_HANDLE;
   VkPipelineLayout pipeline_layout_ = VK_NULL_HANDLE;
   VkDescriptorPool descriptor_pool_ = VK_NULL_HANDLE;
   VkDescriptorSet shared_memory_set_ = VK_NULL_HANDLE;
-  VkDescriptorSet empty_texture_set_ = VK_NULL_HANDLE;
+
+  // 1x1 opaque white texture bound wherever a draw doesn't have a real
+  // uploaded texture yet (unsupported format, unbound fetch constant, or no
+  // texture_bindings() at all) -- keeps every draw's descriptor sets valid
+  // without needing a second pipeline layout variant.
+  VkImage default_texture_image_ = VK_NULL_HANDLE;
+  VkDeviceMemory default_texture_memory_ = VK_NULL_HANDLE;
+  VkImageView default_texture_view_ = VK_NULL_HANDLE;
+  VkDescriptorSet default_texture_set_ = VK_NULL_HANDLE;
+  VkSampler default_sampler_ = VK_NULL_HANDLE;
+
+  // Real uploaded textures, cached by a hash of the fetch constant's raw
+  // dwords (address+format+dimensions+tiling all fold into that hash, so a
+  // guest rewriting a fetch constant to point elsewhere naturally misses the
+  // cache; a guest overwriting texture *content* at the same address without
+  // changing the fetch constant will incorrectly keep serving the stale
+  // upload -- a known limitation, not yet hit by the intro's content).
+  // Capped the same way shader_cache_ is, for the same reason (bound a
+  // pathological/garbage-decoded fetch constant that would otherwise hash
+  // differently every resubmit).
+  static constexpr size_t kMaxTextureCacheEntries = 64;
+  bool texture_cache_limit_logged_ = false;
+  std::unordered_map<uint64_t, UploadedTexture> texture_cache_;
+  void DestroyTextureCache();
   // Constants descriptor sets differ per draw (each draw gets fresh constant
   // buffers -- see TransientBuffer) and Vulkan disallows updating a
   // descriptor set already bound within a not-yet-executed command buffer,
