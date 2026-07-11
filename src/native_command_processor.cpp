@@ -1563,6 +1563,22 @@ void NativeCommandProcessor::TryDraw(rex::graphics::xenos::PrimitiveType prim_ty
       system_constants.flags |= SpirvShaderTranslator::kSysFlag_PrimitivePolygonal;
     }
 
+    // Alpha test: the pixel shader's alpha-test function field is 3 bits
+    // starting at kSysFlag_AlphaPassIfLess_Shift, encoded so 0 means "always
+    // fail" -- left unset (0) here, every fragment was silently Kill()ed by
+    // the shader's own alpha-test block regardless of guest intent (found via
+    // RenderDoc pixel_history: shader_discarded on every draw). Matches
+    // command_processor.cpp's rb_colorcontrol.alpha_test_enable handling:
+    // kAlways (disabled) unless the guest actually enabled the test.
+    auto rb_colorcontrol = registers_.Get<rex::graphics::reg::RB_COLORCONTROL>();
+    rex::graphics::xenos::CompareFunction alpha_test_function =
+        rb_colorcontrol.alpha_test_enable ? rb_colorcontrol.alpha_func
+                                          : rex::graphics::xenos::CompareFunction::kAlways;
+    system_constants.flags |= uint32_t(alpha_test_function)
+                              << SpirvShaderTranslator::kSysFlag_AlphaPassIfLess_Shift;
+    system_constants.alpha_test_reference =
+        registers_.Get<float>(rex::graphics::XE_GPU_REG_RB_ALPHA_REF);
+
     float scale_xy[2] = {
         pa_cl_vte_cntl.vport_x_scale_ena
             ? registers_.Get<float>(rex::graphics::XE_GPU_REG_PA_CL_VPORT_XSCALE)
@@ -1622,16 +1638,31 @@ void NativeCommandProcessor::TryDraw(rex::graphics::xenos::PrimitiveType prim_ty
       system_constants.ndc_offset[1] = offset_xy[1];
       system_constants.ndc_offset[2] = offset_z;
     }
+    // Vertex index range: the translated shader UClamps every fetched index
+    // into [vertex_index_min, vertex_index_max] (see SpirvShaderTranslator's
+    // vertex-fetch prologue) -- left at this struct's zero-initialized
+    // default, vertex_index_max=0 clamped every single vertex to index 0,
+    // collapsing all vertices of every draw onto the same fetch address
+    // (found via RenderDoc: post-VS gl_Position was bit-identical across all
+    // vertices of a draw). Matches command_processor.cpp's
+    // vgt_min_vtx_indx/vgt_max_vtx_indx handling.
+    system_constants.vertex_index_min =
+        registers_.Get<uint32_t>(rex::graphics::XE_GPU_REG_VGT_MIN_VTX_INDX);
+    system_constants.vertex_index_max =
+        registers_.Get<uint32_t>(rex::graphics::XE_GPU_REG_VGT_MAX_VTX_INDX);
+
     static uint32_t logged = 0;
     if (logged < 10) {
       ++logged;
       REXGPU_INFO(
           "NativeCommandProcessor: sysconst draw#{} clip_cntl={:08X} vte_cntl={:08X} "
-          "flags={:08X} scale=({:.3f},{:.3f},{:.3f}) offset=({:.3f},{:.3f},{:.3f})",
+          "flags={:08X} scale=({:.3f},{:.3f},{:.3f}) offset=({:.3f},{:.3f},{:.3f}) "
+          "vidx_min={} vidx_max={}",
           draws_logged_, pa_cl_clip_cntl.value, pa_cl_vte_cntl.value, system_constants.flags,
           system_constants.ndc_scale[0], system_constants.ndc_scale[1],
           system_constants.ndc_scale[2], system_constants.ndc_offset[0],
-          system_constants.ndc_offset[1], system_constants.ndc_offset[2]);
+          system_constants.ndc_offset[1], system_constants.ndc_offset[2],
+          system_constants.vertex_index_min, system_constants.vertex_index_max);
     }
   }
   upload_constant_buffer(&system_constants, sizeof(system_constants),

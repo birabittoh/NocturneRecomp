@@ -1208,3 +1208,93 @@ In rough order of what unblocks visible output soonest:
    zeroed/default — fine for now since step 8 confirmed the fields that
    matter for basic 2D UI positioning are correct, but will need real values
    once more complex draws (3D gameplay, not just intro UI) are reached.
+
+## Step 9 (2026-07-11): `renderdoc-mcp` finally used against a real capture — found and fixed two root causes of "nothing rasterizes"
+
+Picking up item 1 above. The `renderdoc-mcp` server set up at the end of
+step 8 connected fine this session, but automating capture creation itself
+(`ExecuteAndInject`/`CreateTargetControl` via the self-built `renderdoc.pyd`,
+`scripts/capture_frame.py`/`scripts/trigger_capture.py`, both still in the
+tree as reusable scaffolding) never got RenderDoc's hooks to attach to this
+process — no ImGui capture overlay, no target-control API connection, even
+after trying `renderdoccmd.exe capture` directly and enabling "hook child
+processes." Root cause not found (the working theory, disproven: an
+instance-creation-timing race between our early `OnPreLaunchModule` Vulkan
+init and RenderDoc's inject window — ruled out because the user's own
+manual launch also needed **Vulkan hooking enabled explicitly** in
+qrenderdoc's settings, which isn't on by default; once that was flipped,
+capture worked immediately with no timing changes on our side). **Practical
+answer: have the user create captures manually via qrenderdoc** (Vulkan
+hooking enabled in Settings, launch `nocturnerecomp.exe` with
+`--fullscreen=false` so it doesn't take over the screen, F12 once a few
+seconds in) rather than fighting automated injection further.
+
+Two captures analyzed (`cap1.rdc`, `cap2.rdc` — not committed, regenerate
+via the above if needed):
+
+**Bug 1 — `vertex_index_min`/`vertex_index_max` never populated.**
+`native_command_processor.cpp`'s `SystemConstants system_constants{};` is
+value-initialized (all zero) and nothing ever wrote these two fields. The
+translated vertex shader's fetch prologue does
+`UClamp(computed_index, vertex_index_min, vertex_index_max)` before using
+the result to address shared memory — with both bounds zero, **every
+vertex's index clamped to 0**, so every vertex in every draw fetched from
+the same address. Found via `get_post_vs_data`: all 4 `gl_Position` outputs
+of `cap1.rdc`'s first draw were bit-identical. Real Vulkan backend reference
+(`command_processor.cpp`) reads these straight from the
+`VGT_MIN_VTX_INDX`/`VGT_MAX_VTX_INDX` registers, confirmed non-zero in this
+game's actual PM4 stream (`0x00FFFFFF`, `0x0000FFFF` observed via the
+register-dump logging). Fix: read both registers into
+`system_constants.vertex_index_min`/`vertex_index_max` alongside the other
+per-draw system constants. Confirmed fixed live (`vidx_max` now logs real
+values, and `cap2.rdc`'s post-VS positions are 4 genuinely distinct
+vertices forming a real quad) — but not sufficient by itself, see bug 2.
+
+**Bug 2 — alpha-test flags never populated, so every fragment was
+`Kill()`ed.** With bug 1 fixed, `cap2.rdc` still showed a fully uniform
+clear-colored render target. `pixel_history` at a pixel inside the new
+quad's screen-space footprint showed the draw touched it but failed with
+`shader_discarded`. Disassembling the pixel shader: it always runs an
+alpha-test block gated on `BitFieldUExtract(flags, 16, 3) != 7` — i.e. it
+assumes an *unset* alpha-test field means "run the test," and the test's
+own comparison-function decode treats `0` as "never passes," not
+"always passes" (`kAlways` is encoded as `7`). Since
+`native_command_processor.cpp` never set these bits, every fragment on
+every draw failed this unintended alpha test and got discarded. Real
+backend reference: `command_processor.cpp` sets
+`flags |= uint32_t(rb_colorcontrol.alpha_test_enable ? rb_colorcontrol.alpha_func : xenos::CompareFunction::kAlways) << kSysFlag_AlphaPassIfLess_Shift`,
+plus `system_constants_.alpha_test_reference` from `RB_ALPHA_REF`. Fix:
+same read, added right after the existing flag-setting block. Confirmed
+fixed live: DebugDumpColorTarget's first 3 dumped frames went from 100%
+uniform clear-color blue to genuine rasterized content (currently solid
+black quads, not yet the right color — see below).
+
+**Net visible result:** the game now renders actual geometry (previously:
+nothing, ever, since Phase 3 began) — user-observed as black rectangles
+appearing over the blue clear color, flickering, while gameplay/audio
+continues normally underneath (confirms the CPU/guest side was never the
+problem, only this rasterization gap). This is real forward progress but
+not yet correct output.
+
+**Next (in order):**
+1. **Why are the newly-rasterizing draws solid black instead of real
+   color/texture?** The specific draw inspected in `cap2.rdc`
+   (`event_id=112`) has a pixel shader with `texture_count: 0` in its
+   reflection, and its body never writes anything into the output register
+   beyond the zero-initialized default — so for *this* draw, black may
+   simply be correct (an untextured backdrop/shadow shape), and the actual
+   textured logo draws are further along in the frame and still not
+   rasterizing for a reason not yet found. Take a fresh capture now that
+   bugs 1-2 are fixed and check the textured draws specifically (`textures`
+   list non-empty in `get_draw_call_state`) the same way: post-VS output
+   sane? pixel shader discarding? `get_cbuffer_contents` on the fetch
+   constants matching the expected texture address?
+2. Once real content shows: remove the temporary diagnostics (per-pixel
+   `TEMPORARY diagnostic` vertex overrides, verbose disasm/vfetch/sysconst
+   logging, `DebugDumpColorTarget` call) that were added across steps 8-9 —
+   all clearly marked in `native_command_processor.cpp`.
+3. Items 2-4 from step 8's "Next" list (`k_DXT4_5` textures, the
+   pathological-shader-stall root cause, remaining zeroed `SystemConstants`
+   fields) still apply, in the same priority order — texture format work in
+   particular is still blocked until real draws are confirmed to rasterize
+   correctly end-to-end.
