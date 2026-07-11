@@ -390,81 +390,37 @@ bool NativeCommandProcessor::InitializePipelineResources() {
     }
   }
 
-  // Sets 2/3 (vertex/pixel textures): one SAMPLED_IMAGE + one SAMPLER
-  // binding, matching what SpirvShaderTranslator emits for a shader with
-  // exactly one texture_bindings() entry (see the field comment on
-  // texture_layout_ for why this single fixed layout covers both "samples a
-  // texture" and "doesn't sample anything" shaders).
-  {
-    VkDescriptorSetLayoutBinding bindings[2]{};
-    bindings[0].binding = 0;
-    bindings[0].descriptorType = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE;
-    bindings[0].descriptorCount = 1;
-    bindings[0].stageFlags = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT;
-    bindings[1].binding = 1;
-    bindings[1].descriptorType = VK_DESCRIPTOR_TYPE_SAMPLER;
-    bindings[1].descriptorCount = 1;
-    bindings[1].stageFlags = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT;
+  // Sets 2/3 (vertex/pixel textures) no longer get a fixed layout here --
+  // see GetOrCreateTextureSetLayout/GetOrCreatePipelineLayout, built lazily
+  // per shader-pair shape once real shaders are seen.
 
-    VkDescriptorSetLayoutCreateInfo layout_info{};
-    layout_info.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
-    layout_info.bindingCount = 2;
-    layout_info.pBindings = bindings;
-    if (dfn.vkCreateDescriptorSetLayout(device, &layout_info, nullptr, &texture_layout_) !=
-        VK_SUCCESS) {
-      REXGPU_ERROR("NativeCommandProcessor: failed to create the texture descriptor layout");
-      return false;
-    }
-  }
-
+  // Persistent descriptor pool: just the shared-memory set -- every texture
+  // descriptor set (default or real) is now transient/per-draw (see
+  // GetOrCreatePipelineLayout's doc comment and TryDraw's texture-set
+  // resolution), allocated from transient_descriptor_pool_ instead.
   {
-    VkDescriptorSetLayout set_layouts[4] = {shared_memory_layout_, constants_layout_,
-                                            texture_layout_, texture_layout_};
-    VkPipelineLayoutCreateInfo layout_info{};
-    layout_info.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
-    layout_info.setLayoutCount = 4;
-    layout_info.pSetLayouts = set_layouts;
-    if (dfn.vkCreatePipelineLayout(device, &layout_info, nullptr, &pipeline_layout_) !=
-        VK_SUCCESS) {
-      REXGPU_ERROR("NativeCommandProcessor: failed to create the pipeline layout");
-      return false;
-    }
-  }
-
-  // Persistent descriptor pool: the shared-memory set, the default (1x1
-  // white) texture set, and every real uploaded texture's set (see
-  // texture_cache_) -- all allocated from here and never freed individually,
-  // just destroyed with the pool in DestroyPipelineResources.
-  {
-    constexpr uint32_t kMaxTextureSets = 1 /* default */ + kMaxTextureCacheEntries;
-    VkDescriptorPoolSize pool_sizes[3] = {
+    VkDescriptorPoolSize pool_sizes[1] = {
         {VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1},
-        {VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, kMaxTextureSets},
-        {VK_DESCRIPTOR_TYPE_SAMPLER, kMaxTextureSets},
     };
     VkDescriptorPoolCreateInfo pool_info{};
     pool_info.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
-    pool_info.maxSets = 1 + kMaxTextureSets;
-    pool_info.poolSizeCount = 3;
+    pool_info.maxSets = 1;
+    pool_info.poolSizeCount = 1;
     pool_info.pPoolSizes = pool_sizes;
     if (dfn.vkCreateDescriptorPool(device, &pool_info, nullptr, &descriptor_pool_) != VK_SUCCESS) {
       REXGPU_ERROR("NativeCommandProcessor: failed to create the persistent descriptor pool");
       return false;
     }
 
-    VkDescriptorSetLayout alloc_layouts[2] = {shared_memory_layout_, texture_layout_};
     VkDescriptorSetAllocateInfo alloc_info{};
     alloc_info.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
     alloc_info.descriptorPool = descriptor_pool_;
-    alloc_info.descriptorSetCount = 2;
-    alloc_info.pSetLayouts = alloc_layouts;
-    VkDescriptorSet allocated_sets[2];
-    if (dfn.vkAllocateDescriptorSets(device, &alloc_info, allocated_sets) != VK_SUCCESS) {
+    alloc_info.descriptorSetCount = 1;
+    alloc_info.pSetLayouts = &shared_memory_layout_;
+    if (dfn.vkAllocateDescriptorSets(device, &alloc_info, &shared_memory_set_) != VK_SUCCESS) {
       REXGPU_ERROR("NativeCommandProcessor: failed to allocate the persistent descriptor sets");
       return false;
     }
-    shared_memory_set_ = allocated_sets[0];
-    default_texture_set_ = allocated_sets[1];
   }
 
   // Default sampler: bilinear, clamp-to-edge -- used both for the 1x1
@@ -488,7 +444,7 @@ bool NativeCommandProcessor::InitializePipelineResources() {
   }
 
   // Default 1x1 opaque white texture -- see the field comment on
-  // default_texture_set_.
+  // default_texture_view_.
   {
     VkImageCreateInfo image_info{};
     image_info.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
@@ -525,37 +481,31 @@ bool NativeCommandProcessor::InitializePipelineResources() {
       REXGPU_ERROR("NativeCommandProcessor: failed to upload the default texture's pixel");
       return false;
     }
-
-    VkDescriptorImageInfo image_write{VK_NULL_HANDLE, default_texture_view_,
-                                      VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL};
-    VkDescriptorImageInfo sampler_write{default_sampler_, VK_NULL_HANDLE, VK_IMAGE_LAYOUT_UNDEFINED};
-    VkWriteDescriptorSet writes[2]{};
-    writes[0].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-    writes[0].dstSet = default_texture_set_;
-    writes[0].dstBinding = 0;
-    writes[0].descriptorCount = 1;
-    writes[0].descriptorType = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE;
-    writes[0].pImageInfo = &image_write;
-    writes[1] = writes[0];
-    writes[1].dstBinding = 1;
-    writes[1].descriptorType = VK_DESCRIPTOR_TYPE_SAMPLER;
-    writes[1].pImageInfo = &sampler_write;
-    dfn.vkUpdateDescriptorSets(device, 2, writes, 0, nullptr);
   }
 
-  // Transient descriptor pool for per-draw constants sets -- reset (not
-  // freed individually) once per frame in PresentFrame. Sized generously:
-  // once kQuadList draws stopped being unconditionally skipped, a single
-  // frame was observed issuing far more than the original 64-draw budget.
+  // Transient descriptor pool for per-draw constants *and* (see the
+  // multi-texture-per-stage comment on GetOrCreateTextureSetLayout above)
+  // texture sets -- reset (not freed individually) once per frame in
+  // PresentFrame. Sized generously: once kQuadList draws stopped being
+  // unconditionally skipped, a single frame was observed issuing far more
+  // than the original 64-draw budget. Texture-set budget assumes up to
+  // kMaxTexturesPerStage images + kMaxTexturesPerStage samplers per stage,
+  // per draw, for both vertex and pixel stages -- generous, not exact,
+  // since real shaders need far fewer in practice.
   {
     constexpr uint32_t kMaxDrawsPerFrame = 4096;
-    VkDescriptorPoolSize pool_sizes[1] = {
+    constexpr uint32_t kMaxTextureDescriptorsPerFrame =
+        kMaxDrawsPerFrame * kMaxTexturesPerStage * 2 /* vertex + pixel stages */;
+    VkDescriptorPoolSize pool_sizes[3] = {
         {VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
-         kMaxDrawsPerFrame * rex::graphics::SpirvShaderTranslator::kConstantBufferCount}};
+         kMaxDrawsPerFrame * rex::graphics::SpirvShaderTranslator::kConstantBufferCount},
+        {VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, kMaxTextureDescriptorsPerFrame},
+        {VK_DESCRIPTOR_TYPE_SAMPLER, kMaxTextureDescriptorsPerFrame},
+    };
     VkDescriptorPoolCreateInfo pool_info{};
     pool_info.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
-    pool_info.maxSets = kMaxDrawsPerFrame;
-    pool_info.poolSizeCount = 1;
+    pool_info.maxSets = kMaxDrawsPerFrame * 3 /* constants + vertex tex + pixel tex sets */;
+    pool_info.poolSizeCount = 3;
     pool_info.pPoolSizes = pool_sizes;
     if (dfn.vkCreateDescriptorPool(device, &pool_info, nullptr, &transient_descriptor_pool_) !=
         VK_SUCCESS) {
@@ -705,12 +655,24 @@ void NativeCommandProcessor::DestroyPipelineResources() {
   const rex::ui::vulkan::VulkanDevice::Functions& dfn = vulkan_device->functions();
   VkDevice device = vulkan_device->device();
 
-  for (auto& [key, pipeline] : pipeline_cache_) {
-    if (pipeline != VK_NULL_HANDLE) {
-      dfn.vkDestroyPipeline(device, pipeline, nullptr);
+  for (auto& [key, entry] : pipeline_cache_) {
+    if (entry.pipeline != VK_NULL_HANDLE) {
+      dfn.vkDestroyPipeline(device, entry.pipeline, nullptr);
     }
   }
   pipeline_cache_.clear();
+  for (auto& [key, layout] : pipeline_layout_cache_) {
+    if (layout != VK_NULL_HANDLE) {
+      dfn.vkDestroyPipelineLayout(device, layout, nullptr);
+    }
+  }
+  pipeline_layout_cache_.clear();
+  for (auto& [key, layout] : texture_set_layout_cache_) {
+    if (layout != VK_NULL_HANDLE) {
+      dfn.vkDestroyDescriptorSetLayout(device, layout, nullptr);
+    }
+  }
+  texture_set_layout_cache_.clear();
   for (auto& [key, entry] : shader_cache_) {
     if (entry.module != VK_NULL_HANDLE) {
       dfn.vkDestroyShaderModule(device, entry.module, nullptr);
@@ -749,13 +711,10 @@ void NativeCommandProcessor::DestroyPipelineResources() {
   if (transient_descriptor_pool_ != VK_NULL_HANDLE)
     dfn.vkDestroyDescriptorPool(device, transient_descriptor_pool_, nullptr);
   if (descriptor_pool_ != VK_NULL_HANDLE) dfn.vkDestroyDescriptorPool(device, descriptor_pool_, nullptr);
-  if (pipeline_layout_ != VK_NULL_HANDLE) dfn.vkDestroyPipelineLayout(device, pipeline_layout_, nullptr);
   if (shared_memory_layout_ != VK_NULL_HANDLE)
     dfn.vkDestroyDescriptorSetLayout(device, shared_memory_layout_, nullptr);
   if (constants_layout_ != VK_NULL_HANDLE)
     dfn.vkDestroyDescriptorSetLayout(device, constants_layout_, nullptr);
-  if (texture_layout_ != VK_NULL_HANDLE)
-    dfn.vkDestroyDescriptorSetLayout(device, texture_layout_, nullptr);
 }
 
 void NativeCommandProcessor::FreeTransientBuffers() {
@@ -922,7 +881,18 @@ rex::graphics::Shader* NativeCommandProcessor::GetOrAnalyzeShader(
     return existing->second.get();
   }
   using rex::graphics::Shader;
-  auto shader = std::make_unique<Shader>(type, key, ucode.data(), ucode.size(), std::endian::big);
+  // Must be a concrete SpirvShader (not the base Shader class) -- after
+  // translation, GetOrCreatePipeline/TryDraw need
+  // GetTextureBindingsAfterTranslation()/GetSamplerBindingsAfterTranslation(),
+  // which SpirvShaderTranslator::PostTranslation only populates via a
+  // successful dynamic_cast<SpirvShader*> of the shader it just translated
+  // (see spirv_translator.cpp's PostTranslation). Those are the real,
+  // dedup'd, binding-index-ordered lists SpirvShaderTranslator's SPIR-V
+  // output actually expects -- distinct from (and not necessarily the same
+  // count as) base Shader::texture_bindings(), which is the raw per-fetch-
+  // instruction list from ucode analysis before any dedup.
+  auto shader = std::make_unique<rex::graphics::SpirvShader>(type, key, ucode.data(), ucode.size(),
+                                                              std::endian::big);
   rex::string::StringBuffer disasm_buffer;
   shader->AnalyzeUcode(disasm_buffer);
   static uint32_t disasm_logged = 0;
@@ -1360,35 +1330,6 @@ NativeCommandProcessor::UploadedTexture* NativeCommandProcessor::GetOrUploadText
     return nullptr;
   }
 
-  VkDescriptorSetAllocateInfo set_alloc{};
-  set_alloc.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
-  set_alloc.descriptorPool = descriptor_pool_;
-  set_alloc.descriptorSetCount = 1;
-  set_alloc.pSetLayouts = &texture_layout_;
-  if (dfn.vkAllocateDescriptorSets(device, &set_alloc, &texture.descriptor_set) != VK_SUCCESS) {
-    REXGPU_ERROR("NativeCommandProcessor: failed to allocate a texture descriptor set");
-    dfn.vkDestroyImageView(device, texture.view, nullptr);
-    dfn.vkDestroyImage(device, texture.image, nullptr);
-    dfn.vkFreeMemory(device, texture.memory, nullptr);
-    return nullptr;
-  }
-
-  VkDescriptorImageInfo image_write{VK_NULL_HANDLE, texture.view,
-                                    VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL};
-  VkDescriptorImageInfo sampler_write{default_sampler_, VK_NULL_HANDLE, VK_IMAGE_LAYOUT_UNDEFINED};
-  VkWriteDescriptorSet writes[2]{};
-  writes[0].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-  writes[0].dstSet = texture.descriptor_set;
-  writes[0].dstBinding = 0;
-  writes[0].descriptorCount = 1;
-  writes[0].descriptorType = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE;
-  writes[0].pImageInfo = &image_write;
-  writes[1] = writes[0];
-  writes[1].dstBinding = 1;
-  writes[1].descriptorType = VK_DESCRIPTOR_TYPE_SAMPLER;
-  writes[1].pImageInfo = &sampler_write;
-  dfn.vkUpdateDescriptorSets(device, 2, writes, 0, nullptr);
-
   auto [inserted, _] = texture_cache_.emplace(key, texture);
   static bool logged_first_texture = false;
   if (!logged_first_texture) {
@@ -1406,17 +1347,102 @@ void NativeCommandProcessor::DestroyTextureCache() {
     if (texture.view != VK_NULL_HANDLE) dfn.vkDestroyImageView(device, texture.view, nullptr);
     if (texture.image != VK_NULL_HANDLE) dfn.vkDestroyImage(device, texture.image, nullptr);
     if (texture.memory != VK_NULL_HANDLE) dfn.vkFreeMemory(device, texture.memory, nullptr);
-    // texture.descriptor_set is freed implicitly when descriptor_pool_ is destroyed.
   }
   texture_cache_.clear();
 }
 
-VkPipeline NativeCommandProcessor::GetOrCreatePipeline(TranslatedShader* vertex_shader,
-                                                        TranslatedShader* pixel_shader,
-                                                        VkPrimitiveTopology topology,
-                                                        bool primitive_restart_enable,
-                                                        uint32_t blend_control,
-                                                        uint32_t color_write_mask) {
+VkDescriptorSetLayout NativeCommandProcessor::GetOrCreateTextureSetLayout(uint32_t texture_count,
+                                                                          uint32_t sampler_count) {
+  uint64_t key = (uint64_t(texture_count) << 32) | sampler_count;
+  auto existing = texture_set_layout_cache_.find(key);
+  if (existing != texture_set_layout_cache_.end()) {
+    return existing->second;
+  }
+
+  std::vector<VkDescriptorSetLayoutBinding> bindings;
+  bindings.reserve(size_t(texture_count) + sampler_count);
+  // Images at [0, texture_count), samplers at [texture_count, +sampler_count)
+  // -- matches SpirvShaderTranslator::EmitMain's binding-decoration scheme
+  // exactly (rexglue-sdk's spirv_translator.cpp: sampler bindings are
+  // decorated at texture_binding_count + i), not something invented here.
+  for (uint32_t i = 0; i < texture_count; ++i) {
+    VkDescriptorSetLayoutBinding binding{};
+    binding.binding = i;
+    binding.descriptorType = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE;
+    binding.descriptorCount = 1;
+    binding.stageFlags = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT;
+    bindings.push_back(binding);
+  }
+  for (uint32_t i = 0; i < sampler_count; ++i) {
+    VkDescriptorSetLayoutBinding binding{};
+    binding.binding = texture_count + i;
+    binding.descriptorType = VK_DESCRIPTOR_TYPE_SAMPLER;
+    binding.descriptorCount = 1;
+    binding.stageFlags = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT;
+    bindings.push_back(binding);
+  }
+
+  VkDescriptorSetLayoutCreateInfo layout_info{};
+  layout_info.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
+  layout_info.bindingCount = uint32_t(bindings.size());
+  layout_info.pBindings = bindings.empty() ? nullptr : bindings.data();
+
+  const rex::ui::vulkan::VulkanDevice* vulkan_device = provider_->vulkan_device();
+  VkDescriptorSetLayout layout = VK_NULL_HANDLE;
+  if (vulkan_device->functions().vkCreateDescriptorSetLayout(
+          vulkan_device->device(), &layout_info, nullptr, &layout) != VK_SUCCESS) {
+    REXGPU_ERROR(
+        "NativeCommandProcessor: failed to create a ({}, {}) texture descriptor set layout",
+        texture_count, sampler_count);
+    return VK_NULL_HANDLE;
+  }
+  texture_set_layout_cache_.emplace(key, layout);
+  return layout;
+}
+
+VkPipelineLayout NativeCommandProcessor::GetOrCreatePipelineLayout(uint32_t vertex_texture_count,
+                                                                    uint32_t vertex_sampler_count,
+                                                                    uint32_t pixel_texture_count,
+                                                                    uint32_t pixel_sampler_count) {
+  uint64_t key = (uint64_t(vertex_texture_count) << 48) | (uint64_t(vertex_sampler_count) << 32) |
+                (uint64_t(pixel_texture_count) << 16) | uint64_t(pixel_sampler_count);
+  auto existing = pipeline_layout_cache_.find(key);
+  if (existing != pipeline_layout_cache_.end()) {
+    return existing->second;
+  }
+
+  VkDescriptorSetLayout vertex_texture_layout =
+      GetOrCreateTextureSetLayout(vertex_texture_count, vertex_sampler_count);
+  VkDescriptorSetLayout pixel_texture_layout =
+      GetOrCreateTextureSetLayout(pixel_texture_count, pixel_sampler_count);
+  if (vertex_texture_layout == VK_NULL_HANDLE || pixel_texture_layout == VK_NULL_HANDLE) {
+    return VK_NULL_HANDLE;
+  }
+
+  VkDescriptorSetLayout set_layouts[4] = {shared_memory_layout_, constants_layout_,
+                                          vertex_texture_layout, pixel_texture_layout};
+  VkPipelineLayoutCreateInfo layout_info{};
+  layout_info.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
+  layout_info.setLayoutCount = 4;
+  layout_info.pSetLayouts = set_layouts;
+
+  const rex::ui::vulkan::VulkanDevice* vulkan_device = provider_->vulkan_device();
+  VkPipelineLayout layout = VK_NULL_HANDLE;
+  if (vulkan_device->functions().vkCreatePipelineLayout(vulkan_device->device(), &layout_info,
+                                                         nullptr, &layout) != VK_SUCCESS) {
+    REXGPU_ERROR(
+        "NativeCommandProcessor: failed to create a pipeline layout for texture counts "
+        "vs=({},{}) ps=({},{})",
+        vertex_texture_count, vertex_sampler_count, pixel_texture_count, pixel_sampler_count);
+    return VK_NULL_HANDLE;
+  }
+  pipeline_layout_cache_.emplace(key, layout);
+  return layout;
+}
+
+NativeCommandProcessor::PipelineEntry NativeCommandProcessor::GetOrCreatePipeline(
+    TranslatedShader* vertex_shader, TranslatedShader* pixel_shader, VkPrimitiveTopology topology,
+    bool primitive_restart_enable, uint32_t blend_control, uint32_t color_write_mask) {
   uint64_t key = reinterpret_cast<uintptr_t>(vertex_shader) ^
                 (reinterpret_cast<uintptr_t>(pixel_shader) * 3) ^ (uint64_t(topology) << 1) ^
                 (primitive_restart_enable ? 0x8000000000000000ull : 0) ^
@@ -1424,6 +1450,44 @@ VkPipeline NativeCommandProcessor::GetOrCreatePipeline(TranslatedShader* vertex_
   auto existing = pipeline_cache_.find(key);
   if (existing != pipeline_cache_.end()) {
     return existing->second;
+  }
+
+  // Must read the post-translation, dedup'd, binding-index-ordered lists
+  // (SpirvShader::GetTextureBindingsAfterTranslation/
+  // GetSamplerBindingsAfterTranslation), not base Shader::texture_bindings()
+  // -- see GetOrAnalyzeShader's doc comment. Both shaders were already
+  // translated by GetOrTranslateShader before this is called, so these are
+  // populated. dynamic_cast can't fail here (GetOrAnalyzeShader always
+  // constructs a SpirvShader) but is used instead of static_cast to fail
+  // loudly (null-deref) rather than silently if that ever changes.
+  auto* vertex_spirv_shader = dynamic_cast<rex::graphics::SpirvShader*>(vertex_shader->shader);
+  auto* pixel_spirv_shader = dynamic_cast<rex::graphics::SpirvShader*>(pixel_shader->shader);
+  uint32_t vertex_texture_count =
+      uint32_t(vertex_spirv_shader->GetTextureBindingsAfterTranslation().size());
+  uint32_t vertex_sampler_count =
+      uint32_t(vertex_spirv_shader->GetSamplerBindingsAfterTranslation().size());
+  uint32_t pixel_texture_count =
+      uint32_t(pixel_spirv_shader->GetTextureBindingsAfterTranslation().size());
+  uint32_t pixel_sampler_count =
+      uint32_t(pixel_spirv_shader->GetSamplerBindingsAfterTranslation().size());
+  // Safety cap, same rationale as kMaxShaderCacheEntries/kMaxTextureCacheEntries
+  // -- a garbage-decoded shader (docs/native-renderer-headless-boot.md Phase
+  // 3 "Next" item 3) could plausibly analyze to an implausible texture count;
+  // bound the resulting descriptor set/pool/layout growth instead of trusting
+  // guest-derived counts unconditionally.
+  if (vertex_texture_count > kMaxTexturesPerStage || vertex_sampler_count > kMaxTexturesPerStage ||
+      pixel_texture_count > kMaxTexturesPerStage || pixel_sampler_count > kMaxTexturesPerStage) {
+    REXGPU_ERROR(
+        "NativeCommandProcessor: shader pair needs more than {} textures/samplers in one stage "
+        "(vs=({},{}) ps=({},{})); skipping draw",
+        kMaxTexturesPerStage, vertex_texture_count, vertex_sampler_count, pixel_texture_count,
+        pixel_sampler_count);
+    return {};
+  }
+  VkPipelineLayout layout = GetOrCreatePipelineLayout(vertex_texture_count, vertex_sampler_count,
+                                                      pixel_texture_count, pixel_sampler_count);
+  if (layout == VK_NULL_HANDLE) {
+    return {};
   }
 
   const rex::ui::vulkan::VulkanDevice* vulkan_device = provider_->vulkan_device();
@@ -1535,7 +1599,7 @@ VkPipeline NativeCommandProcessor::GetOrCreatePipeline(TranslatedShader* vertex_
   pipeline_info.pMultisampleState = &multisample;
   pipeline_info.pColorBlendState = &blend_state;
   pipeline_info.pDynamicState = &dynamic_state;
-  pipeline_info.layout = pipeline_layout_;
+  pipeline_info.layout = layout;
   pipeline_info.renderPass = render_pass_;
   pipeline_info.subpass = 0;
 
@@ -1547,11 +1611,15 @@ VkPipeline NativeCommandProcessor::GetOrCreatePipeline(TranslatedShader* vertex_
                 static_cast<int32_t>(result));
     pipeline = VK_NULL_HANDLE;
   } else {
-    REXGPU_INFO("NativeCommandProcessor: created a graphics pipeline (topology={})",
-                static_cast<uint32_t>(topology));
+    REXGPU_INFO(
+        "NativeCommandProcessor: created a graphics pipeline (topology={} vs_tex=({},{}) "
+        "ps_tex=({},{}))",
+        static_cast<uint32_t>(topology), vertex_texture_count, vertex_sampler_count,
+        pixel_texture_count, pixel_sampler_count);
   }
-  pipeline_cache_.emplace(key, pipeline);
-  return pipeline;
+  PipelineEntry entry{pipeline, layout};
+  pipeline_cache_.emplace(key, entry);
+  return entry;
 }
 
 void NativeCommandProcessor::UpdateSharedMemory(uint32_t guest_address_dwords,
@@ -1735,10 +1803,10 @@ void NativeCommandProcessor::TryDraw(rex::graphics::xenos::PrimitiveType prim_ty
   if (rb_color_mask.write_alpha0) color_write_mask |= VK_COLOR_COMPONENT_A_BIT;
   uint32_t blend_control = registers_.Get<rex::graphics::reg::RB_BLENDCONTROL>().value;
 
-  VkPipeline pipeline =
+  PipelineEntry pipeline_entry =
       GetOrCreatePipeline(vertex_shader, pixel_shader, topology, /*primitive_restart_enable=*/
                          is_rect_list, blend_control, color_write_mask);
-  if (pipeline == VK_NULL_HANDLE) {
+  if (pipeline_entry.pipeline == VK_NULL_HANDLE) {
     return;
   }
 
@@ -2071,26 +2139,93 @@ void NativeCommandProcessor::TryDraw(rex::graphics::xenos::PrimitiveType prim_ty
   upload_constant_buffer(fetch_constants, sizeof(fetch_constants),
                          SpirvShaderTranslator::kConstantBufferFetch);
 
-  // Only the first texture_bindings() entry per stage is honored (see
-  // texture_layout_'s field comment) -- falls back to the default (1x1
-  // white) texture set for shaders that don't sample, or whose fetch
-  // constant isn't in GetOrUploadTexture's narrow supported subset.
-  auto resolve_texture_set = [&](TranslatedShader* shader) {
-    if (shader->shader->texture_bindings().empty()) {
-      return default_texture_set_;
+  // Builds a single descriptor set covering *every* texture_bindings()/
+  // sampler_bindings() entry a shader stage actually needs (not just the
+  // first one -- see GetOrCreateTextureSetLayout's doc comment on why a
+  // fixed single-texture layout was wrong for shaders needing multiple
+  // simultaneous texture units, e.g. a base image + glow/overlay layer).
+  // Each missing/unsupported real texture falls back to the 1x1 white
+  // default view for just that slot, not the whole set. Allocated fresh
+  // per draw from transient_descriptor_pool_ (same reasoning as
+  // upload_constant_buffer above: a combined set's exact layout depends on
+  // this specific shader, so it can't be a persistent per-texture set
+  // anymore).
+  auto resolve_texture_set = [&](TranslatedShader* shader) -> VkDescriptorSet {
+    // Must match GetOrCreatePipeline's counts/ordering exactly -- see
+    // GetOrAnalyzeShader's doc comment on why this is
+    // SpirvShader::GetTextureBindingsAfterTranslation()/
+    // GetSamplerBindingsAfterTranslation(), not base Shader::texture_bindings().
+    auto* spirv_shader = dynamic_cast<rex::graphics::SpirvShader*>(shader->shader);
+    const auto& tex_bindings = spirv_shader->GetTextureBindingsAfterTranslation();
+    const auto& smp_bindings = spirv_shader->GetSamplerBindingsAfterTranslation();
+    uint32_t tex_count = uint32_t(tex_bindings.size());
+    uint32_t smp_count = uint32_t(smp_bindings.size());
+    VkDescriptorSetLayout layout = GetOrCreateTextureSetLayout(tex_count, smp_count);
+    if (layout == VK_NULL_HANDLE) {
+      return VK_NULL_HANDLE;
     }
-    UploadedTexture* texture =
-        GetOrUploadTexture(uint32_t(shader->shader->texture_bindings()[0].fetch_constant));
-    return texture ? texture->descriptor_set : default_texture_set_;
+
+    VkDescriptorSetAllocateInfo alloc_info{};
+    alloc_info.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
+    alloc_info.descriptorPool = transient_descriptor_pool_;
+    alloc_info.descriptorSetCount = 1;
+    alloc_info.pSetLayouts = &layout;
+    VkDescriptorSet set = VK_NULL_HANDLE;
+    if (dfn.vkAllocateDescriptorSets(device, &alloc_info, &set) != VK_SUCCESS) {
+      REXGPU_ERROR(
+          "NativeCommandProcessor: transient descriptor pool exhausted (texture set), skipping "
+          "draw");
+      return VK_NULL_HANDLE;
+    }
+    if (tex_count == 0 && smp_count == 0) {
+      return set;
+    }
+
+    std::vector<VkDescriptorImageInfo> image_infos(tex_count);
+    std::vector<VkDescriptorImageInfo> sampler_infos(smp_count);
+    std::vector<VkWriteDescriptorSet> writes;
+    writes.reserve(size_t(tex_count) + smp_count);
+    for (uint32_t i = 0; i < tex_count; ++i) {
+      UploadedTexture* texture = GetOrUploadTexture(uint32_t(tex_bindings[i].fetch_constant));
+      image_infos[i] = {VK_NULL_HANDLE, texture ? texture->view : default_texture_view_,
+                        VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL};
+      VkWriteDescriptorSet write{};
+      write.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+      write.dstSet = set;
+      write.dstBinding = i;
+      write.descriptorCount = 1;
+      write.descriptorType = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE;
+      write.pImageInfo = &image_infos[i];
+      writes.push_back(write);
+    }
+    for (uint32_t i = 0; i < smp_count; ++i) {
+      // Every sampler slot reuses default_sampler_ (bilinear, clamp) --
+      // sampler_bindings()[i]'s actual filter/wrap fields aren't decoded yet,
+      // same pre-existing simplification as before this multi-texture change.
+      sampler_infos[i] = {default_sampler_, VK_NULL_HANDLE, VK_IMAGE_LAYOUT_UNDEFINED};
+      VkWriteDescriptorSet write{};
+      write.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+      write.dstSet = set;
+      write.dstBinding = tex_count + i;
+      write.descriptorCount = 1;
+      write.descriptorType = VK_DESCRIPTOR_TYPE_SAMPLER;
+      write.pImageInfo = &sampler_infos[i];
+      writes.push_back(write);
+    }
+    dfn.vkUpdateDescriptorSets(device, uint32_t(writes.size()), writes.data(), 0, nullptr);
+    return set;
   };
   VkDescriptorSet vertex_texture_set = resolve_texture_set(vertex_shader);
   VkDescriptorSet pixel_texture_set = resolve_texture_set(pixel_shader);
+  if (vertex_texture_set == VK_NULL_HANDLE || pixel_texture_set == VK_NULL_HANDLE) {
+    return;
+  }
 
   VkDescriptorSet sets[4] = {shared_memory_set_, constants_set, vertex_texture_set,
                             pixel_texture_set};
-  dfn.vkCmdBindPipeline(command_buffer_, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline);
-  dfn.vkCmdBindDescriptorSets(command_buffer_, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline_layout_,
-                              0, 4, sets, 0, nullptr);
+  dfn.vkCmdBindPipeline(command_buffer_, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline_entry.pipeline);
+  dfn.vkCmdBindDescriptorSets(command_buffer_, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                              pipeline_entry.layout, 0, 4, sets, 0, nullptr);
   // Shared by both synthesized-index-buffer paths below: uploads `indices`
   // as a fresh transient VK_INDEX_TYPE_UINT32 buffer and issues the indexed
   // draw. Fresh per draw for the same reason the constant buffers are (see

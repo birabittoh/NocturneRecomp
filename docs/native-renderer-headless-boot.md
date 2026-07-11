@@ -1745,3 +1745,136 @@ one doesn't have to re-discover it:
 - Don't commit `.rdc` files (multi-MB binary, and stale ones actively
   mislead — this doc had two committed-adjacent captures removed mid-session
   for exactly that reason). Regenerate via the recipe above instead.
+
+## Step 15 (2026-07-11, same day): multi-texture-per-stage support, and a likely memexport gap for the CPU/GPU-rendered gameplay-preview texture
+
+Followed up on a "no gameplay image visible" report from a user-captured
+`game.rdc`/`game2.rdc` (character-select or New-Game screen, gameplay music
+audible during capture, confirming it's not the intro).
+
+**Real bug, fixed: only one texture per shader stage could ever be bound.**
+`get_shader_bindings` on the screen's textured draws showed `xe_texture1_2d_u/s`
+completely unbound (`ResourceId::0`), even though the pixel shader's SPIR-V
+interface declared it and the image binding for `xe_texture0` resolved
+correctly. Root cause: `texture_layout_` (`native_command_processor.cpp`) was
+a single hardcoded 2-binding (1 image + 1 sampler) `VkDescriptorSetLayout`
+reused for every shader, and `TryDraw`'s texture resolution only ever bound
+`shader->texture_bindings()[0]` — a real, pre-existing limitation the header
+comments already called out ("this renderer only supports one texture per
+stage for now"), but not yet a blocker until a shader needing two
+simultaneous texture units (a base image + a glow/overlay layer, judging by
+the shader's structure) was actually hit.
+
+**Why a single fixed layout can't work at all, not just "doesn't cover N>1":**
+investigated `SpirvShaderTranslator`'s actual SPIR-V generation
+(`spirv_translator.cpp`'s `EmitMain`) — sampler bindings are decorated at
+`texture_binding_count + i`, i.e. **the sampler binding numbers depend on
+how many images that specific shader needs**, not a fixed offset. A shader
+needing 1 texture has its sampler at binding 1; a shader needing 4 has its
+first sampler at binding 4. So no single fixed-size layout (not even a
+generously-padded one) can match every shader's actual expected binding
+layout — the descriptor set layout (and therefore the pipeline layout that
+embeds it) has to be built per distinct `(texture_count, sampler_count)`
+shape actually seen.
+
+**Fix, a real (not small) refactor:**
+- `GetOrCreateTextureSetLayout(texture_count, sampler_count)` (new) builds
+  and caches a `VkDescriptorSetLayout` per distinct shape: images at
+  `[0, texture_count)`, samplers at `[texture_count, +sampler_count)`,
+  matching the translator's scheme exactly.
+- `GetOrCreatePipelineLayout(vs_tex, vs_smp, ps_tex, ps_smp)` (new) builds
+  and caches a `VkPipelineLayout` per distinct 4-tuple of stage shapes.
+- `GetOrCreatePipeline` now returns a `PipelineEntry{pipeline, layout}` (was
+  bare `VkPipeline`) — callers need the exact layout a pipeline was built
+  against to bind descriptor sets correctly, and that layout is no longer a
+  single global.
+- **Had to switch `GetOrAnalyzeShader` from constructing a base `Shader` to
+  a concrete `rex::graphics::SpirvShader`.** Found the hard way (a compile
+  error) that the real, dedup'd, binding-index-ordered texture/sampler lists
+  SpirvShaderTranslator's SPIR-V output actually expects
+  (`SpirvShader::GetTextureBindingsAfterTranslation()`/
+  `GetSamplerBindingsAfterTranslation()`) are populated by
+  `SpirvShaderTranslator::PostTranslation()` via a `dynamic_cast<SpirvShader*>`
+  of the shader just translated — which fails (returns null) unless the
+  concrete object actually is a `SpirvShader`, not just a base `Shader`. Base
+  `Shader::texture_bindings()` (used previously, and still used unrelatedly
+  for `vertex_bindings()`) is a *different*, non-deduped, per-fetch-
+  instruction list from ucode analysis — not safe to use for sizing
+  descriptor layouts, since a shader that samples the same texture at
+  multiple call sites (e.g. a multi-tap blur) would overcount.
+- `resolve_texture_set` (in `TryDraw`) now builds one descriptor set per
+  stage sized to that shader's actual counts, resolving each
+  `GetTextureBindingsAfterTranslation()[i].fetch_constant` via
+  `GetOrUploadTexture` (falling back to the 1x1 default view per-slot, not
+  per-whole-set, when a specific texture isn't supported/available) and
+  writing every sampler slot to `default_sampler_` (unchanged simplification
+  — per-binding filter/wrap state still isn't decoded).
+- Descriptor sets for textures are now allocated per-draw from
+  `transient_descriptor_pool_` (like the constants sets already were)
+  instead of being persistent per-uploaded-texture — a combined multi-
+  texture set's exact shape depends on the specific shader using it, so it
+  can no longer be a property of the texture alone. `UploadedTexture` lost
+  its `descriptor_set` field accordingly; `GetOrUploadTexture` now only
+  manages the image/view/memory.
+- Added a `kMaxTexturesPerStage = 8` safety cap (same rationale as the
+  existing shader-cache/texture-cache caps): a garbage-decoded shader could
+  otherwise analyze to an implausible texture count and grow descriptor
+  pool/layout state unboundedly.
+
+**Verified two ways:** headless boot logs now show pipelines created with
+real multi-texture shapes (`created a graphics pipeline (topology=3
+vs_tex=(0,0) ps_tex=(4,2))`, `ps_tex=(2,1)`, etc. — previously every pipeline
+was implicitly `(0 or 1, 0 or 1)`), no crash, `XMP: started BGM playlist`
+still reached, no `transient descriptor pool exhausted`. Then, against a
+fresh user-captured `game2.rdc`: `get_draw_call_state` on the same draw that
+previously showed `xe_texture1_2d_u/s` as `ResourceId::0` now shows a real
+texture bound in all 4 texture/sampler slots; the composited render target
+went from showing only the cloudy background (previous report) to showing
+real character portraits (Alucard, Richter) and a graveyard silhouette
+correctly layered over it.
+
+**Still open: no gameplay-preview content, on a `game.rdc` confirmed to be a
+real gameplay-adjacent screen (audible BGM during capture).** All 6 draws in
+that frame were individually checked via `get_draw_call_state` — 3 sample
+real, correctly-decoded textures (`852x480`, `852x128`, `512x256`), 2 sample
+no texture at all (flat-color elements), and the last has every one of its
+48 fetch constants read back as literally zero. `list_textures` on the whole
+capture shows exactly the textures accounted for by those draws — no
+additional, unbound-but-present large texture exists anywhere in the
+capture. The user confirmed **`512x256` is the actual correct size of the
+gameplay-preview texture** — but `save_texture` on it shows flat white/blank
+content, not gameplay. So the texture object exists, is correctly sized, is
+bound to a real draw (`event_id=132`) — but its *content* is blank, not
+whatever real gameplay frame the guest is supposed to have written there
+before this draw ran.
+
+**Working hypothesis, not yet confirmed:** the user separately confirmed
+(from an earlier real-xenos-backend RenderDoc session) that this content is
+"rendered entirely on the CPU/GPU and output as a texture" — i.e. generated
+by some path other than a normal fixed-function draw-to-render-target. The
+Xenos register file exposes `RegisterFile::GetMemExportStream` (`rexglue-sdk`'s
+`register_file.h`) — **memexport**, a real Xenos GPU feature where a vertex/
+compute-style shader writes arbitrary data directly to guest memory, used by
+some games for software/GPU-hybrid rendering instead of the normal
+render-target pipeline. `NativeCommandProcessor` **does not implement
+memexport in any form** — `OnPacket`/`OnDraw` only handle ordinary indexed/
+non-indexed draws through the fixed vertex-shader → rasterizer → pixel-
+shader path; nothing here ever calls `GetMemExportStream` or processes a
+memexport-shaped draw/dispatch. If the gameplay-preview texture is populated
+via memexport, that write simply never happens in this renderer, leaving
+the `512x256` texture at whatever the shared-memory-backed buffer's default
+content is (blank/white) when the later draw samples it. Consistent with,
+but not proven by: a 4-vertex draw elsewhere in similar frames having every
+fetch constant read back as zero, as if the guest gave up configuring a
+*different* texture fetch once its expected memexport output never
+completed.
+
+**Not yet done, and the natural next step:** confirm the memexport
+hypothesis directly (e.g. search the decoded PM4 stream for memexport-shaped
+vertex-shader draws — `SQ_PROGRAM_CNTL`/`VGT_DRAW_INITIATOR` with `num_indices`
+and a shader whose ucode writes via `eA`/export addressing rather than the
+normal position/interpolator exports — before assuming it needs
+implementing), then implement `RegisterFile::GetMemExportStream`-driven
+memory writes if confirmed. This would be substantially larger in scope than
+anything else done this session (steps 10-15) — a new GPU-write mechanism,
+not another texture-format/binding-count gap.

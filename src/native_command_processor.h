@@ -12,6 +12,7 @@
 
 #include <rex/graphics/packet_disassembler.h>
 #include <rex/graphics/pipeline/shader/shader.h>
+#include <rex/graphics/pipeline/shader/spirv.h>
 #include <rex/graphics/pipeline/shader/spirv_translator.h>
 #include <rex/graphics/register_file.h>
 #include <rex/ui/presenter.h>
@@ -111,36 +112,63 @@ class NativeCommandProcessor {
           rex::graphics::Shader::HostVertexShaderType::kVertex);
 
   // Gets (building on first use) a VkPipeline for this exact vertex/pixel
-  // shader pair + primitive topology + blend state. blend_control is the raw
-  // RB_BLENDCONTROL0 value and color_write_mask the RT0 write-mask bits from
-  // RB_COLOR_MASK (see the doc comment on GetOrCreatePipeline's
-  // blend_attachment setup in native_command_processor.cpp) -- both fold
-  // into the cache key since the guest can reuse the same shader pair with
-  // different blend state across draws (e.g. a fade animating its blend
-  // factors frame to frame with static geometry/shaders).
-  VkPipeline GetOrCreatePipeline(TranslatedShader* vertex_shader, TranslatedShader* pixel_shader,
-                                 VkPrimitiveTopology topology, bool primitive_restart_enable,
-                                 uint32_t blend_control, uint32_t color_write_mask);
+  // shader pair + primitive topology + blend state, plus the VkPipelineLayout
+  // it was created with (see GetOrCreateTextureSetLayout/
+  // GetOrCreatePipelineLayout -- the pipeline layout depends on each shader's
+  // actual texture/sampler counts, so it isn't a single fixed global anymore,
+  // and the caller needs the exact layout the pipeline was built against to
+  // bind descriptor sets correctly). blend_control is the raw RB_BLENDCONTROL0
+  // value and color_write_mask the RT0 write-mask bits from RB_COLOR_MASK
+  // (see the doc comment on GetOrCreatePipeline's blend_attachment setup in
+  // native_command_processor.cpp) -- both fold into the cache key since the
+  // guest can reuse the same shader pair with different blend state across
+  // draws (e.g. a fade animating its blend factors frame to frame with static
+  // geometry/shaders).
+  struct PipelineEntry {
+    VkPipeline pipeline = VK_NULL_HANDLE;
+    VkPipelineLayout layout = VK_NULL_HANDLE;
+  };
+  PipelineEntry GetOrCreatePipeline(TranslatedShader* vertex_shader, TranslatedShader* pixel_shader,
+                                    VkPrimitiveTopology topology, bool primitive_restart_enable,
+                                    uint32_t blend_control, uint32_t color_write_mask);
 
-  // Milestone 3b step 7 (+ DXT4/5+tiling follow-up): gets (uploading on
-  // first use) a sampled VkImage + descriptor set for the given texture
-  // fetch constant slot, or nullptr if the fetch constant describes
-  // something not yet supported (mipped/array/3D, or a format outside the
-  // small allow-list -- see native_command_processor.cpp's
-  // GetOrUploadTexture) or is simply unbound (base_address == 0). Scoped
-  // deliberately narrow: only single-level 2D textures in k_8_8_8_8/
-  // k_1_5_5_5/k_4_4_4_4/k_DXT4_5 (both tiled and linear layouts, via
+  // Multi-texture-per-stage support: SpirvShaderTranslator assigns each
+  // shader's SAMPLED_IMAGE bindings to [0, texture_bindings().size()) and its
+  // SAMPLER bindings to [texture_bindings().size(), + sampler_bindings().size()),
+  // both compacted/dedup'd per that specific shader -- there's no fixed
+  // binding count that works for every shader, so the descriptor set layout
+  // (and therefore the pipeline layout that embeds it) has to be built per
+  // distinct (texture_count, sampler_count) shape actually seen, not once
+  // globally. Found necessary when a real draw's pixel shader needed two
+  // simultaneous texture units (a base image + a glow/overlay layer) and the
+  // old single fixed 1-image+1-sampler layout left the second one completely
+  // unbound. See docs/native-renderer-headless-boot.md.
+  static constexpr uint32_t kMaxTexturesPerStage = 8;
+  VkDescriptorSetLayout GetOrCreateTextureSetLayout(uint32_t texture_count, uint32_t sampler_count);
+  std::unordered_map<uint64_t, VkDescriptorSetLayout> texture_set_layout_cache_;
+  VkPipelineLayout GetOrCreatePipelineLayout(uint32_t vertex_texture_count,
+                                             uint32_t vertex_sampler_count,
+                                             uint32_t pixel_texture_count,
+                                             uint32_t pixel_sampler_count);
+  std::unordered_map<uint64_t, VkPipelineLayout> pipeline_layout_cache_;
+
+  // Milestone 3b step 7 (+ DXT4/5+tiling, k_16_16_16_16 follow-ups): gets
+  // (uploading on first use) a sampled VkImage for the given texture fetch
+  // constant slot, or nullptr if the fetch constant describes something not
+  // yet supported (mipped/array/3D, or a format outside the small allow-list
+  // -- see native_command_processor.cpp's GetOrUploadTexture) or is simply
+  // unbound (base_address == 0). Scoped deliberately narrow: only
+  // single-level 2D textures in k_8_8_8_8/k_1_5_5_5/k_4_4_4_4/k_DXT4_5/
+  // k_16_16_16_16 (both tiled and linear layouts, via
   // texture_util::GetTiledOffset2D), matching the "skip with a rate-limited
   // log" pattern used elsewhere in this file for anything wider than what's
-  // been verified against the intro's actual draws. Only the first
-  // texture_bindings() entry per stage is honored (see
-  // texture_descriptor_layout_'s comment for why one binding suffices for
-  // now).
+  // been verified against real draws. No longer owns a descriptor set itself
+  // (see the multi-texture-per-stage comment above) -- callers combine
+  // however many of these a specific shader needs into a fresh per-draw set.
   struct UploadedTexture {
     VkImage image = VK_NULL_HANDLE;
     VkDeviceMemory memory = VK_NULL_HANDLE;
     VkImageView view = VK_NULL_HANDLE;
-    VkDescriptorSet descriptor_set = VK_NULL_HANDLE;
   };
   UploadedTexture* GetOrUploadTexture(uint32_t fetch_constant_index);
 
@@ -185,29 +213,22 @@ class NativeCommandProcessor {
   bool pipeline_resources_valid_ = false;
   VkDescriptorSetLayout shared_memory_layout_ = VK_NULL_HANDLE;
   VkDescriptorSetLayout constants_layout_ = VK_NULL_HANDLE;
-  // Sets 2/3 (vertex/pixel textures): SpirvShaderTranslator emits separate
-  // VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE / VK_DESCRIPTOR_TYPE_SAMPLER bindings
-  // (not a combined-image-sampler), with binding index a compacted,
-  // dedup'd position in the shader's own texture_bindings()/sampler_bindings()
-  // list rather than the guest fetch-constant slot directly. This renderer
-  // only supports one texture per stage for now (see GetOrUploadTexture), so
-  // one fixed 2-binding layout (0=image, 1=sampler) covers every shader that
-  // needs it; a shader that doesn't sample at all simply never statically
-  // references these bindings, so reusing the same non-empty layout/set for
-  // "no texture" draws too (backed by a 1x1 default texture) is harmless.
-  VkDescriptorSetLayout texture_layout_ = VK_NULL_HANDLE;
-  VkPipelineLayout pipeline_layout_ = VK_NULL_HANDLE;
+  // Sets 2/3 (vertex/pixel textures) no longer have a single fixed layout --
+  // see the multi-texture-per-stage comment on GetOrCreateTextureSetLayout/
+  // GetOrCreatePipelineLayout above; both are built per shader-pair shape and
+  // cached there instead.
   VkDescriptorPool descriptor_pool_ = VK_NULL_HANDLE;
   VkDescriptorSet shared_memory_set_ = VK_NULL_HANDLE;
 
-  // 1x1 opaque white texture bound wherever a draw doesn't have a real
-  // uploaded texture yet (unsupported format, unbound fetch constant, or no
-  // texture_bindings() at all) -- keeps every draw's descriptor sets valid
-  // without needing a second pipeline layout variant.
+  // 1x1 opaque white texture -- used as the per-slot fallback image view
+  // wherever a specific texture_bindings() entry doesn't have a real
+  // uploaded texture yet (unsupported format, unbound fetch constant), one
+  // slot at a time within a (possibly multi-texture) per-draw descriptor set
+  // built in TryDraw. A shader with zero texture_bindings() at all just gets
+  // an empty (0-binding) set, no fallback needed.
   VkImage default_texture_image_ = VK_NULL_HANDLE;
   VkDeviceMemory default_texture_memory_ = VK_NULL_HANDLE;
   VkImageView default_texture_view_ = VK_NULL_HANDLE;
-  VkDescriptorSet default_texture_set_ = VK_NULL_HANDLE;
   VkSampler default_sampler_ = VK_NULL_HANDLE;
 
   // Real uploaded textures, cached by a hash of the fetch constant's raw
@@ -280,7 +301,7 @@ class NativeCommandProcessor {
   bool shader_cache_limit_logged_ = false;
 
   std::unordered_map<uint64_t, TranslatedShader> shader_cache_;
-  std::unordered_map<uint64_t, VkPipeline> pipeline_cache_;
+  std::unordered_map<uint64_t, PipelineEntry> pipeline_cache_;
 
   // Transient per-draw uniform buffers (constants differ per draw within a
   // frame, so each draw gets its own buffer objects rather than racing to
