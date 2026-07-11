@@ -1148,7 +1148,8 @@ NativeCommandProcessor::UploadedTexture* NativeCommandProcessor::GetOrUploadText
   bool format_supported = fetch.format == TextureFormat::k_8_8_8_8 ||
                           fetch.format == TextureFormat::k_1_5_5_5 ||
                           fetch.format == TextureFormat::k_4_4_4_4 ||
-                          fetch.format == TextureFormat::k_DXT4_5;
+                          fetch.format == TextureFormat::k_DXT4_5 ||
+                          fetch.format == TextureFormat::k_16_16_16_16;
   if (fetch.dimension != DataDimension::k2DOrStacked || fetch.stacked ||
       fetch.mip_min_level != 0 || fetch.mip_max_level != 0 || !format_supported) {
     static uint32_t skipped_logged = 0;
@@ -1247,12 +1248,17 @@ NativeCommandProcessor::UploadedTexture* NativeCommandProcessor::GetOrUploadText
       }
     }
   } else {
-    // Bytes per texel in guest memory: 4 for k_8_8_8_8, 2 for the packed
-    // 16-bit formats. Row stride from the fetch constant's pitch (texels >>
-    // 5, per the field comment in xenos.h), falling back to a tightly-packed
-    // row if pitch somehow decodes smaller than the width itself.
-    uint32_t bytes_per_texel = fetch.format == TextureFormat::k_8_8_8_8 ? 4 : 2;
-    uint32_t bytes_per_texel_log2 = fetch.format == TextureFormat::k_8_8_8_8 ? 2u : 1u;
+    // Bytes per texel in guest memory: 4 for k_8_8_8_8, 8 for k_16_16_16_16,
+    // 2 for the packed 16-bit formats. Row stride from the fetch constant's
+    // pitch (texels >> 5, per the field comment in xenos.h), falling back to
+    // a tightly-packed row if pitch somehow decodes smaller than the width
+    // itself.
+    uint32_t bytes_per_texel = fetch.format == TextureFormat::k_8_8_8_8   ? 4
+                               : fetch.format == TextureFormat::k_16_16_16_16 ? 8
+                                                                               : 2;
+    uint32_t bytes_per_texel_log2 = fetch.format == TextureFormat::k_8_8_8_8   ? 2u
+                                    : fetch.format == TextureFormat::k_16_16_16_16 ? 3u
+                                                                                    : 1u;
     uint32_t pitch_texels = std::max(fetch.pitch * 32u, width);
 
     // Replicates the top bits into the low bits when expanding an n-bit
@@ -1276,6 +1282,17 @@ NativeCommandProcessor::UploadedTexture* NativeCommandProcessor::GetOrUploadText
             std::memcpy(dst, &texel, 4);
           } else {
             std::memcpy(dst, src, 4);
+          }
+        } else if (fetch.format == TextureFormat::k_16_16_16_16) {
+          // Plain RGBA order (same convention as k_8_8_8_8), 4x 16-bit UNORM
+          // channels -- truncated to the high 8 bits per channel for this
+          // renderer's RGBA8 upload path (same "downsample on CPU, reuse the
+          // R8G8B8A8_UNORM upload path" approach as the 16-bit packed
+          // formats below), not a rounded/dithered downsample.
+          for (int c = 0; c < 4; ++c) {
+            uint16_t channel = byteswap ? rex::memory::load_and_swap<uint16_t>(src + c * 2)
+                                        : *reinterpret_cast<const uint16_t*>(src + c * 2);
+            dst[c] = uint8_t(channel >> 8);
           }
         } else {
           uint16_t texel = byteswap ? rex::memory::load_and_swap<uint16_t>(src)
