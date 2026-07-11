@@ -1276,25 +1276,81 @@ continues normally underneath (confirms the CPU/guest side was never the
 problem, only this rasterization gap). This is real forward progress but
 not yet correct output.
 
+**Follow-up same session, confirmed with a fresh capture (see "Getting a
+RenderDoc capture" below): the black-quads mystery above is already-known,
+not new.** `get_draw_call_state` on one of the textured draws
+(`event_id=437`, 78 indices) shows its bound texture (`xe_texture0_2d_u`) is
+a **1x1 white placeholder** (`read_texture_pixels` confirms `[1,1,1,1]`),
+not real intro artwork. That's `GetOrUploadTexture`'s documented, deliberate
+fallback (`native_command_processor.cpp`'s `format_supported` check) for any
+fetch constant it doesn't yet handle — and this game's intro content is
+overwhelmingly `k_DXT4_5`/tiled, i.e. exactly step 8's item 2 below, not a
+new bug. So: bugs 1-2 above were genuinely blocking *all* rasterization;
+now that they're fixed, the game is correctly falling through to the
+already-documented "next" item (DXT4/5 + tiling) rather than hitting
+anything new. **Item 2 below is now the actual next step, unblocked.**
+
 **Next (in order):**
-1. **Why are the newly-rasterizing draws solid black instead of real
-   color/texture?** The specific draw inspected in `cap2.rdc`
-   (`event_id=112`) has a pixel shader with `texture_count: 0` in its
-   reflection, and its body never writes anything into the output register
-   beyond the zero-initialized default — so for *this* draw, black may
-   simply be correct (an untextured backdrop/shadow shape), and the actual
-   textured logo draws are further along in the frame and still not
-   rasterizing for a reason not yet found. Take a fresh capture now that
-   bugs 1-2 are fixed and check the textured draws specifically (`textures`
-   list non-empty in `get_draw_call_state`) the same way: post-VS output
-   sane? pixel shader discarding? `get_cbuffer_contents` on the fetch
-   constants matching the expected texture address?
-2. Once real content shows: remove the temporary diagnostics (per-pixel
-   `TEMPORARY diagnostic` vertex overrides, verbose disasm/vfetch/sysconst
-   logging, `DebugDumpColorTarget` call) that were added across steps 8-9 —
-   all clearly marked in `native_command_processor.cpp`.
-3. Items 2-4 from step 8's "Next" list (`k_DXT4_5` textures, the
-   pathological-shader-stall root cause, remaining zeroed `SystemConstants`
-   fields) still apply, in the same priority order — texture format work in
-   particular is still blocked until real draws are confirmed to rasterize
-   correctly end-to-end.
+1. Remove the temporary diagnostics (per-pixel `TEMPORARY diagnostic`
+   vertex overrides, verbose disasm/vfetch/sysconst logging,
+   `DebugDumpColorTarget` call) added across steps 8-9 — all clearly marked
+   in `native_command_processor.cpp` — once a couple of real textures are
+   confirmed rendering, so they don't have to be re-diagnosed from scratch
+   if something regresses in the meantime.
+2. **`k_DXT4_5` support (block decompression + tiling)** — see step 8's
+   item 2 for the details (unchanged, still accurate). This is the actual
+   next piece of work: `GetOrUploadTexture`'s `format_supported` check needs
+   a DXT5/BC3 path plus real tiled-address math
+   (`texture_util::GetTiledOffset2D`/`GetGuestTextureLayout`, already linked,
+   not yet called).
+3. Items 3-4 from step 8's "Next" list (pathological-shader-stall root
+   cause, remaining zeroed `SystemConstants` fields) still apply.
+
+## Getting a RenderDoc capture (recipe that actually works)
+
+Took two sessions to land on a reliable recipe — recorded here so the next
+one doesn't have to re-discover it:
+
+- **`renderdoc-mcp`'s own automated injection never worked** (`ExecuteAndInject`/
+  `CreateTargetControl` against a separately-self-built `renderdoc.pyd` —
+  see step 8's build notes) — no ImGui capture overlay ever appeared, no
+  matter what launch options were tried. Root cause: **RenderDoc's Vulkan
+  hooking must be explicitly enabled once, in qrenderdoc's own Settings**
+  (a persistent machine-wide setting, off by default) — the officially
+  *installed* RenderDoc's Vulkan implicit layer registration is what
+  actually matters, not anything about our launch code or the self-built
+  module. Once the user enabled it manually in qrenderdoc's Settings once,
+  capturing worked immediately, both via manual qrenderdoc launch and via
+  the scripted flow below, with no further code changes on our side. If a
+  future session hits "no overlay / no capture" again, **check this
+  setting first** before re-investigating injection timing or Vulkan
+  instance creation order (both were dead ends this time).
+- **Scripted, unattended capture**: `scripts/capture_frame.py`. Launches
+  `nocturnerecomp.exe` via the *officially installed* `renderdoccmd.exe`
+  (`capture -d <repo root> -c logs/capture <exe> --game_data_root assets
+  --license_mask=1 --fullscreen=false` — important: use the installed one
+  at `C:\Users\<user>\scoop\apps\renderdoc\current\renderdoccmd.exe`, not
+  anything self-built, since only the installed copy is registered as the
+  Vulkan layer), waits ~45s for the game to actually reach the intro draws
+  (it takes a while to boot — don't shorten this), then uses the
+  self-built `renderdoc.pyd` (`../.tools/renderdoc_runtime`, from step 8)
+  purely for `CreateTargetControl`/`TriggerCapture` against the ident
+  `renderdoccmd` printed at launch. This mixed approach — installed
+  renderdoccmd for the inject/launch, self-built module for target control
+  — is what actually works; using the self-built module for the launch
+  step too was the reason automated injection failed.
+- `scripts/trigger_capture.py` is a smaller standalone utility: connects to
+  an *already-running*, already-injected `nocturnerecomp.exe` (via
+  `rd.EnumerateRemoteTargets`) and triggers a capture, for when the game is
+  already up (e.g. launched manually) and you just need one more frame.
+- Always pass `--fullscreen=false` — the default (`fullscreen` cvar,
+  `rexglue-sdk/src/ui/window.cpp`) takes over the whole screen, which is
+  disruptive when driving this from an agent session.
+- Analyze the resulting `.rdc` with the `renderdoc-mcp` server's tools
+  (`open_capture`, `find_draws`, `get_draw_call_state`, `get_post_vs_data`,
+  `pixel_history`, `disassemble_shader`, `read_texture_pixels`, etc.) — no
+  need to touch the raw `renderdoc.pyd` API directly for analysis, only for
+  the capture-triggering step above.
+- Don't commit `.rdc` files (multi-MB binary, and stale ones actively
+  mislead — this doc had two committed-adjacent captures removed mid-session
+  for exactly that reason). Regenerate via the recipe above instead.
