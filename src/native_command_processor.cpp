@@ -885,12 +885,21 @@ NativeCommandProcessor::UploadedTexture* NativeCommandProcessor::GetOrUploadText
   }
 
   // Deliberately narrow support (see the header comment on GetOrUploadTexture):
-  // only untiled, single-level, non-stacked 2D k_8_8_8_8 textures. Everything
-  // else falls back to the default texture rather than guessing at tiling
-  // math or format conversion not yet implemented.
+  // only untiled, single-level, non-stacked 2D textures in a handful of
+  // simple uncompressed formats -- confirmed against dumps/textures/ (real
+  // texture dumps from a working xenos run, filenames include the decoded
+  // format) that the intro's content is overwhelmingly k_DXT4_5 (needs block
+  // decompression + tiling, not implemented yet) with some k_1_5_5_5/
+  // k_4_4_4_4/k_8_8_8_8 -- those three are what's supported here. Everything
+  // else (including any of these three formats if tiled/mipped) falls back
+  // to the default texture rather than guessing at tiling math or block
+  // decompression not yet implemented.
+  bool format_supported = fetch.format == TextureFormat::k_8_8_8_8 ||
+                          fetch.format == TextureFormat::k_1_5_5_5 ||
+                          fetch.format == TextureFormat::k_4_4_4_4;
   if (fetch.dimension != DataDimension::k2DOrStacked || fetch.stacked || fetch.tiled ||
       fetch.packed_mips || fetch.mip_min_level != 0 || fetch.mip_max_level != 0 ||
-      fetch.format != TextureFormat::k_8_8_8_8) {
+      !format_supported) {
     static uint32_t skipped_logged = 0;
     if (skipped_logged < 20) {
       ++skipped_logged;
@@ -928,32 +937,60 @@ NativeCommandProcessor::UploadedTexture* NativeCommandProcessor::GetOrUploadText
 
   uint32_t width = fetch.size_2d.width + 1;
   uint32_t height = fetch.size_2d.height + 1;
-  // Row stride from the fetch constant's pitch (texels >> 5, per the field
-  // comment in xenos.h), falling back to a tightly-packed row if pitch
-  // somehow decodes smaller than the width itself.
+  // Bytes per texel in guest memory: 4 for k_8_8_8_8, 2 for the packed
+  // 16-bit formats. Row stride from the fetch constant's pitch (texels >> 5,
+  // per the field comment in xenos.h), falling back to a tightly-packed row
+  // if pitch somehow decodes smaller than the width itself.
+  uint32_t bytes_per_texel = fetch.format == TextureFormat::k_8_8_8_8 ? 4 : 2;
   uint32_t pitch_texels = std::max(fetch.pitch * 32u, width);
   uint32_t base_address = fetch.base_address << 12;
 
   const uint8_t* guest_base =
       rex::system::kernel_state()->memory()->TranslatePhysical<const uint8_t*>(base_address);
 
-  // k_8_8_8_8 with Endian::k8in32 (the common case for RGBA8 textures) needs
-  // a per-texel dword byteswap; anything else (kNone) is used as-is. Other
-  // endianness modes (k8in16/k16in32) don't apply to a 4-byte-per-texel
-  // format and are treated as kNone.
-  bool byteswap = fetch.endianness == rex::graphics::xenos::Endian::k8in32;
+  // Xenos textures typically use Endian::k8in32 (4-byte formats) or
+  // Endian::k8in16 (2-byte formats) -- swap each texel to host order before
+  // unpacking; kNone is used as-is.
+  bool byteswap = fetch.endianness == rex::graphics::xenos::Endian::k8in32 ||
+                  fetch.endianness == rex::graphics::xenos::Endian::k8in16;
+
+  // Replicates the top bits into the low bits when expanding an n-bit
+  // channel to 8 bits, instead of a plain shift (which would clip white to
+  // slightly-off-white) -- standard bit-replication expansion.
+  auto expand5 = [](uint32_t v) -> uint8_t { return uint8_t((v << 3) | (v >> 2)); };
+  auto expand4 = [](uint32_t v) -> uint8_t { return uint8_t((v << 4) | v); };
 
   std::vector<uint8_t> rgba(size_t(width) * height * 4);
   for (uint32_t y = 0; y < height; ++y) {
-    const uint8_t* src_row = guest_base + size_t(y) * pitch_texels * 4;
+    const uint8_t* src_row = guest_base + size_t(y) * pitch_texels * bytes_per_texel;
     uint8_t* dst_row = &rgba[size_t(y) * width * 4];
-    if (byteswap) {
-      for (uint32_t x = 0; x < width; ++x) {
-        uint32_t texel = rex::memory::load_and_swap<uint32_t>(src_row + x * 4);
-        std::memcpy(dst_row + x * 4, &texel, 4);
+    for (uint32_t x = 0; x < width; ++x) {
+      uint8_t* dst = dst_row + x * 4;
+      if (fetch.format == TextureFormat::k_8_8_8_8) {
+        const uint8_t* src = src_row + x * 4;
+        if (byteswap) {
+          uint32_t texel = rex::memory::load_and_swap<uint32_t>(src);
+          std::memcpy(dst, &texel, 4);
+        } else {
+          std::memcpy(dst, src, 4);
+        }
+      } else {
+        uint16_t texel = byteswap ? rex::memory::load_and_swap<uint16_t>(src_row + x * 2)
+                                  : *reinterpret_cast<const uint16_t*>(src_row + x * 2);
+        if (fetch.format == TextureFormat::k_1_5_5_5) {
+          // D3DFMT_A1R5G5B5-style packing: bit15=A, 14-10=R, 9-5=G, 4-0=B.
+          dst[0] = expand5((texel >> 10) & 0x1F);
+          dst[1] = expand5((texel >> 5) & 0x1F);
+          dst[2] = expand5(texel & 0x1F);
+          dst[3] = (texel & 0x8000) ? 0xFF : 0x00;
+        } else {
+          // k_4_4_4_4, D3DFMT_A4R4G4B4-style packing: 15-12=A, 11-8=R, 7-4=G, 3-0=B.
+          dst[0] = expand4((texel >> 8) & 0xF);
+          dst[1] = expand4((texel >> 4) & 0xF);
+          dst[2] = expand4(texel & 0xF);
+          dst[3] = expand4((texel >> 12) & 0xF);
+        }
       }
-    } else {
-      std::memcpy(dst_row, src_row, size_t(width) * 4);
     }
   }
 
