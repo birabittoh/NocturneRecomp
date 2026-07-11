@@ -978,24 +978,48 @@ with concrete decoded field values (e.g. `tiled=1 packed_mips=1 format=20`,
 `format=26`, `format=3`), confirming the intro's actual fetch constants are
 being read correctly but don't happen to use the one format
 (`k_8_8_8_8`/format 6) this step supports yet — so nothing renders
-differently on screen from step 6 in this run. Not yet confirmed: what the
-intro's real formats (3, 20, 26 — decode these against `TextureFormat` in
-`xenos.h`) are and whether extending the allow-list to cover them is enough
-to get real texture output, or whether tiling support is also required
-(`tiled=1` appeared in the log above).
+differently on screen from step 6 in this run.
+
+### Milestone 3b step 7 follow-up: k_1_5_5_5/k_4_4_4_4 support
+
+`dumps/textures/` (real texture dumps from a working xenos run, filenames
+encode the decoded dimensions/format, e.g.
+`165f453a5f35c459_2048x1024_k_1_5_5_5.png`) settled what step 7 left open:
+the intro's non-`k_DXT4_5` content uses `k_1_5_5_5` (format 3) and
+`k_4_4_4_4` (format 15), not `k_8_8_8_8`. `format=20` in the earlier log is
+`k_DXT4_5` (block-compressed, and tiled/packed-mips in that log line —
+correctly rejected, still unsupported) and `format=26` is `k_16_16_16_16`
+(also still unsupported, low priority per the dumps).
+
+`GetOrUploadTexture` now unpacks both 16-bit packed formats to RGBA8 on the
+CPU (bit-replication expansion, e.g. 5-bit `x` → `(x<<3)|(x>>2)`) using the
+D3DFMT_A1R5G5B5/A4R4G4B4 bit layouts, byteswapping 16-bit texels for
+`Endian::k8in16` the same way the existing `k_8_8_8_8` path byteswaps 32-bit
+texels for `Endian::k8in32` — both formats then reuse the existing
+`R8G8B8A8_UNORM` upload path unchanged, no new Vulkan image format needed.
+
+**Verified:** the log now shows `NativeCommandProcessor: first real texture
+uploaded (2048x1024)`, matching
+`dumps/textures/165f453a5f35c459_2048x1024_k_1_5_5_5.png`'s dimensions
+exactly — real guest texture content (not just fetch-constant metadata) is
+reaching the GPU for the first time. Still no crash/hang, BGM still starts.
+Pixel-level correctness of the sampled output wasn't visually confirmed in
+this pass (no interactive screenshot taken), and most of the dumped textures
+are still `k_DXT4_5` and therefore still rejected — see "Next".
 
 ## Next
 
 In rough order of what unblocks visible output soonest:
 
-1. **Extend texture format/tiling support based on what the intro actually
-   uses.** Step 7 confirmed real fetch constants decode as formats 3, 20, and
-   26 (not yet mapped to names here — check `xenos::TextureFormat` in
-   `xenos.h`), and at least one is tiled. Decode which formats these are, add
-   them to `GetOrUploadTexture`'s allow-list (extending the `VkFormat`
-   mapping researched for step 7), and if any are tiled, wire up
-   `texture_util::GetTiledOffset2D`/`GetGuestTextureLayout` (already
-   available, not yet called) instead of assuming linear rows.
+1. **`k_DXT4_5` support (block decompression + tiling).** Confirmed via
+   `dumps/textures/` to be the dominant format in the intro's actual content
+   (majority of the 22 dumped textures), and it's tiled with packed mips in
+   the observed fetch constant, so this needs both a DXT5/BC3 block decode
+   (CPU-side unpack to RGBA8, same pattern as the 16-bit formats, or upload
+   natively as `VK_FORMAT_BC3_UNORM_BLOCK` if the device supports it) and
+   real tiled-address math via `texture_util::GetTiledOffset2D`/
+   `GetGuestTextureLayout` (already linked, not yet called) instead of the
+   linear-row assumption the current three supported formats use.
 2. **Pathological shader translation time — stall now bounded, root cause
    still open.** One specific garbage-decoded draw's shader ucode makes
    `SpirvShaderTranslator`/`vkCreateGraphicsPipelines` take roughly 20
