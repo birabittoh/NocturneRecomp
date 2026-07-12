@@ -240,6 +240,42 @@ class NocturnerecompApp : public rex::ReXApp {
           [this](const rex::graphics::PacketInfo& info, const uint8_t* packet_base) {
             native_command_processor_->OnPacket(info, packet_base);
           });
+
+      // This renderer has no GraphicsSystem, so nothing ever calls the normal
+      // GraphicsSystem::SetHostSwapCallback -> Runtime -> ModRegistry::
+      // DispatchTick chain -- which is what actually invokes the "guest
+      // frame" tick OnPostSetup registered above via RegisterTick (and any
+      // mod's own RegisterTick calls). Drive it directly from this
+      // renderer's own swap point instead, or every per-frame tick (F3's
+      // guest FPS included) silently never fires.
+      native_command_processor_->SetOnFramePresented(
+          [this] { runtime()->mod_registry()->DispatchTick(); });
+
+      // Feed the F2 shader debugger overlay from NativeCommandProcessor's own
+      // shader cache -- this renderer has no GraphicsSystem/CommandProcessor,
+      // so the overlay's default GraphicsSystem-based data source (see
+      // ReXApp::SetupOverlays) always returns an empty snapshot here.
+      // binary_replacer is intentionally left unset (falls back to the same
+      // no-op GraphicsSystem path) -- see NativeCommandProcessor::
+      // GetShaderDetails's doc comment for why (no per-modification
+      // translation storage to replace into).
+      rex::ReXApp::ShaderDebuggerOverride shader_debugger_override;
+      shader_debugger_override.snapshot_provider = [this] {
+        return native_command_processor_->GetShaderSnapshot();
+      };
+      shader_debugger_override.disable_setter = [this](uint64_t hash, bool disabled) {
+        native_command_processor_->SetShaderDisabledByHash(hash, disabled);
+      };
+      shader_debugger_override.details_provider = [this](uint64_t hash) {
+        return native_command_processor_->GetShaderDetails(hash);
+      };
+      shader_debugger_override.profiling_toggle = [this](bool enabled) {
+        native_command_processor_->SetShaderProfilingEnabled(enabled);
+      };
+      shader_debugger_override.profiling_resetter = [this] {
+        native_command_processor_->ResetShaderProfiling();
+      };
+      SetShaderDebuggerOverride(std::move(shader_debugger_override));
     });
   }
 

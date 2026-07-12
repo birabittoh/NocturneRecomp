@@ -6,9 +6,11 @@
 
 #include <chrono>
 #include <cstdint>
+#include <functional>
 #include <memory>
 #include <string>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 #include <rex/graphics/packet_disassembler.h>
@@ -16,6 +18,7 @@
 #include <rex/graphics/pipeline/shader/spirv.h>
 #include <rex/graphics/pipeline/shader/spirv_translator.h>
 #include <rex/graphics/register_file.h>
+#include <rex/ui/overlay/shader_debugger_overlay.h>
 #include <rex/ui/presenter.h>
 #include <rex/ui/vulkan/provider.h>
 
@@ -43,8 +46,42 @@ class NativeCommandProcessor {
   // the call.
   void OnPacket(const rex::graphics::PacketInfo& info, const uint8_t* packet_base);
 
+  // Fired once per guest frame, right after PresentFrame's swap. This class
+  // has no GraphicsSystem, so nothing ever calls the normal
+  // GraphicsSystem::SetHostSwapCallback -> Runtime -> ModRegistry::DispatchTick
+  // chain the F3 overlay's guest-FPS counter (and any mod's RegisterTick)
+  // depends on -- see nocturnerecomp_app.h's OnPostSetup, which wires this to
+  // that DispatchTick call directly.
+  void SetOnFramePresented(std::function<void()> callback) {
+    on_frame_presented_ = std::move(callback);
+  }
+
+  // F2 shader debugger overlay support (ReXApp::SetShaderDebuggerOverride --
+  // this class isn't a rex::graphics::CommandProcessor subclass and has no
+  // GraphicsSystem, so it can't use the default GraphicsSystem-based data
+  // source the overlay expects). Hash reported/looked-up here is XXH3 over
+  // the raw ucode bytes (matching the xenos/Vulkan backend's own
+  // Shader::ucode_data_hash() convention), not this file's internal FNV-1a
+  // cache key (HashUcode) -- so a hash from the old xenos-plugin renderer's
+  // F2 overlay is directly comparable to one reported here for the same
+  // ucode. Translation-level detail (per-modification SPIR-V disassembly,
+  // binary replace, profiling counters) isn't tracked in a queryable way by
+  // this renderer, so ShaderDebuggerDetails::translations is always empty
+  // and profiling/binary-replace requests silently no-op (see
+  // nocturnerecomp_app.h's SetShaderDebuggerOverride call).
+  std::vector<rex::ui::ShaderDebuggerEntry> GetShaderSnapshot() const;
+  rex::ui::ShaderDebuggerDetails GetShaderDetails(uint64_t xxh3_ucode_hash) const;
+  void SetShaderDisabledByHash(uint64_t xxh3_ucode_hash, bool disabled);
+  // Per-shader CPU-time profiling (Total ms/Draws/Avg us columns in the F2
+  // overlay). Off by default -- TryDraw only pays the steady_clock overhead
+  // while a caller (the overlay's ctor/dtor) has this enabled, matching the
+  // real backend's "zero overhead while the debugger is closed" behavior.
+  void SetShaderProfilingEnabled(bool enabled) { shader_profiling_enabled_ = enabled; }
+  void ResetShaderProfiling() { shader_profile_.clear(); }
+
  private:
   void PresentFrame();
+  std::function<void()> on_frame_presented_;
 
   // Milestone 3b step 1 (decode-only): parse PM4_IM_LOAD/_IMMEDIATE and
   // PM4_DRAW_INDX/_2 payloads -- which PacketDisassembler doesn't turn into
@@ -87,6 +124,34 @@ class NativeCommandProcessor {
   rex::graphics::Shader* GetOrAnalyzeShader(rex::graphics::xenos::ShaderType type,
                                             const std::vector<uint32_t>& ucode);
   std::unordered_map<uint64_t, std::unique_ptr<rex::graphics::Shader>> analyzed_shaders_;
+
+  // F2 shader debugger support: hashes (XXH3 over raw ucode, see
+  // GetShaderSnapshot) the user has toggled off. Checked in TryDraw, which
+  // skips the draw entirely if either bound shader's hash is disabled --
+  // mirrors the real backend's shader blacklist (CommandProcessor::
+  // AddShaderBlacklist) closely enough for the overlay's toggle to visibly
+  // do something, without needing this class to plug into that mechanism.
+  std::unordered_set<uint64_t> disabled_shader_hashes_;
+  // The two shaders bound by the most recent TryDraw call that actually
+  // reached pipeline creation -- GetShaderSnapshot's only way to populate
+  // ShaderDebuggerEntry::active without this class tracking a full
+  // per-shader "is this bound right now" flag across the whole cache.
+  uint64_t last_active_vertex_ucode_xxh3_ = 0;
+  uint64_t last_active_pixel_ucode_xxh3_ = 0;
+
+  // F2 profiling (see SetShaderProfilingEnabled). Time is attributed to both
+  // the vertex and pixel shader hashes a draw bound, matching the real
+  // backend's "summed CPU time inside IssueDraw across all draws this shader
+  // participated in" semantics (see CommandProcessor::ShaderInfo's doc
+  // comment) -- scoped around TryDraw's actual GPU submission work (pipeline
+  // bind, descriptor sets, vkCmdDraw*), not shader translation/analysis,
+  // which is cached and amortized across many draws already.
+  bool shader_profiling_enabled_ = false;
+  struct ShaderProfile {
+    uint64_t total_ns = 0;
+    uint64_t draw_count = 0;
+  };
+  std::unordered_map<uint64_t, ShaderProfile> shader_profile_;
 
   // Gets (translating + creating a VkShaderModule on first use) the shader
   // for the given raw ucode, or nullptr if translation failed. Cached by a

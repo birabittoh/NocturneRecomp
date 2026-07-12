@@ -140,6 +140,13 @@ each step verified against a real capture or live run, not just code review.
 5. The `0x1f6f8000` full-screen EDRAM-resolve target's purpose is still
    unidentified (fires every frame, real but unrelated to bugs chased so
    far).
+6. **Open bug, own doc**: a smoke overlay (and a sibling solid-color quad)
+   never render — their vertex fetch comes back all-zero, but only under a
+   RenderDoc capture, never in an uninstrumented run. Extensive
+   investigation already ruled out fetch-constant decode, memory-sync
+   units/plumbing, IB dedup, and a `NativeCommandProcessor::OnPacket` mutex
+   (tried, reverted — broke frame pacing, didn't fix it). See
+   `docs/smoke-vertex-bug.md` before re-investigating.
 
 ## Quick reference: build/run/debug
 

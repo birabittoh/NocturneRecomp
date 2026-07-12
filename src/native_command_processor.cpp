@@ -7,9 +7,11 @@
 #include <cmath>
 #include <cstdio>
 #include <cstring>
+#include <string>
 #include <thread>
 
 #include <spirv-tools/libspirv.h>
+#include <xxhash.h>
 
 #include <rex/cvar.h>
 #include <rex/graphics/pipeline/texture/util.h>
@@ -1062,6 +1064,76 @@ rex::graphics::Shader* NativeCommandProcessor::GetOrAnalyzeShader(
   Shader* ptr = shader.get();
   analyzed_shaders_.emplace(key, std::move(shader));
   return ptr;
+}
+
+namespace {
+// XXH3 over the raw ucode dwords -- matches Shader::ucode_data_hash() as
+// computed by the xenos/Vulkan backend's pipeline cache (see
+// rexglue-sdk/src/graphics/vulkan/pipeline_cache.cpp), so a hash reported by
+// this renderer's F2 overlay is directly comparable to one from the old
+// xenos-plugin renderer's F2 overlay for the same shader. Deliberately not
+// HashUcode/analyzed_shaders_'s internal key, which is FNV-1a XORed with a
+// type-discriminator bit and therefore never matches.
+uint64_t XXH3UcodeHash(const std::vector<uint32_t>& ucode) {
+  return XXH3_64bits(ucode.data(), ucode.size() * sizeof(uint32_t));
+}
+}  // namespace
+
+std::vector<rex::ui::ShaderDebuggerEntry> NativeCommandProcessor::GetShaderSnapshot() const {
+  std::vector<rex::ui::ShaderDebuggerEntry> out;
+  out.reserve(analyzed_shaders_.size());
+  for (const auto& [key, shader] : analyzed_shaders_) {
+    uint64_t xxh3_hash = XXH3UcodeHash(shader->ucode_data());
+    rex::ui::ShaderDebuggerEntry entry;
+    entry.ucode_hash = xxh3_hash;
+    entry.type = static_cast<uint32_t>(shader->type());
+    entry.dword_count = static_cast<uint32_t>(shader->ucode_dword_count());
+    entry.disabled = disabled_shader_hashes_.count(xxh3_hash) != 0;
+    entry.active = xxh3_hash == last_active_vertex_ucode_xxh3_ ||
+                   xxh3_hash == last_active_pixel_ucode_xxh3_;
+    if (auto it = shader_profile_.find(xxh3_hash); it != shader_profile_.end()) {
+      entry.profile_total_ns = it->second.total_ns;
+      entry.profile_draw_count = it->second.draw_count;
+    }
+    out.push_back(entry);
+  }
+  return out;
+}
+
+rex::ui::ShaderDebuggerDetails NativeCommandProcessor::GetShaderDetails(
+    uint64_t xxh3_ucode_hash) const {
+  rex::ui::ShaderDebuggerDetails out;
+  for (const auto& [key, shader] : analyzed_shaders_) {
+    if (XXH3UcodeHash(shader->ucode_data()) != xxh3_ucode_hash) {
+      continue;
+    }
+    out.found = true;
+    out.info.ucode_hash = xxh3_ucode_hash;
+    out.info.type = static_cast<uint32_t>(shader->type());
+    out.info.dword_count = static_cast<uint32_t>(shader->ucode_dword_count());
+    out.info.disabled = disabled_shader_hashes_.count(xxh3_ucode_hash) != 0;
+    out.info.active = xxh3_ucode_hash == last_active_vertex_ucode_xxh3_ ||
+                      xxh3_ucode_hash == last_active_pixel_ucode_xxh3_;
+    if (auto it = shader_profile_.find(xxh3_ucode_hash); it != shader_profile_.end()) {
+      out.info.profile_total_ns = it->second.total_ns;
+      out.info.profile_draw_count = it->second.draw_count;
+    }
+    out.ucode_disassembly = shader->ucode_disassembly();
+    out.ucode_dwords = shader->ucode_data();
+    // Per-modification translation detail (SPIR-V disassembly, binary
+    // replace) isn't tracked in a queryable-by-hash way by shader_cache_'s
+    // modification-folded keys -- left empty rather than guessed.
+    break;
+  }
+  return out;
+}
+
+void NativeCommandProcessor::SetShaderDisabledByHash(uint64_t xxh3_ucode_hash, bool disabled) {
+  if (disabled) {
+    disabled_shader_hashes_.insert(xxh3_ucode_hash);
+  } else {
+    disabled_shader_hashes_.erase(xxh3_ucode_hash);
+  }
 }
 
 NativeCommandProcessor::TranslatedShader* NativeCommandProcessor::GetOrTranslateShader(
@@ -2400,6 +2472,29 @@ void NativeCommandProcessor::UpdateSharedMemory(uint32_t guest_address_dwords,
   rex::ui::vulkan::util::FlushMappedMemoryRange(provider_->vulkan_device(), shared_memory_memory_,
                                                 shared_memory_memory_type_, byte_offset,
                                                 kSharedMemorySize, byte_size);
+
+  // TEMPORARY diagnostic (smoke-vertex-bug investigation): flag any vertex
+  // fetch range that comes back entirely zero, regardless of the vfetch_logged
+  // cap in TryDraw -- lets a delay-injection experiment (see TryDraw) detect
+  // the bug reproducing in a live (non-RenderDoc) run without needing the
+  // first-10-draws window.
+  static uint32_t zero_range_logged = 0;
+  if (zero_range_logged < 50) {
+    bool all_zero = true;
+    for (uint64_t i = 0; i < byte_size; ++i) {
+      if ((shared_memory_mapped_ + byte_offset)[i] != 0) {
+        all_zero = false;
+        break;
+      }
+    }
+    if (all_zero) {
+      ++zero_range_logged;
+      REXGPU_INFO(
+          "NativeCommandProcessor: UpdateSharedMemory range is ALL ZERO -- address_dwords={:08X} "
+          "size_dwords={}",
+          guest_address_dwords, size_dwords);
+    }
+  }
 }
 
 void NativeCommandProcessor::TryResolveCopy() {
@@ -2722,6 +2817,17 @@ void NativeCommandProcessor::TryDraw(rex::graphics::xenos::PrimitiveType prim_ty
     return;
   }
 
+  // TEMPORARY diagnostic (smoke-vertex-bug investigation): simulate
+  // RenderDoc's per-draw CPU overhead with a plain sleep, gated behind an env
+  // var, to test whether pure added latency between guest command submission
+  // and this function's shared-memory read (spread across every draw, not
+  // just NativeCommandProcessor::PresentFrame's existing vsync throttle) is
+  // sufficient to reproduce the all-zero-vertex bug without RenderDoc at all.
+  static const bool kSimulateCaptureDelay = std::getenv("NOCTURNE_SIMULATE_CAPTURE_DELAY") != nullptr;
+  if (kSimulateCaptureDelay) {
+    std::this_thread::sleep_for(std::chrono::milliseconds(3));
+  }
+
   // EDRAM resolve dispatch: on real hardware, RB_MODECONTROL.edram_mode ==
   // kCopy turns what would otherwise be a normal draw into a resolve
   // (render-target -> guest-texture copy) instead -- see TryResolveCopy's
@@ -2814,6 +2920,49 @@ void NativeCommandProcessor::TryDraw(rex::graphics::xenos::PrimitiveType prim_ty
   if (!vertex_shader_analyzed || !pixel_shader_analyzed) {
     return;
   }
+
+  // F2 shader debugger overlay: honor the user's disable toggle (see
+  // SetShaderDisabledByHash) by skipping the draw entirely, mirroring the
+  // real backend's shader-blacklist behavior closely enough for the toggle
+  // to visibly do something. Also records which two shaders this draw
+  // bound, for GetShaderSnapshot's "active" flag.
+  last_active_vertex_ucode_xxh3_ = XXH3UcodeHash(vertex_shader_analyzed->ucode_data());
+  last_active_pixel_ucode_xxh3_ = XXH3UcodeHash(pixel_shader_analyzed->ucode_data());
+  if (disabled_shader_hashes_.count(last_active_vertex_ucode_xxh3_) ||
+      disabled_shader_hashes_.count(last_active_pixel_ucode_xxh3_)) {
+    return;
+  }
+
+  // F2 profiling (see SetShaderProfilingEnabled): times everything from here
+  // to the end of TryDraw (pipeline/descriptor setup + vkCmdDraw*), i.e. the
+  // actual per-draw submission cost, not shader translation/analysis above
+  // (cached, amortized across many draws). Attributed to both shaders on
+  // every return path below via a scope guard, since TryDraw has several
+  // early-out returns between here and the real draw call.
+  std::chrono::steady_clock::time_point profile_start;
+  if (shader_profiling_enabled_) {
+    profile_start = std::chrono::steady_clock::now();
+  }
+  struct ProfileScopeGuard {
+    NativeCommandProcessor* self;
+    std::chrono::steady_clock::time_point* start;
+    ~ProfileScopeGuard() {
+      if (!self->shader_profiling_enabled_) {
+        return;
+      }
+      uint64_t ns = static_cast<uint64_t>(
+          std::chrono::duration_cast<std::chrono::nanoseconds>(
+              std::chrono::steady_clock::now() - *start)
+              .count());
+      for (uint64_t hash :
+           {self->last_active_vertex_ucode_xxh3_, self->last_active_pixel_ucode_xxh3_}) {
+        auto& profile = self->shader_profile_[hash];
+        profile.total_ns += ns;
+        profile.draw_count += 1;
+      }
+    }
+  } profile_scope_guard{this, &profile_start};
+
   uint32_t ps_param_gen_pos = UINT32_MAX;
   uint32_t interpolator_mask =
       vertex_shader_analyzed->writes_interpolators() &
@@ -2856,72 +3005,35 @@ void NativeCommandProcessor::TryDraw(rex::graphics::xenos::PrimitiveType prim_ty
         registers_.GetVertexFetch(binding.fetch_constant);
     UpdateSharedMemory(fetch.address, fetch.size);
 
-    // TEMPORARY diagnostic: overwrite draw#2's vertex data (known to be a
-    // 2-float-per-vertex, stride=2 rect-list shader per the disasm log) with
-    // a hand-constructed full-screen-covering triangle, to isolate whether
-    // the Vulkan draw/present plumbing itself works at all when fed
-    // known-good data, independent of whether the guest's actual vertex
-    // data/interpretation is correct.
-    if (draws_logged_ == 2) {
-      float debug_verts[6] = {0.0f, 0.0f, 1280.0f, 0.0f, 0.0f, 720.0f};
-      uint64_t byte_offset = uint64_t(fetch.address) * 4;
-      uint8_t* dst = shared_memory_mapped_ + byte_offset;
-      for (int i = 0; i < 6; ++i) {
-        uint32_t bits;
-        std::memcpy(&bits, &debug_verts[i], 4);
-        bits = rex::byte_swap(bits);
-        std::memcpy(dst + i * 4, &bits, 4);
-      }
-      rex::ui::vulkan::util::FlushMappedMemoryRange(provider_->vulkan_device(),
-                                                    shared_memory_memory_,
-                                                    shared_memory_memory_type_, byte_offset,
-                                                    kSharedMemorySize, sizeof(debug_verts));
-      REXGPU_INFO("NativeCommandProcessor: DEBUG overrode draw#2 vertex data with a known triangle");
-    }
-
-    // Same experiment as draw#2's override above, but for the first
-    // kQuadList draw (draw#6, stride=8 dwords/vertex per its disasm log):
-    // isolates whether a *quad-list* draw (a simpler host-side index
-    // synthesis than rect-list's edge-length/barycentric shader logic)
-    // renders when fed known-good full-screen-covering data.
-    if (draws_logged_ == 6) {
-      float quad_verts[4][3] = {
-          {0.0f, 0.0f, 0.5f}, {1280.0f, 0.0f, 0.5f}, {1280.0f, 720.0f, 0.5f}, {0.0f, 720.0f, 0.5f}};
-      uint64_t byte_offset = uint64_t(fetch.address) * 4;
-      uint8_t* dst = shared_memory_mapped_ + byte_offset;
-      constexpr uint32_t kStrideDwords = 8;
-      for (int v = 0; v < 4; ++v) {
-        for (int c = 0; c < 3; ++c) {
-          uint32_t bits;
-          std::memcpy(&bits, &quad_verts[v][c], 4);
-          bits = rex::byte_swap(bits);
-          std::memcpy(dst + (v * kStrideDwords + c) * 4, &bits, 4);
-        }
-      }
-      rex::ui::vulkan::util::FlushMappedMemoryRange(
-          provider_->vulkan_device(), shared_memory_memory_, shared_memory_memory_type_,
-          byte_offset, kSharedMemorySize, 4 * kStrideDwords * 4);
-      REXGPU_INFO("NativeCommandProcessor: DEBUG overrode draw#6 vertex data with a known quad");
-    }
-
     static uint32_t vfetch_logged = 0;
     if (vfetch_logged < 10) {
       ++vfetch_logged;
       uint32_t address = fetch.address;
       uint32_t size = fetch.size;
-      const uint32_t* raw_verts = rex::system::kernel_state()->memory()->TranslatePhysical<uint32_t*>(
-          address * 4);
-      float v[8];
-      for (int i = 0; i < 8; ++i) {
-        uint32_t dword = rex::memory::load_and_swap<uint32_t>(
-            reinterpret_cast<const uint8_t*>(raw_verts) + i * 4);
+      const uint8_t* raw_verts =
+          rex::system::kernel_state()->memory()->TranslatePhysical<uint8_t*>(address * 4);
+      // Dump the whole declared range (up to 4 vertices' worth), not just the
+      // first vertex -- earlier logging only ever sampled dwords 0..7 (vertex
+      // 0), which made a shader reading vertex 0 correctly but vertices 1+ as
+      // all-zero look identical to "everything's fine" in the log.
+      uint32_t dwords_to_dump = std::min(size, 32u);
+      float v[32];
+      for (uint32_t i = 0; i < dwords_to_dump; ++i) {
+        uint32_t dword = rex::memory::load_and_swap<uint32_t>(raw_verts + i * 4);
         std::memcpy(&v[i], &dword, 4);
+      }
+      std::string dump;
+      char num_buf[32];
+      for (uint32_t i = 0; i < dwords_to_dump; ++i) {
+        std::snprintf(num_buf, sizeof(num_buf), "%.4f", v[i]);
+        dump += num_buf;
+        if (i + 1 < dwords_to_dump) dump += ',';
       }
       REXGPU_INFO(
           "NativeCommandProcessor: vfetch draw#{} fetch_constant={} address={:08X} size={} "
-          "type={} first8floats=({:.2f},{:.2f},{:.2f},{:.2f},{:.2f},{:.2f},{:.2f},{:.2f})",
-          draws_logged_, binding.fetch_constant, address, size,
-          static_cast<uint32_t>(fetch.type), v[0], v[1], v[2], v[3], v[4], v[5], v[6], v[7]);
+          "type={} dwords=({})",
+          draws_logged_, binding.fetch_constant, address, size, static_cast<uint32_t>(fetch.type),
+          dump);
     }
   }
 
@@ -3630,6 +3742,15 @@ void NativeCommandProcessor::PresentFrame() {
   // fence wait confirms this frame's GPU work (which references them) is
   // actually done.
   frame_active_ = false;
+
+  // See SetOnFramePresented's doc comment -- this is the only "GPU swap"
+  // event this renderer has, so it's what drives the F3 overlay's guest-FPS
+  // counter (and ModRegistry::DispatchTick for any mod relying on it), which
+  // otherwise never fire at all under headless native rendering (no
+  // GraphicsSystem exists to call the normal SetHostSwapCallback chain).
+  if (on_frame_presented_) {
+    on_frame_presented_();
+  }
 }
 
 }  // namespace nocturne

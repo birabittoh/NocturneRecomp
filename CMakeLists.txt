@@ -94,6 +94,16 @@ endif()
 
 rexglue_setup_target(nocturnerecomp)
 
+# native_command_processor.cpp's F2 shader-debugger support hashes ucode with
+# XXH3 (matching the xenos/Vulkan backend's own Shader::ucode_data_hash()
+# convention -- see NativeCommandProcessor::GetShaderSnapshot) so hashes are
+# directly comparable to the old xenos-plugin renderer's. xxhash itself isn't
+# part of rex::runtime's link interface (its only other caller,
+# pipeline_cache.cpp, lives in the separate rexgpu-xenos plugin DLL, not the
+# statically-linked runtime), so it needs linking explicitly here.
+find_library(NOCTURNE_XXHASH_LIB NAMES xxhash PATHS ${CMAKE_SOURCE_DIR}/sdk/lib REQUIRED)
+target_link_libraries(nocturnerecomp PRIVATE ${NOCTURNE_XXHASH_LIB})
+
 # Title-update builds: the achievements bridge hooks the game's XAM thunks by
 # their hardcoded vanilla guest addresses (sub_825D8028 etc.). The title update
 # relocates the whole image, so those addresses don't exist in the patched image
