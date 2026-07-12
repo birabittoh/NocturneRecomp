@@ -2169,3 +2169,88 @@ confirmed live:
    tree, capped at 100 lines each -- low-impact to leave, but should be
    removed or `REXCVAR`-gated eventually, matching this file's usual policy
    on temporary diagnostics.
+
+## Step 19 (2026-07-12): main menu text was invisible -- `PM4_LOAD_ALU_CONSTANT` never actually read guest memory
+
+User-reported symptom: main menu renders (background/icons visible), but
+none of the text draws. A `menu.rdc` RenderDoc capture of the buggy menu
+was provided for diagnosis.
+
+**Confirmed via the capture:** all 8 text draws (30-120 indices each,
+sampling a shared font/icon atlas) are real, issued, format-supported --
+not culled. `gl_Position` for every vertex in these draws was a garbage,
+off-screen value (~-9.78e15). `disassemble_shader` on the vertex stage
+showed why: glyph position/UV comes from a *dynamic, loop-driven* vertex
+fetch that reads a fetch constant (`fetch_constants[47].z`/`.w` --
+component-addressed, resolves to dwords 190-191, i.e. the last 2 of fetch
+constant slot 31's 6 dwords -- vfetch index 31*3+2 = **95**, matching the
+`fetch_constant=95` seen in the native renderer's own per-draw log) to
+locate a packed per-character record in guest memory, rather than using a
+normal static per-vertex attribute. `get_cbuffer_contents` on
+`xe_uniform_fetch_constants` showed the *entire* 48-vec4 buffer as all
+zero for every one of these draws -- not just slot 31 -- so with a zero
+fetch-constant address the shader's vfetch read from guest address 0,
+producing the huge nonsensical position.
+
+**Root cause, found in `rexglue-sdk`, not this project's own
+`native_command_processor.cpp`:** this renderer's real PM4 decode path is
+`rex::graphics::PacketDisassembler` (`src/graphics/packet_disassembler.cpp`)
+feeding `PacketAction::RegisterWrite` actions through
+`KernelState::HeadlessWriteRegister`'s `native_gpu_command_callback_` into
+`NativeCommandProcessor::OnPacket` -- the SDK's *other*, unrelated
+`CommandProcessor` class (`src/graphics/command_processor.cpp`, the
+Vulkan/D3D12-plugin backend) is dead code for this project's rendering path
+and was a red herring chased briefly this session before finding the real
+one. `PacketDisassembler`'s `PM4_LOAD_ALU_CONSTANT` case -- the packet type
+SOTN's UI code uses to set this dynamic vfetch's fetch constant (an
+indirect load: address + size + target register range, versus
+`PM4_SET_CONSTANT`'s immediate inline dwords) -- parsed the header
+correctly but never read the actual data:
+
+```cpp
+for (uint32_t n = 0; n < size_dwords; n++, index++) {
+  // Hrm, ?
+  // memory::load_and_swap<uint32_t>(membase_ + GpuToCpu(address + n * 4));
+  uint32_t data = 0xDEADBEEF;
+  out_info->actions.emplace_back(PacketAction::RegisterWrite(index, data));
+}
+```
+
+A stub left mid-port (the commented-out real read and the "Hrm, ?" say as
+much), hardcoding `0xDEADBEEF` into every register this packet type
+touches. Note this doesn't fully explain the *zero* seen in the capture --
+`0xDEADBEEF` isn't zero -- but the stub is unambiguously broken regardless
+of exactly how the placeholder value ended up read back as zero downstream,
+and fixing it made the real symptom (invisible text) go away, confirmed
+live (below).
+
+**Fix:** `PacketDisassembler::DisasmPacketType3`/`DisasmPacket` gained an
+optional `memory::Memory* guest_memory` parameter (default `nullptr`, so
+the trace-file-only caller in `trace_viewer.cpp` is unaffected). When
+non-null, `PM4_LOAD_ALU_CONSTANT` now does the real read:
+`memory::load_and_swap<uint32_t>(guest_memory->TranslatePhysical<const uint32_t*>(address + n * 4))`.
+Both live call sites in `kernel_state.cpp` (`HeadlessWriteRegister`'s
+top-level ring decode and its indirect-buffer content decode -- the one
+SOTN's UI text actually goes through) now pass `memory_`. (One naming
+pitfall hit and fixed while wiring this up: the new parameter was
+originally named `memory`, which shadowed the `rex::memory` namespace
+already used inside the same functions for `memory::load_and_swap` --
+renamed to `guest_memory`.)
+
+**Verified live, not just by inspection:** rebuilt the SDK and the game,
+ran to the main menu, and grepped the run's log
+(`logs/nocturnerecomp_NNN.4.log`) for the existing per-draw
+`NativeCommandProcessor: vfetch draw#N fetch_constant=... address=...`
+line. Before the fix this fetch constant's registers were never populated
+for real (source of the all-zero cbuffer content seen in `menu.rdc`);
+after the fix, the same text draws now show `fetch_constant=95
+address=07EB00D4` (and similar real physical addresses for the other text
+draws) instead of a dead/zero constant -- the dynamic vfetch now resolves
+to genuine guest memory.
+
+**Next:** none outstanding from this specific bug. General cleanup note:
+the stray `0xDEADBEEF`-shaped comment/dead-code pattern in
+`packet_disassembler.cpp` is a useful signal that this file was ported
+from Xenia in a hurry -- worth a pass over its other packet-type cases
+(`PM4_LOAD_ALU_CONSTANT` was clearly not the only thing mid-ported) if
+other GPU-state-driven bugs turn up in the future.
