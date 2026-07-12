@@ -1321,12 +1321,17 @@ NativeCommandProcessor::UploadedTexture* NativeCommandProcessor::GetOrUploadText
         const uint8_t* src = guest_base + texel_offset;
         uint8_t* dst = dst_row + x * 4;
         if (fetch.format == TextureFormat::k_8_8_8_8) {
-          if (byteswap) {
-            uint32_t texel = rex::memory::load_and_swap<uint32_t>(src);
-            std::memcpy(dst, &texel, 4);
-          } else {
-            std::memcpy(dst, src, 4);
-          }
+          // D3DFMT_A8R8G8B8-style packing (same convention as k_1_5_5_5/
+          // k_4_4_4_4 below): bits 31-24=A, 23-16=R, 15-8=G, 7-0=B. A raw
+          // memcpy of the byte-swapped word would put the low byte (B) into
+          // dst[0] (R) and the high-but-one byte (R) into dst[2] (B) --
+          // swapping the R and B channels.
+          uint32_t texel = byteswap ? rex::memory::load_and_swap<uint32_t>(src)
+                                     : *reinterpret_cast<const uint32_t*>(src);
+          dst[0] = uint8_t(texel >> 16);
+          dst[1] = uint8_t(texel >> 8);
+          dst[2] = uint8_t(texel);
+          dst[3] = uint8_t(texel >> 24);
         } else if (fetch.format == TextureFormat::k_16_16_16_16) {
           // Plain RGBA order (same convention as k_8_8_8_8), 4x 16-bit UNORM
           // channels -- truncated to the high 8 bits per channel for this
