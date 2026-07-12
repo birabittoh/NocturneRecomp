@@ -2456,8 +2456,31 @@ void NativeCommandProcessor::TryDraw(rex::graphics::xenos::PrimitiveType prim_ty
       // Screen-space draws (the common case for 2D UI/intro content):
       // vertex shader output is treated directly as pixel coordinates, no
       // host clipping -- map [0, extent] pixels to [-1, 1] NDC ourselves.
+      //
+      // extent here must be the guest's *actual* render-target width
+      // (RB_SURFACE_INFO.surface_pitch), not this renderer's fixed
+      // color_target_width_/height_: the guest sometimes renders a pass at a
+      // smaller internal EDRAM surface (e.g. 640x360 for part of the KONAMI
+      // intro, confirmed via RenderDoc: that draw's RB_SURFACE_INFO decoded
+      // to surface_pitch=640, vs. 1280 for full-resolution draws elsewhere
+      // in the same frame) and expects it to be scaled up to the real
+      // display resolution by the EDRAM resolve/scaler -- a step this
+      // renderer doesn't implement as a separate pass. Using the guest's own
+      // surface size as the pixel-to-NDC extent instead of the fixed canvas
+      // size has the same effect: it stretches that pass's screen-space
+      // geometry to fill color_target_image_ (whose Vulkan viewport is
+      // always the fixed full canvas), rather than only covering the
+      // top-left fraction of it that a literal 1:1 pixel mapping would.
+      auto rb_surface_info = registers_.Get<rex::graphics::reg::RB_SURFACE_INFO>();
+      uint32_t surface_pitch = rb_surface_info.surface_pitch;
+      float extent_xy[2] = {
+          surface_pitch ? float(surface_pitch) : float(color_target_width_),
+          surface_pitch ? float(surface_pitch) * float(color_target_height_) /
+                              float(color_target_width_)
+                        : float(color_target_height_),
+      };
       for (uint32_t i = 0; i < 2; ++i) {
-        float extent = i ? float(color_target_height_) : float(color_target_width_);
+        float extent = extent_xy[i];
         float pixels_to_ndc = 2.0f / extent;
         system_constants.ndc_scale[i] = scale_xy[i] * pixels_to_ndc;
         system_constants.ndc_offset[i] =
