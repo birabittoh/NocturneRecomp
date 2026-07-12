@@ -255,20 +255,28 @@ thing. This means:
   `UpdateSharedMemory` when the zero-range diagnostic fires, and walk
   backward/forward from there.
 
-The delay knob and the zero-range diagnostic are left in the tree
-(`src/native_command_processor.cpp`), both off by default (env var unset /
-capped at 50 log lines) -- intentionally, as a debugging tool for whoever
-continues this, not dead code to clean up prematurely.
+The `NOCTURNE_SIMULATE_CAPTURE_DELAY=1` sleep-injection knob described above
+has since been **removed** from `src/native_command_processor.cpp` (it was a
+diagnostic probe to test a hypothesis, not a fix, and was never meant to be
+permanent) -- the finding it produced is still valid and documented above,
+it's just no longer live code. Re-add an equivalent probe (a plain
+`std::this_thread::sleep_for` at the top of `TryDraw`, gated behind
+something that defaults off) if you need to re-run this experiment; nothing
+about the finding depends on the exact removed diff. The zero-range
+diagnostic in `UpdateSharedMemory` (logs any vertex-fetch range that copies
+back entirely zero, capped at 50 lines) is still in the tree and is
+independent of the delay knob -- it fires on a real RenderDoc-triggered
+repro too.
 
 ## Next steps for whoever picks this up
 
 1. **Don't re-try the `OnPacket` mutex, and don't chase vblank-ISR or any
    other cross-thread-race theory.** Fully closed -- see "Breakthrough"
-   above; a single-threaded delayed run reproduces the bug, so there is no
+   above; a single-threaded delayed run reproduced the bug, so there is no
    race to guard against anywhere.
-2. Use `NOCTURNE_SIMULATE_CAPTURE_DELAY=1` (no RenderDoc, no lldb overhead
-   fighting a capture) as the primary repro for the next debugging session.
-   The bug isn't yet deterministic-every-frame under this knob (one
+2. Re-add a delay probe (see above) as the primary repro for the next
+   debugging session -- no RenderDoc, no lldb overhead fighting a capture.
+   The bug wasn't deterministic-every-frame under the removed 3ms knob (one
    `ALL ZERO` hit was observed in the session tested, not a hit every frame
    the smoke should be visible) -- worth first checking whether a larger
    delay (10-20ms?) or a delay placed elsewhere (e.g. only around

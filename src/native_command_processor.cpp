@@ -2817,17 +2817,6 @@ void NativeCommandProcessor::TryDraw(rex::graphics::xenos::PrimitiveType prim_ty
     return;
   }
 
-  // TEMPORARY diagnostic (smoke-vertex-bug investigation): simulate
-  // RenderDoc's per-draw CPU overhead with a plain sleep, gated behind an env
-  // var, to test whether pure added latency between guest command submission
-  // and this function's shared-memory read (spread across every draw, not
-  // just NativeCommandProcessor::PresentFrame's existing vsync throttle) is
-  // sufficient to reproduce the all-zero-vertex bug without RenderDoc at all.
-  static const bool kSimulateCaptureDelay = std::getenv("NOCTURNE_SIMULATE_CAPTURE_DELAY") != nullptr;
-  if (kSimulateCaptureDelay) {
-    std::this_thread::sleep_for(std::chrono::milliseconds(3));
-  }
-
   // EDRAM resolve dispatch: on real hardware, RB_MODECONTROL.edram_mode ==
   // kCopy turns what would otherwise be a normal draw into a resolve
   // (render-target -> guest-texture copy) instead -- see TryResolveCopy's
