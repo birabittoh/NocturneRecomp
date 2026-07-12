@@ -499,15 +499,19 @@ bool NativeCommandProcessor::InitializePipelineResources() {
     }
   }
 
-  // Default sampler: bilinear, clamp-to-edge -- used both for the 1x1
+  // Default sampler: nearest, clamp-to-edge -- used both for the 1x1
   // default texture and (for now, see GetOrUploadTexture) every real
   // uploaded texture, since decoding the fetch constant's actual filter/clamp
-  // state isn't implemented yet.
+  // state isn't implemented yet. Nearest (not bilinear) matches the game's
+  // native pixel-art rendering -- bilinear softened every in-game texture
+  // (most noticeably the gameplay-preview texture from
+  // d3e285a2bbde72ca4ee5377ae0e5713db5d4755e) with a blur the real hardware
+  // never applied.
   {
     VkSamplerCreateInfo sampler_info{};
     sampler_info.sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO;
-    sampler_info.magFilter = VK_FILTER_LINEAR;
-    sampler_info.minFilter = VK_FILTER_LINEAR;
+    sampler_info.magFilter = VK_FILTER_NEAREST;
+    sampler_info.minFilter = VK_FILTER_NEAREST;
     sampler_info.mipmapMode = VK_SAMPLER_MIPMAP_MODE_NEAREST;
     sampler_info.addressModeU = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
     sampler_info.addressModeV = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
