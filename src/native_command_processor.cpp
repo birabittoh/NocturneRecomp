@@ -120,12 +120,24 @@ void DecompressDXT5Block(const uint8_t block[16], uint8_t out_rgba[4 * 4 * 4]) {
   alpha_lut[0] = alpha0;
   alpha_lut[1] = alpha1;
   if (alpha0 > alpha1) {
-    for (int i = 1; i <= 5; ++i) {
-      alpha_lut[1 + i] = uint8_t(((6 - i) * uint32_t(alpha0) + i * uint32_t(alpha1)) / 7);
+    // 7-step interpolation (lut[2..7]): weights must sum to 7 (the divisor),
+    // not 6 -- (6-i) instead of (7-i) silently undershot every interpolated
+    // value, and the loop stopping at i=5 left lut[7] uninitialized garbage
+    // instead of the correct (1*alpha0 + 6*alpha1)/7. Confirmed against
+    // dumps/textures/ ground truth: blocks landing on the untouched
+    // lut[5]/lut[6]/lut[7] entries decoded to visibly wrong (often much
+    // higher/lower, sometimes garbage) alpha, producing the scattered
+    // colored-dot artifacts seen around the "Castlevania" logo text edges.
+    for (int i = 1; i <= 6; ++i) {
+      alpha_lut[1 + i] = uint8_t(((7 - i) * uint32_t(alpha0) + i * uint32_t(alpha1)) / 7);
     }
   } else {
-    for (int i = 1; i <= 3; ++i) {
-      alpha_lut[1 + i] = uint8_t(((4 - i) * uint32_t(alpha0) + i * uint32_t(alpha1)) / 5);
+    // 5-step interpolation (lut[2..5], then lut[6]=0, lut[7]=255): same class
+    // of bug -- weights must sum to 5, and the loop must fill all four
+    // interpolated entries (i=1..4), not stop at i=3 and leave lut[5]
+    // uninitialized.
+    for (int i = 1; i <= 4; ++i) {
+      alpha_lut[1 + i] = uint8_t(((5 - i) * uint32_t(alpha0) + i * uint32_t(alpha1)) / 5);
     }
     alpha_lut[6] = 0;
     alpha_lut[7] = 255;
