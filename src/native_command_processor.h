@@ -179,6 +179,13 @@ class NativeCommandProcessor {
     // texture_cache_ again.
     uint32_t base_address_bytes = 0;
     uint32_t size_bytes = 0;
+    // Set when this upload matched GetOrUploadTexture's gameplay-preview
+    // heuristic (512x256) -- TryDraw uses this to pick
+    // gameplay_preview_sampler_ (nearest) instead of default_sampler_
+    // (bilinear) for just this texture's binding, so the nearest-vs-bilinear
+    // choice stays scoped to this one texture rather than applying to every
+    // sampler slot in a draw.
+    bool is_gameplay_preview = false;
   };
   UploadedTexture* GetOrUploadTexture(uint32_t fetch_constant_index);
 
@@ -317,6 +324,9 @@ class NativeCommandProcessor {
   VkDeviceMemory default_texture_memory_ = VK_NULL_HANDLE;
   VkImageView default_texture_view_ = VK_NULL_HANDLE;
   VkSampler default_sampler_ = VK_NULL_HANDLE;
+  // Nearest, used only for the gameplay-preview texture -- see
+  // UploadedTexture::is_gameplay_preview.
+  VkSampler gameplay_preview_sampler_ = VK_NULL_HANDLE;
 
   // Real uploaded textures, cached by a hash of the fetch constant's raw
   // dwords (address+format+dimensions+tiling all fold into that hash, so a

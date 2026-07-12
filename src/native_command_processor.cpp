@@ -37,6 +37,14 @@ REXCVAR_DEFINE_BOOL(nocturne_gameplay_preview_post_process, false, "GPU",
 
 namespace nocturne {
 
+// Known real dimensions of the gameplay-preview texture (see
+// UploadedTexture::is_gameplay_preview) -- confirmed via repeated,
+// frequent (consistent with a live-updating preview) "texture uploaded
+// 512x256" log lines, distinct from the game's other, far less frequently
+// re-uploaded UI textures.
+constexpr uint32_t kGameplayPreviewWidth = 512;
+constexpr uint32_t kGameplayPreviewHeight = 256;
+
 namespace {
 
 // Replicates xboxkrnl_video.cpp's GetConfiguredVideoModeWidth/Height (not
@@ -513,14 +521,32 @@ bool NativeCommandProcessor::InitializePipelineResources() {
     }
   }
 
-  // Default sampler: nearest, clamp-to-edge -- used both for the 1x1
+  // Default sampler: bilinear, clamp-to-edge -- used both for the 1x1
   // default texture and (for now, see GetOrUploadTexture) every real
   // uploaded texture, since decoding the fetch constant's actual filter/clamp
-  // state isn't implemented yet. Nearest (not bilinear) matches the game's
-  // native pixel-art rendering -- bilinear softened every in-game texture
-  // (most noticeably the gameplay-preview texture from
-  // d3e285a2bbde72ca4ee5377ae0e5713db5d4755e) with a blur the real hardware
-  // never applied.
+  // state isn't implemented yet.
+  {
+    VkSamplerCreateInfo sampler_info{};
+    sampler_info.sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO;
+    sampler_info.magFilter = VK_FILTER_LINEAR;
+    sampler_info.minFilter = VK_FILTER_LINEAR;
+    sampler_info.mipmapMode = VK_SAMPLER_MIPMAP_MODE_NEAREST;
+    sampler_info.addressModeU = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+    sampler_info.addressModeV = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+    sampler_info.addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+    sampler_info.maxLod = 0.0f;
+    if (dfn.vkCreateSampler(device, &sampler_info, nullptr, &default_sampler_) != VK_SUCCESS) {
+      REXGPU_ERROR("NativeCommandProcessor: failed to create the default sampler");
+      return false;
+    }
+  }
+
+  // Nearest sampler: used only for the gameplay-preview texture (see
+  // GetOrUploadTexture's is_gameplay_preview check) -- bilinear softened it
+  // with a blur the real hardware never applied
+  // (d3e285a2bbde72ca4ee5377ae0e5713db5d4755e), but every other in-game
+  // texture is meant to be bilinear-filtered as normal, so this isn't the
+  // global default_sampler_.
   {
     VkSamplerCreateInfo sampler_info{};
     sampler_info.sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO;
@@ -531,8 +557,9 @@ bool NativeCommandProcessor::InitializePipelineResources() {
     sampler_info.addressModeV = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
     sampler_info.addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
     sampler_info.maxLod = 0.0f;
-    if (dfn.vkCreateSampler(device, &sampler_info, nullptr, &default_sampler_) != VK_SUCCESS) {
-      REXGPU_ERROR("NativeCommandProcessor: failed to create the default sampler");
+    if (dfn.vkCreateSampler(device, &sampler_info, nullptr, &gameplay_preview_sampler_) !=
+        VK_SUCCESS) {
+      REXGPU_ERROR("NativeCommandProcessor: failed to create the gameplay-preview sampler");
       return false;
     }
   }
@@ -819,6 +846,8 @@ void NativeCommandProcessor::DestroyPipelineResources() {
   if (default_texture_memory_ != VK_NULL_HANDLE)
     dfn.vkFreeMemory(device, default_texture_memory_, nullptr);
   if (default_sampler_ != VK_NULL_HANDLE) dfn.vkDestroySampler(device, default_sampler_, nullptr);
+  if (gameplay_preview_sampler_ != VK_NULL_HANDLE)
+    dfn.vkDestroySampler(device, gameplay_preview_sampler_, nullptr);
 
   if (transient_descriptor_pool_ != VK_NULL_HANDLE)
     dfn.vkDestroyDescriptorPool(device, transient_descriptor_pool_, nullptr);
@@ -1507,10 +1536,11 @@ bool NativeCommandProcessor::EnsurePostProcessPipeline() {
   input_assembly.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
 
   // Fixed viewport/scissor: this pipeline is only ever used for the
-  // gameplay-preview texture's known 852x480 size (see GetOrUploadTexture),
-  // so no dynamic state is needed.
-  VkViewport viewport{0.0f, 0.0f, 852.0f, 480.0f, 0.0f, 1.0f};
-  VkRect2D scissor{{0, 0}, {852, 480}};
+  // gameplay-preview texture's known size (see GetOrUploadTexture), so no
+  // dynamic state is needed.
+  VkViewport viewport{0.0f, 0.0f, float(kGameplayPreviewWidth), float(kGameplayPreviewHeight), 0.0f,
+                     1.0f};
+  VkRect2D scissor{{0, 0}, {kGameplayPreviewWidth, kGameplayPreviewHeight}};
   VkPipelineViewportStateCreateInfo viewport_state{};
   viewport_state.sType = VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO;
   viewport_state.viewportCount = 1;
@@ -2019,16 +2049,20 @@ NativeCommandProcessor::UploadedTexture* NativeCommandProcessor::GetOrUploadText
     return nullptr;
   }
 
-  // Gameplay-preview texture (see the field comment on UploadedTexture --
-  // 852x480 is this texture's known real size, confirmed via the uploads
-  // logged below): optionally re-filter it with the SDK's own configured
-  // post-process shader before caching, toggleable independently of both
-  // this project's own cvar and the SDK's post_process_shader_enabled (both
-  // must be on). Swaps texture.image/memory/view to the filtered result on
-  // success; on any failure (feature off, no shader configured, compile
-  // error), texture keeps the raw nearest-sampled upload from just above, so
-  // this can never make an otherwise-working texture disappear.
-  if (width == 852 && height == 480 && REXCVAR_GET(nocturne_gameplay_preview_post_process)) {
+  // Gameplay-preview texture (see UploadedTexture::is_gameplay_preview and
+  // kGameplayPreviewWidth/Height's doc comment for how this size was
+  // confirmed): sampled with gameplay_preview_sampler_ (nearest) instead of
+  // default_sampler_ (bilinear) in TryDraw, and optionally re-filtered with
+  // the SDK's own configured post-process shader before caching here,
+  // toggleable via nocturne_gameplay_preview_post_process independently of
+  // the SDK's post_process_shader_enabled. Swaps texture.image/memory/view
+  // to the filtered result on success; on any failure (feature off, no
+  // shader configured, compile error), texture keeps the raw upload from
+  // just above, so this can never make an otherwise-working texture
+  // disappear.
+  texture.is_gameplay_preview =
+      width == kGameplayPreviewWidth && height == kGameplayPreviewHeight;
+  if (texture.is_gameplay_preview && REXCVAR_GET(nocturne_gameplay_preview_post_process)) {
     VkImage filtered_image;
     VkDeviceMemory filtered_memory;
     VkImageView filtered_view;
@@ -3212,10 +3246,22 @@ void NativeCommandProcessor::TryDraw(rex::graphics::xenos::PrimitiveType prim_ty
     std::vector<VkDescriptorImageInfo> sampler_infos(smp_count);
     std::vector<VkWriteDescriptorSet> writes;
     writes.reserve(size_t(tex_count) + smp_count);
+    // True if any texture bound in this draw's set is the gameplay-preview
+    // texture -- texture and sampler bindings are compacted/dedup'd
+    // independently (see the doc comment on GetOrCreateTextureSetLayout), so
+    // there's no reliable per-index texture<->sampler correspondence to key
+    // off of; scoping the nearest-vs-bilinear choice to "this draw" instead
+    // of "this exact binding slot" is the simplification that still keeps it
+    // off every other texture in the game (the preview is always its own
+    // standalone draw, never combined with other unrelated textures).
+    bool draw_samples_gameplay_preview = false;
     for (uint32_t i = 0; i < tex_count; ++i) {
       UploadedTexture* texture = GetOrUploadTexture(uint32_t(tex_bindings[i].fetch_constant));
       image_infos[i] = {VK_NULL_HANDLE, texture ? texture->view : default_texture_view_,
                         VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL};
+      if (texture && texture->is_gameplay_preview) {
+        draw_samples_gameplay_preview = true;
+      }
       VkWriteDescriptorSet write{};
       write.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
       write.dstSet = set;
@@ -3225,11 +3271,13 @@ void NativeCommandProcessor::TryDraw(rex::graphics::xenos::PrimitiveType prim_ty
       write.pImageInfo = &image_infos[i];
       writes.push_back(write);
     }
+    VkSampler sampler_for_draw =
+        draw_samples_gameplay_preview ? gameplay_preview_sampler_ : default_sampler_;
     for (uint32_t i = 0; i < smp_count; ++i) {
-      // Every sampler slot reuses default_sampler_ (bilinear, clamp) --
-      // sampler_bindings()[i]'s actual filter/wrap fields aren't decoded yet,
-      // same pre-existing simplification as before this multi-texture change.
-      sampler_infos[i] = {default_sampler_, VK_NULL_HANDLE, VK_IMAGE_LAYOUT_UNDEFINED};
+      // sampler_bindings()[i]'s actual filter/wrap fields aren't decoded yet
+      // (pre-existing simplification) -- every slot reuses one sampler,
+      // chosen per-draw above.
+      sampler_infos[i] = {sampler_for_draw, VK_NULL_HANDLE, VK_IMAGE_LAYOUT_UNDEFINED};
       VkWriteDescriptorSet write{};
       write.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
       write.dstSet = set;
