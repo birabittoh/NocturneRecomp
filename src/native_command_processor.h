@@ -7,6 +7,7 @@
 #include <chrono>
 #include <cstdint>
 #include <memory>
+#include <string>
 #include <unordered_map>
 #include <vector>
 
@@ -190,6 +191,47 @@ class NativeCommandProcessor {
   // more than overlapping this with other GPU work.
   bool UploadTexelsAndTransition(VkImage image, uint32_t width, uint32_t height,
                                  const void* rgba_data);
+
+  // Toggleable (nocturne_gameplay_preview_post_process cvar) per-texture
+  // equivalent of the SDK's own post_process_shader_path/enabled: runs the
+  // same configured shader, but only over the gameplay-preview texture
+  // (identified by its known 852x480 size -- see GetOrUploadTexture) rather
+  // than the whole composited frame. Renders source_view through the
+  // compiled post_process_shader_path fragment shader into a fresh
+  // width x height image, returned via the out params (left untouched if
+  // this returns false -- caller should fall back to sampling source_image
+  // directly, same as when the feature is disabled or the shader fails to
+  // compile). See EnsurePostProcessPipeline for the one-time pipeline setup
+  // this lazily triggers.
+  bool ApplyGameplayPreviewPostProcess(VkImageView source_view, uint32_t width, uint32_t height,
+                                       VkImage& out_image, VkDeviceMemory& out_memory,
+                                       VkImageView& out_view);
+  // Builds the fixed vertex shader (a hand-assembled SPIR-V full-screen
+  // triangle -- see the .cpp: this SDK doesn't expose a general-purpose
+  // runtime GLSL compiler, only rex::ui::CustomShader::Compile's
+  // fragment-only helper tied to the presenter's own preamble, so there's no
+  // supported way to compile a matching vertex stage from GLSL here) plus
+  // the render pass/descriptor set layout/pipeline layout/sampler this
+  // feature needs, once. (Re)compiles the fragment shader from
+  // post_process_shader_path whenever that cvar's value changes. Returns
+  // false (leaving the pipeline unusable, logged once) if compilation or any
+  // resource creation fails.
+  bool EnsurePostProcessPipeline();
+  void DestroyPostProcessPipeline();
+  VkRenderPass post_process_render_pass_ = VK_NULL_HANDLE;
+  VkDescriptorSetLayout post_process_descriptor_set_layout_ = VK_NULL_HANDLE;
+  VkPipelineLayout post_process_pipeline_layout_ = VK_NULL_HANDLE;
+  VkPipeline post_process_pipeline_ = VK_NULL_HANDLE;
+  VkShaderModule post_process_vertex_shader_ = VK_NULL_HANDLE;
+  VkShaderModule post_process_fragment_shader_ = VK_NULL_HANDLE;
+  VkSampler post_process_sampler_ = VK_NULL_HANDLE;
+  VkDescriptorPool post_process_descriptor_pool_ = VK_NULL_HANDLE;
+  // Cache key mirroring VulkanPresenter::custom_shader_compiled_path_ -- only
+  // recompile post_process_fragment_shader_ when post_process_shader_path
+  // actually changed.
+  std::string post_process_shader_compiled_path_;
+  bool post_process_shader_compile_failed_ = false;
+  bool post_process_pipeline_valid_ = false;
 
   // Begins accumulating a frame's draws into color_target_image_ if this is
   // the first draw since the last present (render pass begin + clear).

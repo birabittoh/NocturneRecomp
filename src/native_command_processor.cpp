@@ -9,17 +9,31 @@
 #include <cstring>
 #include <thread>
 
+#include <spirv-tools/libspirv.h>
+
 #include <rex/cvar.h>
 #include <rex/graphics/pipeline/texture/util.h>
 #include <rex/graphics/video_mode_util.h>
 #include <rex/logging.h>
 #include <rex/string/buffer.h>
 #include <rex/system/kernel_state.h>
+#include <rex/ui/custom_shader.h>
 #include <rex/ui/flags.h>
 #include <rex/ui/graphics_util.h>
 #include <rex/ui/vulkan/device.h>
 #include <rex/ui/vulkan/presenter.h>
 #include <rex/ui/vulkan/util.h>
+
+// Toggleable per-texture equivalent of the SDK's own post_process_shader_path/
+// post_process_shader_enabled (see ApplyGameplayPreviewPostProcess): applies
+// that same configured shader to just the gameplay-preview texture instead of
+// the whole composited frame. Off by default -- this is a narrower, opt-in
+// variant of an already-opt-in SDK feature.
+REXCVAR_DEFINE_BOOL(nocturne_gameplay_preview_post_process, false, "GPU",
+                    "Apply the game's configured post-process shader "
+                    "(post_process_shader_path, when post_process_shader_enabled) to just the "
+                    "gameplay-preview texture instead of the whole screen.")
+    .lifecycle(rex::cvar::Lifecycle::kHotReload);
 
 namespace nocturne {
 
@@ -795,6 +809,8 @@ void NativeCommandProcessor::DestroyPipelineResources() {
   if (shared_memory_memory_ != VK_NULL_HANDLE)
     dfn.vkFreeMemory(device, shared_memory_memory_, nullptr);
 
+  DestroyPostProcessPipeline();
+
   DestroyTextureCache();
   if (default_texture_view_ != VK_NULL_HANDLE)
     dfn.vkDestroyImageView(device, default_texture_view_, nullptr);
@@ -1203,6 +1219,553 @@ bool NativeCommandProcessor::UploadTexelsAndTransition(VkImage image, uint32_t w
   return ok;
 }
 
+namespace {
+
+// Hand-assembled SPIR-V for the fixed full-screen-triangle vertex shader
+// ApplyGameplayPreviewPostProcess's pipeline uses (the classic "one
+// oversized triangle covering the whole viewport, no vertex buffer" trick,
+// driven purely by gl_VertexIndex -- 0,1,2 map to (-1,-1), (3,-1), (-1,3) in
+// NDC). Assembled from text (via SPIRV-Tools' spvTextToBinary, linked in
+// already for shader disassembly needs elsewhere in the SDK) rather than
+// compiled from GLSL: rex::ui::CustomShader::Compile (used just below for
+// the actual post-process fragment shader) only ever compiles a *fragment*
+// stage tied to its own fixed preamble -- the SDK doesn't expose glslang's
+// general compiler (glslang/Public/ShaderLang.h isn't part of its installed
+// include tree, only the narrower SPIRV/GlslangToSpv.h that itself needs
+// glslang::TIntermediate to already exist), so there's no supported way to
+// compile an arbitrary new vertex shader from GLSL here. This vertex stage
+// needs no push constants or varyings -- CustomShaderConstants's
+// xe_output_offset/xe_uv are derived from gl_FragCoord in the fragment
+// preamble, not from any vertex-stage output.
+constexpr char kFullscreenTriangleVertexShaderSpirvAsm[] = R"(
+OpCapability Shader
+%1 = OpExtInstImport "GLSL.std.450"
+OpMemoryModel Logical GLSL450
+OpEntryPoint Vertex %main "main" %gl_VertexIndex %gl_Position
+OpDecorate %gl_VertexIndex BuiltIn VertexIndex
+OpDecorate %gl_Position BuiltIn Position
+%void = OpTypeVoid
+%voidfn = OpTypeFunction %void
+%int = OpTypeInt 32 1
+%int_1 = OpConstant %int 1
+%int_2 = OpConstant %int 2
+%ptr_in_int = OpTypePointer Input %int
+%gl_VertexIndex = OpVariable %ptr_in_int Input
+%float = OpTypeFloat 32
+%float_0 = OpConstant %float 0
+%float_1 = OpConstant %float 1
+%float_2 = OpConstant %float 2
+%v4float = OpTypeVector %float 4
+%ptr_out_v4float = OpTypePointer Output %v4float
+%gl_Position = OpVariable %ptr_out_v4float Output
+%main = OpFunction %void None %voidfn
+%entry = OpLabel
+%vidx = OpLoad %int %gl_VertexIndex
+%shl = OpShiftLeftLogical %int %vidx %int_1
+%bx = OpBitwiseAnd %int %shl %int_2
+%by = OpBitwiseAnd %int %vidx %int_2
+%fx = OpConvertSToF %float %bx
+%fy = OpConvertSToF %float %by
+%mx = OpFMul %float %fx %float_2
+%my = OpFMul %float %fy %float_2
+%sx = OpFSub %float %mx %float_1
+%sy = OpFSub %float %my %float_1
+%pos = OpCompositeConstruct %v4float %sx %sy %float_0 %float_1
+OpStore %gl_Position %pos
+OpReturn
+OpFunctionEnd
+)";
+
+// Matches CustomShaderConstants (rexglue-sdk/include/rex/ui/presenter.h) and
+// custom_shader.cpp's kGlslPreamble, which hardcodes its push-constant
+// block's member offsets starting at 16 (bytes 0-16 are the *vertex* stage's
+// rectangle constants in the SDK's own presenter pipeline -- unused here
+// since this pipeline's vertex stage takes no push constants at all, but the
+// fragment SPIR-V's decorations still expect them to be reserved).
+struct PostProcessConstants {
+  int32_t reserved_for_vertex_rect[4];
+  int32_t output_offset[2];
+  float output_size_inv[2];
+  float source_size[2];
+  float source_size_inv[2];
+};
+static_assert(sizeof(PostProcessConstants) == 48);
+
+}  // namespace
+
+bool NativeCommandProcessor::EnsurePostProcessPipeline() {
+  const rex::ui::vulkan::VulkanDevice* vulkan_device = provider_->vulkan_device();
+  const rex::ui::vulkan::VulkanDevice::Functions& dfn = vulkan_device->functions();
+  VkDevice device = vulkan_device->device();
+
+  std::string shader_path = rex::cvar::Query<std::string>("post_process_shader_path");
+  if (post_process_pipeline_valid_ && shader_path == post_process_shader_compiled_path_) {
+    return !post_process_shader_compile_failed_;
+  }
+
+  // Path changed (or this is the first call): recompile the fragment shader
+  // and, on the very first successful call, build everything else (render
+  // pass/layouts/sampler/vertex shader/pipeline), which never needs to
+  // change again -- only the fragment module and the pipeline built from it
+  // get recreated when the path changes.
+  post_process_shader_compiled_path_ = shader_path;
+  post_process_shader_compile_failed_ = true;
+  if (shader_path.empty()) {
+    return false;
+  }
+
+  rex::ui::CustomShader::CompileResult compile_result =
+      rex::ui::CustomShader::Compile(shader_path, /*compile_hlsl=*/false);
+  if (!compile_result.success) {
+    REXGPU_ERROR(
+        "NativeCommandProcessor: failed to compile post_process_shader_path '{}' for the "
+        "gameplay-preview texture: {}",
+        shader_path, compile_result.error);
+    return false;
+  }
+
+  if (post_process_fragment_shader_ != VK_NULL_HANDLE) {
+    dfn.vkDestroyShaderModule(device, post_process_fragment_shader_, nullptr);
+    post_process_fragment_shader_ = VK_NULL_HANDLE;
+  }
+  VkShaderModuleCreateInfo fragment_module_info{};
+  fragment_module_info.sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO;
+  fragment_module_info.codeSize = compile_result.spirv.size() * sizeof(uint32_t);
+  fragment_module_info.pCode = compile_result.spirv.data();
+  if (dfn.vkCreateShaderModule(device, &fragment_module_info, nullptr,
+                               &post_process_fragment_shader_) != VK_SUCCESS) {
+    REXGPU_ERROR("NativeCommandProcessor: failed to create the post-process fragment shader module");
+    return false;
+  }
+
+  if (!post_process_pipeline_valid_) {
+    // Vertex shader: assembled once from the fixed SPIR-V text above.
+    spv_context spirv_context = spvContextCreate(SPV_ENV_VULKAN_1_0);
+    spv_binary assembled = nullptr;
+    spv_diagnostic diagnostic = nullptr;
+    spv_result_t assemble_result = spvTextToBinary(
+        spirv_context, kFullscreenTriangleVertexShaderSpirvAsm,
+        sizeof(kFullscreenTriangleVertexShaderSpirvAsm) - 1, &assembled, &diagnostic);
+    if (assemble_result != SPV_SUCCESS) {
+      REXGPU_ERROR("NativeCommandProcessor: failed to assemble the post-process vertex shader: {}",
+                  diagnostic ? diagnostic->error : "unknown error");
+      if (diagnostic) spvDiagnosticDestroy(diagnostic);
+      spvContextDestroy(spirv_context);
+      return false;
+    }
+    VkShaderModuleCreateInfo vertex_module_info{};
+    vertex_module_info.sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO;
+    vertex_module_info.codeSize = assembled->wordCount * sizeof(uint32_t);
+    vertex_module_info.pCode = assembled->code;
+    VkResult vertex_module_result = dfn.vkCreateShaderModule(device, &vertex_module_info, nullptr,
+                                                             &post_process_vertex_shader_);
+    spvBinaryDestroy(assembled);
+    spvContextDestroy(spirv_context);
+    if (vertex_module_result != VK_SUCCESS) {
+      REXGPU_ERROR("NativeCommandProcessor: failed to create the post-process vertex shader module");
+      return false;
+    }
+
+    // Sampler: linear, clamp-to-edge -- matches the SDK's own guest-output
+    // paint sampler (see vulkan_presenter.cpp's kSamplerIndexLinearClampToEdge
+    // usage), since arbitrary RetroArch-style shaders (blur/CRT curvature/
+    // etc.) may rely on hardware-filtered neighbor sampling.
+    VkSamplerCreateInfo sampler_info{};
+    sampler_info.sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO;
+    sampler_info.magFilter = VK_FILTER_LINEAR;
+    sampler_info.minFilter = VK_FILTER_LINEAR;
+    sampler_info.mipmapMode = VK_SAMPLER_MIPMAP_MODE_NEAREST;
+    sampler_info.addressModeU = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+    sampler_info.addressModeV = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+    sampler_info.addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+    sampler_info.maxLod = 0.0f;
+    if (dfn.vkCreateSampler(device, &sampler_info, nullptr, &post_process_sampler_) != VK_SUCCESS) {
+      REXGPU_ERROR("NativeCommandProcessor: failed to create the post-process sampler");
+      return false;
+    }
+
+    // Descriptor set layout: set 0, binding 0 = sampled image, binding 1 =
+    // sampler -- matches custom_shader.cpp's kGlslPreamble exactly.
+    VkDescriptorSetLayoutBinding bindings[2]{};
+    bindings[0].binding = 0;
+    bindings[0].descriptorType = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE;
+    bindings[0].descriptorCount = 1;
+    bindings[0].stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
+    bindings[1].binding = 1;
+    bindings[1].descriptorType = VK_DESCRIPTOR_TYPE_SAMPLER;
+    bindings[1].descriptorCount = 1;
+    bindings[1].stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
+    VkDescriptorSetLayoutCreateInfo set_layout_info{};
+    set_layout_info.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
+    set_layout_info.bindingCount = 2;
+    set_layout_info.pBindings = bindings;
+    if (dfn.vkCreateDescriptorSetLayout(device, &set_layout_info, nullptr,
+                                        &post_process_descriptor_set_layout_) != VK_SUCCESS) {
+      REXGPU_ERROR("NativeCommandProcessor: failed to create the post-process descriptor set layout");
+      return false;
+    }
+
+    VkPushConstantRange push_constant_range{};
+    push_constant_range.stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
+    push_constant_range.offset = 0;
+    push_constant_range.size = sizeof(PostProcessConstants);
+    VkPipelineLayoutCreateInfo pipeline_layout_info{};
+    pipeline_layout_info.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
+    pipeline_layout_info.setLayoutCount = 1;
+    pipeline_layout_info.pSetLayouts = &post_process_descriptor_set_layout_;
+    pipeline_layout_info.pushConstantRangeCount = 1;
+    pipeline_layout_info.pPushConstantRanges = &push_constant_range;
+    if (dfn.vkCreatePipelineLayout(device, &pipeline_layout_info, nullptr,
+                                   &post_process_pipeline_layout_) != VK_SUCCESS) {
+      REXGPU_ERROR("NativeCommandProcessor: failed to create the post-process pipeline layout");
+      return false;
+    }
+
+    // Descriptor pool: only ever one set alive at a time (this pass runs
+    // synchronously, see ApplyGameplayPreviewPostProcess), reset and
+    // reallocated fresh on every call.
+    VkDescriptorPoolSize pool_sizes[2] = {
+        {VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, 1},
+        {VK_DESCRIPTOR_TYPE_SAMPLER, 1},
+    };
+    VkDescriptorPoolCreateInfo pool_info{};
+    pool_info.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
+    pool_info.maxSets = 1;
+    pool_info.poolSizeCount = 2;
+    pool_info.pPoolSizes = pool_sizes;
+    if (dfn.vkCreateDescriptorPool(device, &pool_info, nullptr,
+                                   &post_process_descriptor_pool_) != VK_SUCCESS) {
+      REXGPU_ERROR("NativeCommandProcessor: failed to create the post-process descriptor pool");
+      return false;
+    }
+
+    // Render pass: single color attachment, R8G8B8A8_UNORM (matches every
+    // uploaded game texture's format), left in SHADER_READ_ONLY_OPTIMAL so
+    // the resulting image is immediately sampleable by real draws with no
+    // extra barrier.
+    VkAttachmentDescription attachment{};
+    attachment.format = VK_FORMAT_R8G8B8A8_UNORM;
+    attachment.samples = VK_SAMPLE_COUNT_1_BIT;
+    attachment.loadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
+    attachment.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+    attachment.stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
+    attachment.stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
+    attachment.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+    attachment.finalLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+    VkAttachmentReference color_ref{0, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL};
+    VkSubpassDescription subpass{};
+    subpass.pipelineBindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS;
+    subpass.colorAttachmentCount = 1;
+    subpass.pColorAttachments = &color_ref;
+    VkSubpassDependency dependency{};
+    dependency.srcSubpass = VK_SUBPASS_EXTERNAL;
+    dependency.dstSubpass = 0;
+    dependency.srcStageMask = VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT;
+    dependency.dstStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
+    dependency.srcAccessMask = VK_ACCESS_SHADER_READ_BIT;
+    dependency.dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
+    VkRenderPassCreateInfo render_pass_info{};
+    render_pass_info.sType = VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO;
+    render_pass_info.attachmentCount = 1;
+    render_pass_info.pAttachments = &attachment;
+    render_pass_info.subpassCount = 1;
+    render_pass_info.pSubpasses = &subpass;
+    render_pass_info.dependencyCount = 1;
+    render_pass_info.pDependencies = &dependency;
+    if (dfn.vkCreateRenderPass(device, &render_pass_info, nullptr, &post_process_render_pass_) !=
+        VK_SUCCESS) {
+      REXGPU_ERROR("NativeCommandProcessor: failed to create the post-process render pass");
+      return false;
+    }
+
+    post_process_pipeline_valid_ = true;
+  }
+
+  // (Re)build the pipeline: only the fragment module differs across calls,
+  // but simplest to just recreate the whole pipeline object whenever it
+  // does (shader path changes are a rare, explicit user action, not a
+  // per-frame occurrence).
+  if (post_process_pipeline_ != VK_NULL_HANDLE) {
+    dfn.vkDestroyPipeline(device, post_process_pipeline_, nullptr);
+    post_process_pipeline_ = VK_NULL_HANDLE;
+  }
+
+  VkPipelineShaderStageCreateInfo stages[2]{};
+  stages[0].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+  stages[0].stage = VK_SHADER_STAGE_VERTEX_BIT;
+  stages[0].module = post_process_vertex_shader_;
+  stages[0].pName = "main";
+  stages[1] = stages[0];
+  stages[1].stage = VK_SHADER_STAGE_FRAGMENT_BIT;
+  stages[1].module = post_process_fragment_shader_;
+
+  VkPipelineVertexInputStateCreateInfo vertex_input{};
+  vertex_input.sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO;
+
+  VkPipelineInputAssemblyStateCreateInfo input_assembly{};
+  input_assembly.sType = VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO;
+  input_assembly.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
+
+  // Fixed viewport/scissor: this pipeline is only ever used for the
+  // gameplay-preview texture's known 852x480 size (see GetOrUploadTexture),
+  // so no dynamic state is needed.
+  VkViewport viewport{0.0f, 0.0f, 852.0f, 480.0f, 0.0f, 1.0f};
+  VkRect2D scissor{{0, 0}, {852, 480}};
+  VkPipelineViewportStateCreateInfo viewport_state{};
+  viewport_state.sType = VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO;
+  viewport_state.viewportCount = 1;
+  viewport_state.pViewports = &viewport;
+  viewport_state.scissorCount = 1;
+  viewport_state.pScissors = &scissor;
+
+  VkPipelineRasterizationStateCreateInfo raster{};
+  raster.sType = VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO;
+  raster.polygonMode = VK_POLYGON_MODE_FILL;
+  raster.cullMode = VK_CULL_MODE_NONE;
+  raster.frontFace = VK_FRONT_FACE_COUNTER_CLOCKWISE;
+  raster.lineWidth = 1.0f;
+
+  VkPipelineMultisampleStateCreateInfo multisample{};
+  multisample.sType = VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO;
+  multisample.rasterizationSamples = VK_SAMPLE_COUNT_1_BIT;
+
+  VkPipelineColorBlendAttachmentState blend_attachment{};
+  blend_attachment.colorWriteMask = VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT |
+                                    VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT;
+  VkPipelineColorBlendStateCreateInfo blend_state{};
+  blend_state.sType = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO;
+  blend_state.attachmentCount = 1;
+  blend_state.pAttachments = &blend_attachment;
+
+  VkGraphicsPipelineCreateInfo pipeline_info{};
+  pipeline_info.sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO;
+  pipeline_info.stageCount = 2;
+  pipeline_info.pStages = stages;
+  pipeline_info.pVertexInputState = &vertex_input;
+  pipeline_info.pInputAssemblyState = &input_assembly;
+  pipeline_info.pViewportState = &viewport_state;
+  pipeline_info.pRasterizationState = &raster;
+  pipeline_info.pMultisampleState = &multisample;
+  pipeline_info.pColorBlendState = &blend_state;
+  pipeline_info.layout = post_process_pipeline_layout_;
+  pipeline_info.renderPass = post_process_render_pass_;
+  pipeline_info.subpass = 0;
+  if (dfn.vkCreateGraphicsPipelines(device, VK_NULL_HANDLE, 1, &pipeline_info, nullptr,
+                                    &post_process_pipeline_) != VK_SUCCESS) {
+    REXGPU_ERROR("NativeCommandProcessor: failed to create the post-process pipeline");
+    return false;
+  }
+
+  post_process_shader_compile_failed_ = false;
+  return true;
+}
+
+bool NativeCommandProcessor::ApplyGameplayPreviewPostProcess(VkImageView source_view,
+                                                              uint32_t width, uint32_t height,
+                                                              VkImage& out_image,
+                                                              VkDeviceMemory& out_memory,
+                                                              VkImageView& out_view) {
+  // Deliberately independent of post_process_shader_enabled (the SDK's own
+  // whole-screen toggle): nocturne_gameplay_preview_post_process is this
+  // texture's own on/off switch, so the two can be set differently (e.g.
+  // scanlines only on the preview, a clean full screen otherwise). Only
+  // post_process_shader_path (the actual shader source) is shared.
+  if (!EnsurePostProcessPipeline()) {
+    return false;
+  }
+
+  const rex::ui::vulkan::VulkanDevice* vulkan_device = provider_->vulkan_device();
+  const rex::ui::vulkan::VulkanDevice::Functions& dfn = vulkan_device->functions();
+  VkDevice device = vulkan_device->device();
+
+  VkImage filtered_image = VK_NULL_HANDLE;
+  VkDeviceMemory filtered_memory = VK_NULL_HANDLE;
+  VkImageCreateInfo image_info{};
+  image_info.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
+  image_info.imageType = VK_IMAGE_TYPE_2D;
+  image_info.format = VK_FORMAT_R8G8B8A8_UNORM;
+  image_info.extent = {width, height, 1};
+  image_info.mipLevels = 1;
+  image_info.arrayLayers = 1;
+  image_info.samples = VK_SAMPLE_COUNT_1_BIT;
+  image_info.tiling = VK_IMAGE_TILING_OPTIMAL;
+  image_info.usage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
+  image_info.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+  image_info.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+  if (!rex::ui::vulkan::util::CreateDedicatedAllocationImage(
+          vulkan_device, image_info, rex::ui::vulkan::util::MemoryPurpose::kDeviceLocal,
+          filtered_image, filtered_memory)) {
+    REXGPU_ERROR("NativeCommandProcessor: failed to create the post-processed texture image");
+    return false;
+  }
+
+  VkImageView filtered_view = VK_NULL_HANDLE;
+  VkImageViewCreateInfo view_info{};
+  view_info.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
+  view_info.image = filtered_image;
+  view_info.viewType = VK_IMAGE_VIEW_TYPE_2D;
+  view_info.format = VK_FORMAT_R8G8B8A8_UNORM;
+  view_info.subresourceRange = rex::ui::vulkan::util::InitializeSubresourceRange();
+  if (dfn.vkCreateImageView(device, &view_info, nullptr, &filtered_view) != VK_SUCCESS) {
+    REXGPU_ERROR("NativeCommandProcessor: failed to create the post-processed texture view");
+    dfn.vkDestroyImage(device, filtered_image, nullptr);
+    dfn.vkFreeMemory(device, filtered_memory, nullptr);
+    return false;
+  }
+
+  VkFramebufferCreateInfo framebuffer_info{};
+  framebuffer_info.sType = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO;
+  framebuffer_info.renderPass = post_process_render_pass_;
+  framebuffer_info.attachmentCount = 1;
+  framebuffer_info.pAttachments = &filtered_view;
+  framebuffer_info.width = width;
+  framebuffer_info.height = height;
+  framebuffer_info.layers = 1;
+  VkFramebuffer framebuffer = VK_NULL_HANDLE;
+  if (dfn.vkCreateFramebuffer(device, &framebuffer_info, nullptr, &framebuffer) != VK_SUCCESS) {
+    REXGPU_ERROR("NativeCommandProcessor: failed to create the post-process framebuffer");
+    dfn.vkDestroyImageView(device, filtered_view, nullptr);
+    dfn.vkDestroyImage(device, filtered_image, nullptr);
+    dfn.vkFreeMemory(device, filtered_memory, nullptr);
+    return false;
+  }
+
+  dfn.vkResetDescriptorPool(device, post_process_descriptor_pool_, 0);
+  VkDescriptorSetAllocateInfo set_alloc_info{};
+  set_alloc_info.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
+  set_alloc_info.descriptorPool = post_process_descriptor_pool_;
+  set_alloc_info.descriptorSetCount = 1;
+  set_alloc_info.pSetLayouts = &post_process_descriptor_set_layout_;
+  VkDescriptorSet descriptor_set = VK_NULL_HANDLE;
+  if (dfn.vkAllocateDescriptorSets(device, &set_alloc_info, &descriptor_set) != VK_SUCCESS) {
+    REXGPU_ERROR("NativeCommandProcessor: failed to allocate the post-process descriptor set");
+    dfn.vkDestroyFramebuffer(device, framebuffer, nullptr);
+    dfn.vkDestroyImageView(device, filtered_view, nullptr);
+    dfn.vkDestroyImage(device, filtered_image, nullptr);
+    dfn.vkFreeMemory(device, filtered_memory, nullptr);
+    return false;
+  }
+  VkDescriptorImageInfo image_descriptor{};
+  image_descriptor.imageView = source_view;
+  image_descriptor.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+  VkDescriptorImageInfo sampler_descriptor{};
+  sampler_descriptor.sampler = post_process_sampler_;
+  VkWriteDescriptorSet writes[2]{};
+  writes[0].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+  writes[0].dstSet = descriptor_set;
+  writes[0].dstBinding = 0;
+  writes[0].descriptorCount = 1;
+  writes[0].descriptorType = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE;
+  writes[0].pImageInfo = &image_descriptor;
+  writes[1] = writes[0];
+  writes[1].dstBinding = 1;
+  writes[1].descriptorType = VK_DESCRIPTOR_TYPE_SAMPLER;
+  writes[1].pImageInfo = &sampler_descriptor;
+  dfn.vkUpdateDescriptorSets(device, 2, writes, 0, nullptr);
+
+  PostProcessConstants constants{};
+  constants.output_offset[0] = 0;
+  constants.output_offset[1] = 0;
+  constants.output_size_inv[0] = 1.0f / float(width);
+  constants.output_size_inv[1] = 1.0f / float(height);
+  constants.source_size[0] = float(width);
+  constants.source_size[1] = float(height);
+  constants.source_size_inv[0] = 1.0f / float(width);
+  constants.source_size_inv[1] = 1.0f / float(height);
+
+  VkCommandBufferAllocateInfo cmd_alloc_info{};
+  cmd_alloc_info.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
+  cmd_alloc_info.commandPool = command_pool_;
+  cmd_alloc_info.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+  cmd_alloc_info.commandBufferCount = 1;
+  VkCommandBuffer cmd = VK_NULL_HANDLE;
+  bool ok = dfn.vkAllocateCommandBuffers(device, &cmd_alloc_info, &cmd) == VK_SUCCESS;
+  if (ok) {
+    VkCommandBufferBeginInfo begin_info{};
+    begin_info.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+    begin_info.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+    dfn.vkBeginCommandBuffer(cmd, &begin_info);
+
+    VkClearValue clear_value{};
+    VkRenderPassBeginInfo render_pass_begin{};
+    render_pass_begin.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
+    render_pass_begin.renderPass = post_process_render_pass_;
+    render_pass_begin.framebuffer = framebuffer;
+    render_pass_begin.renderArea = {{0, 0}, {width, height}};
+    render_pass_begin.clearValueCount = 1;
+    render_pass_begin.pClearValues = &clear_value;
+    dfn.vkCmdBeginRenderPass(cmd, &render_pass_begin, VK_SUBPASS_CONTENTS_INLINE);
+    dfn.vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, post_process_pipeline_);
+    dfn.vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, post_process_pipeline_layout_,
+                                0, 1, &descriptor_set, 0, nullptr);
+    dfn.vkCmdPushConstants(cmd, post_process_pipeline_layout_, VK_SHADER_STAGE_FRAGMENT_BIT, 0,
+                           sizeof(constants), &constants);
+    dfn.vkCmdDraw(cmd, 3, 1, 0, 0);
+    dfn.vkCmdEndRenderPass(cmd);
+    dfn.vkEndCommandBuffer(cmd);
+
+    VkFenceCreateInfo fence_info{};
+    fence_info.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO;
+    VkFence fence = VK_NULL_HANDLE;
+    ok = dfn.vkCreateFence(device, &fence_info, nullptr, &fence) == VK_SUCCESS;
+    if (ok) {
+      VkSubmitInfo submit_info{};
+      submit_info.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+      submit_info.commandBufferCount = 1;
+      submit_info.pCommandBuffers = &cmd;
+      rex::ui::vulkan::VulkanDevice::Queue::Acquisition queue =
+          vulkan_device->AcquireQueue(vulkan_device->queue_family_graphics_compute(), 0);
+      ok = dfn.vkQueueSubmit(queue.queue(), 1, &submit_info, fence) == VK_SUCCESS;
+      if (ok) {
+        constexpr uint64_t kFenceTimeoutNs = 5'000'000'000ull;
+        ok = dfn.vkWaitForFences(device, 1, &fence, VK_TRUE, kFenceTimeoutNs) == VK_SUCCESS;
+      }
+      dfn.vkDestroyFence(device, fence, nullptr);
+    }
+    // vkFreeCommandBuffers isn't in this SDK's exposed Vulkan function table
+    // (see UploadTexelsAndTransition) -- leaked instead of freed, bounded by
+    // how often this specific texture actually re-uploads.
+  }
+
+  dfn.vkDestroyFramebuffer(device, framebuffer, nullptr);
+
+  if (!ok) {
+    REXGPU_ERROR("NativeCommandProcessor: post-process pass for the gameplay-preview texture failed");
+    dfn.vkDestroyImageView(device, filtered_view, nullptr);
+    dfn.vkDestroyImage(device, filtered_image, nullptr);
+    dfn.vkFreeMemory(device, filtered_memory, nullptr);
+    return false;
+  }
+
+  out_image = filtered_image;
+  out_memory = filtered_memory;
+  out_view = filtered_view;
+  return true;
+}
+
+void NativeCommandProcessor::DestroyPostProcessPipeline() {
+  const rex::ui::vulkan::VulkanDevice* vulkan_device = provider_->vulkan_device();
+  const rex::ui::vulkan::VulkanDevice::Functions& dfn = vulkan_device->functions();
+  VkDevice device = vulkan_device->device();
+
+  if (post_process_pipeline_ != VK_NULL_HANDLE)
+    dfn.vkDestroyPipeline(device, post_process_pipeline_, nullptr);
+  if (post_process_pipeline_layout_ != VK_NULL_HANDLE)
+    dfn.vkDestroyPipelineLayout(device, post_process_pipeline_layout_, nullptr);
+  if (post_process_descriptor_set_layout_ != VK_NULL_HANDLE)
+    dfn.vkDestroyDescriptorSetLayout(device, post_process_descriptor_set_layout_, nullptr);
+  if (post_process_descriptor_pool_ != VK_NULL_HANDLE)
+    dfn.vkDestroyDescriptorPool(device, post_process_descriptor_pool_, nullptr);
+  if (post_process_render_pass_ != VK_NULL_HANDLE)
+    dfn.vkDestroyRenderPass(device, post_process_render_pass_, nullptr);
+  if (post_process_vertex_shader_ != VK_NULL_HANDLE)
+    dfn.vkDestroyShaderModule(device, post_process_vertex_shader_, nullptr);
+  if (post_process_fragment_shader_ != VK_NULL_HANDLE)
+    dfn.vkDestroyShaderModule(device, post_process_fragment_shader_, nullptr);
+  if (post_process_sampler_ != VK_NULL_HANDLE)
+    dfn.vkDestroySampler(device, post_process_sampler_, nullptr);
+}
+
 NativeCommandProcessor::UploadedTexture* NativeCommandProcessor::GetOrUploadTexture(
     uint32_t fetch_constant_index) {
   using rex::graphics::xenos::DataDimension;
@@ -1454,6 +2017,30 @@ NativeCommandProcessor::UploadedTexture* NativeCommandProcessor::GetOrUploadText
     dfn.vkDestroyImage(device, texture.image, nullptr);
     dfn.vkFreeMemory(device, texture.memory, nullptr);
     return nullptr;
+  }
+
+  // Gameplay-preview texture (see the field comment on UploadedTexture --
+  // 852x480 is this texture's known real size, confirmed via the uploads
+  // logged below): optionally re-filter it with the SDK's own configured
+  // post-process shader before caching, toggleable independently of both
+  // this project's own cvar and the SDK's post_process_shader_enabled (both
+  // must be on). Swaps texture.image/memory/view to the filtered result on
+  // success; on any failure (feature off, no shader configured, compile
+  // error), texture keeps the raw nearest-sampled upload from just above, so
+  // this can never make an otherwise-working texture disappear.
+  if (width == 852 && height == 480 && REXCVAR_GET(nocturne_gameplay_preview_post_process)) {
+    VkImage filtered_image;
+    VkDeviceMemory filtered_memory;
+    VkImageView filtered_view;
+    if (ApplyGameplayPreviewPostProcess(texture.view, width, height, filtered_image,
+                                        filtered_memory, filtered_view)) {
+      dfn.vkDestroyImageView(device, texture.view, nullptr);
+      dfn.vkDestroyImage(device, texture.image, nullptr);
+      dfn.vkFreeMemory(device, texture.memory, nullptr);
+      texture.image = filtered_image;
+      texture.memory = filtered_memory;
+      texture.view = filtered_view;
+    }
   }
 
   auto [inserted, _] = texture_cache_.emplace(key, texture);
