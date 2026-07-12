@@ -9,10 +9,13 @@
 #include <cstring>
 #include <thread>
 
+#include <rex/cvar.h>
 #include <rex/graphics/pipeline/texture/util.h>
+#include <rex/graphics/video_mode_util.h>
 #include <rex/logging.h>
 #include <rex/string/buffer.h>
 #include <rex/system/kernel_state.h>
+#include <rex/ui/flags.h>
 #include <rex/ui/graphics_util.h>
 #include <rex/ui/vulkan/device.h>
 #include <rex/ui/vulkan/presenter.h>
@@ -20,13 +23,48 @@
 
 namespace nocturne {
 
-// Intro sequence resolution isn't known until milestone 3b decodes the
-// guest's render-target/viewport registers; hardcode a common 360 resolution
-// for the 3a clear-color proof (still used as the swapchain's guest-output
-// size in milestone 3b step 3 -- the offscreen color target below is what
-// actually gets blitted into it).
-constexpr uint32_t kPlaceholderWidth = 1280;
-constexpr uint32_t kPlaceholderHeight = 720;
+namespace {
+
+// Replicates xboxkrnl_video.cpp's GetConfiguredVideoModeWidth/Height (not
+// callable directly -- file-local there) so the render target this renderer
+// actually allocates matches what VdQueryVideoMode told the guest at boot,
+// instead of a hardcoded guess that silently stopped matching whenever
+// --resolution/video_mode_width/height picked anything other than 1280x720.
+uint32_t ResolveVideoModeWidth() {
+  int32_t configured_width = REXCVAR_GET(video_mode_width);
+  if (!rex::cvar::HasNonDefaultValue("video_mode_width")) {
+    if (rex::cvar::HasNonDefaultValue("window_width") && REXCVAR_GET(window_width) > 0) {
+      configured_width = REXCVAR_GET(window_width);
+    } else {
+      int32_t preset_width = 0;
+      int32_t preset_height = 0;
+      if (rex::graphics::video_mode_util::TryGetResolutionPresetFromCVar(preset_width,
+                                                                          preset_height)) {
+        configured_width = preset_width;
+      }
+    }
+  }
+  return uint32_t(std::clamp(configured_width, 640, 0x0FFF));
+}
+
+uint32_t ResolveVideoModeHeight() {
+  int32_t configured_height = REXCVAR_GET(video_mode_height);
+  if (!rex::cvar::HasNonDefaultValue("video_mode_height")) {
+    if (rex::cvar::HasNonDefaultValue("window_height") && REXCVAR_GET(window_height) > 0) {
+      configured_height = REXCVAR_GET(window_height);
+    } else {
+      int32_t preset_width = 0;
+      int32_t preset_height = 0;
+      if (rex::graphics::video_mode_util::TryGetResolutionPresetFromCVar(preset_width,
+                                                                          preset_height)) {
+        configured_height = preset_height;
+      }
+    }
+  }
+  return uint32_t(std::clamp(configured_height, 480, 0x0FFF));
+}
+
+}  // namespace
 
 namespace {
 
@@ -301,7 +339,10 @@ void FlushMapped(const rex::ui::vulkan::VulkanDevice* vulkan_device, VkDeviceMem
 
 NativeCommandProcessor::NativeCommandProcessor(rex::ui::vulkan::VulkanProvider* provider,
                                                 rex::ui::Presenter* presenter)
-    : provider_(provider), presenter_(presenter) {
+    : provider_(provider),
+      presenter_(presenter),
+      color_target_width_(ResolveVideoModeWidth()),
+      color_target_height_(ResolveVideoModeHeight()) {
   const rex::ui::vulkan::VulkanDevice* vulkan_device = provider_->vulkan_device();
   const rex::ui::vulkan::VulkanDevice::Functions& dfn = vulkan_device->functions();
   VkDevice device = vulkan_device->device();
@@ -585,7 +626,7 @@ bool NativeCommandProcessor::InitializePipelineResources() {
     image_info.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
     image_info.imageType = VK_IMAGE_TYPE_2D;
     image_info.format = VK_FORMAT_A2B10G10R10_UNORM_PACK32;
-    image_info.extent = {kColorTargetWidth, kColorTargetHeight, 1};
+    image_info.extent = {color_target_width_, color_target_height_, 1};
     image_info.mipLevels = 1;
     image_info.arrayLayers = 1;
     image_info.samples = VK_SAMPLE_COUNT_1_BIT;
@@ -658,8 +699,8 @@ bool NativeCommandProcessor::InitializePipelineResources() {
     framebuffer_info.renderPass = render_pass_;
     framebuffer_info.attachmentCount = 1;
     framebuffer_info.pAttachments = &color_target_view_;
-    framebuffer_info.width = kColorTargetWidth;
-    framebuffer_info.height = kColorTargetHeight;
+    framebuffer_info.width = color_target_width_;
+    framebuffer_info.height = color_target_height_;
     framebuffer_info.layers = 1;
     if (dfn.vkCreateFramebuffer(device, &framebuffer_info, nullptr, &framebuffer_) != VK_SUCCESS) {
       REXGPU_ERROR("NativeCommandProcessor: failed to create the framebuffer");
@@ -685,7 +726,7 @@ bool NativeCommandProcessor::InitializePipelineResources() {
   // color_target_staging_buffer_). A2B10G10R10_UNORM_PACK32 is 4 bytes/texel.
   {
     color_target_staging_size_ =
-        VkDeviceSize(kColorTargetWidth) * kColorTargetHeight * 4;
+        VkDeviceSize(color_target_width_) * color_target_height_ * 4;
     if (!rex::ui::vulkan::util::CreateDedicatedAllocationBuffer(
             vulkan_device, color_target_staging_size_,
             VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
@@ -1802,13 +1843,13 @@ void NativeCommandProcessor::TryResolveCopy() {
   y1 = std::clamp(y1, scissor_y0, scissor_y1);
 
   // Also clamp to the color target's own bounds -- this renderer's color
-  // target is a fixed kColorTargetWidth x kColorTargetHeight buffer, not a
+  // target is a fixed color_target_width_ x color_target_height_ buffer, not a
   // real EDRAM surface sized by RB_SURFACE_INFO, so a guest-specified
   // rectangle extending past it would read out of bounds below.
-  x0 = std::clamp(x0, 0, int32_t(kColorTargetWidth));
-  x1 = std::clamp(x1, 0, int32_t(kColorTargetWidth));
-  y0 = std::clamp(y0, 0, int32_t(kColorTargetHeight));
-  y1 = std::clamp(y1, 0, int32_t(kColorTargetHeight));
+  x0 = std::clamp(x0, 0, int32_t(color_target_width_));
+  x1 = std::clamp(x1, 0, int32_t(color_target_width_));
+  y0 = std::clamp(y0, 0, int32_t(color_target_height_));
+  y1 = std::clamp(y1, 0, int32_t(color_target_height_));
   if (x0 >= x1 || y0 >= y1) {
     return;
   }
@@ -1868,7 +1909,7 @@ void NativeCommandProcessor::TryResolveCopy() {
 
   VkBufferImageCopy buffer_image_copy{};
   buffer_image_copy.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
-  buffer_image_copy.imageExtent = {kColorTargetWidth, kColorTargetHeight, 1};
+  buffer_image_copy.imageExtent = {color_target_width_, color_target_height_, 1};
   dfn.vkCmdCopyImageToBuffer(command_buffer_, color_target_image_,
                              VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, readback_buffer, 1,
                              &buffer_image_copy);
@@ -1909,7 +1950,7 @@ void NativeCommandProcessor::TryResolveCopy() {
       for (uint32_t x = 0; x < width; ++x) {
         uint32_t src_x = x0 + x;
         uint32_t src_y = y0 + y;
-        uint32_t packed = src_pixels[src_y * kColorTargetWidth + src_x];
+        uint32_t packed = src_pixels[src_y * color_target_width_ + src_x];
         uint8_t rgba[4];
         // A2B10G10R10_UNORM_PACK32: R in bits 0-9, G in 10-19, B in 20-29,
         // A in 30-31 -- downsampled to 8 bits/channel (truncated, not
@@ -1972,7 +2013,7 @@ void NativeCommandProcessor::TryResolveCopy() {
   rp_begin.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
   rp_begin.renderPass = render_pass_continue_;
   rp_begin.framebuffer = framebuffer_;
-  rp_begin.renderArea.extent = {kColorTargetWidth, kColorTargetHeight};
+  rp_begin.renderArea.extent = {color_target_width_, color_target_height_};
   dfn.vkCmdBeginRenderPass(command_buffer_, &rp_begin, VK_SUBPASS_CONTENTS_INLINE);
 }
 
@@ -2032,18 +2073,18 @@ void NativeCommandProcessor::EnsureFrameBegun() {
   rp_begin.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
   rp_begin.renderPass = render_pass_;
   rp_begin.framebuffer = framebuffer_;
-  rp_begin.renderArea = {{0, 0}, {kColorTargetWidth, kColorTargetHeight}};
+  rp_begin.renderArea = {{0, 0}, {color_target_width_, color_target_height_}};
   rp_begin.clearValueCount = 1;
   rp_begin.pClearValues = &clear_value;
   dfn.vkCmdBeginRenderPass(command_buffer_, &rp_begin, VK_SUBPASS_CONTENTS_INLINE);
 
   VkViewport viewport{0.0f,
                       0.0f,
-                      float(kColorTargetWidth),
-                      float(kColorTargetHeight),
+                      float(color_target_width_),
+                      float(color_target_height_),
                       0.0f,
                       1.0f};
-  VkRect2D scissor{{0, 0}, {kColorTargetWidth, kColorTargetHeight}};
+  VkRect2D scissor{{0, 0}, {color_target_width_, color_target_height_}};
   dfn.vkCmdSetViewport(command_buffer_, 0, 1, &viewport);
   dfn.vkCmdSetScissor(command_buffer_, 0, 1, &scissor);
 
@@ -2416,7 +2457,7 @@ void NativeCommandProcessor::TryDraw(rex::graphics::xenos::PrimitiveType prim_ty
       // vertex shader output is treated directly as pixel coordinates, no
       // host clipping -- map [0, extent] pixels to [-1, 1] NDC ourselves.
       for (uint32_t i = 0; i < 2; ++i) {
-        float extent = i ? float(kColorTargetHeight) : float(kColorTargetWidth);
+        float extent = i ? float(color_target_height_) : float(color_target_width_);
         float pixels_to_ndc = 2.0f / extent;
         system_constants.ndc_scale[i] = scale_xy[i] * pixels_to_ndc;
         system_constants.ndc_offset[i] =
@@ -2741,7 +2782,7 @@ void NativeCommandProcessor::DebugDumpColorTarget() {
     dfn.vkInvalidateMappedMemoryRanges(device, 1, &range);
     char path[256];
     std::snprintf(path, sizeof(path), "logs/debug_color_target_%u_%ux%u_a2b10g10r10.raw",
-                 debug_frames_dumped_, kColorTargetWidth, kColorTargetHeight);
+                 debug_frames_dumped_, color_target_width_, color_target_height_);
     FILE* f = std::fopen(path, "wb");
     if (f) {
       std::fwrite(mapped, 1, color_target_staging_size_, f);
@@ -2782,7 +2823,7 @@ void NativeCommandProcessor::PresentFrame() {
   dfn.vkCmdEndRenderPass(command_buffer_);
 
   bool refreshed = presenter_->RefreshGuestOutput(
-      kPlaceholderWidth, kPlaceholderHeight, kPlaceholderWidth, kPlaceholderHeight,
+      color_target_width_, color_target_height_, color_target_width_, color_target_height_,
       [this, vulkan_device, &dfn, device](
           rex::ui::Presenter::GuestOutputRefreshContext& context) -> bool {
         auto& vulkan_context =
@@ -2819,17 +2860,13 @@ void NativeCommandProcessor::PresentFrame() {
         // output image, relayed through a staging buffer: neither
         // vkCmdBlitImage nor vkCmdCopyImage (image-to-image) is in this
         // SDK's exposed Vulkan function table, only buffer<->image copies
-        // are. This is exact (no scaling/format conversion needed) since
-        // color_target_image_ is kColorTargetWidth x kColorTargetHeight ==
-        // kPlaceholderWidth x kPlaceholderHeight and was deliberately
-        // created in kGuestOutputFormat (VK_FORMAT_A2B10G10R10_UNORM_PACK32)
-        // to match.
-        static_assert(kColorTargetWidth == kPlaceholderWidth &&
-                          kColorTargetHeight == kPlaceholderHeight,
-                      "color target and guest output sizes must match for this staged copy");
+        // are. This is exact (no scaling/format conversion needed) since both
+        // color_target_image_ and the guest output image are created at
+        // color_target_width_ x color_target_height_, in kGuestOutputFormat
+        // (VK_FORMAT_A2B10G10R10_UNORM_PACK32).
         VkBufferImageCopy buffer_image_copy{};
         buffer_image_copy.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
-        buffer_image_copy.imageExtent = {kColorTargetWidth, kColorTargetHeight, 1};
+        buffer_image_copy.imageExtent = {color_target_width_, color_target_height_, 1};
         dfn.vkCmdCopyImageToBuffer(command_buffer_, color_target_image_,
                                    VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
                                    color_target_staging_buffer_, 1, &buffer_image_copy);

@@ -311,8 +311,18 @@ class NativeCommandProcessor {
   uint32_t shared_memory_memory_type_ = 0;
   uint8_t* shared_memory_mapped_ = nullptr;
 
-  static constexpr uint32_t kColorTargetWidth = 1280;
-  static constexpr uint32_t kColorTargetHeight = 720;
+  // Matches the guest's actual configured video mode (video_mode_width/
+  // height, or window_width/height, or a --resolution preset -- see
+  // xboxkrnl_video.cpp's GetConfiguredVideoModeWidth/Height, replicated in
+  // native_command_processor.cpp since those helpers are file-local there).
+  // Resolved once at construction: the guest queries its video mode once at
+  // boot (VdQueryVideoMode) and sets its viewport registers to match, so a
+  // renderer whose actual target size didn't match would scale every 2D
+  // draw by (guest's assumed size / this size) and crop to this size's
+  // top-left corner -- exactly what happened when this was a hardcoded
+  // 1280x720 constant and the game was launched with --resolution 1080p.
+  const uint32_t color_target_width_;
+  const uint32_t color_target_height_;
   VkImage color_target_image_ = VK_NULL_HANDLE;
   VkDeviceMemory color_target_memory_ = VK_NULL_HANDLE;
   VkImageView color_target_view_ = VK_NULL_HANDLE;
