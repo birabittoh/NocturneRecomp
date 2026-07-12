@@ -29,10 +29,9 @@
 // that same configured shader to just the gameplay-preview texture instead of
 // the whole composited frame. Off by default -- this is a narrower, opt-in
 // variant of an already-opt-in SDK feature.
-REXCVAR_DEFINE_BOOL(nocturne_gameplay_preview_post_process, false, "GPU",
+REXCVAR_DEFINE_BOOL(scanlines, false, "GPU",
                     "Apply the game's configured post-process shader "
-                    "(post_process_shader_path, when post_process_shader_enabled) to just the "
-                    "gameplay-preview texture instead of the whole screen.")
+                    "to just the gameplay instead of the whole screen.")
     .lifecycle(rex::cvar::Lifecycle::kHotReload);
 
 namespace nocturne {
@@ -1596,7 +1595,7 @@ bool NativeCommandProcessor::ApplyGameplayPreviewPostProcess(VkImageView source_
                                                               VkDeviceMemory& out_memory,
                                                               VkImageView& out_view) {
   // Deliberately independent of post_process_shader_enabled (the SDK's own
-  // whole-screen toggle): nocturne_gameplay_preview_post_process is this
+  // whole-screen toggle): the scanlines cvar is this
   // texture's own on/off switch, so the two can be set differently (e.g.
   // scanlines only on the preview, a clean full screen otherwise). Only
   // post_process_shader_path (the actual shader source) is shared.
@@ -2054,7 +2053,7 @@ NativeCommandProcessor::UploadedTexture* NativeCommandProcessor::GetOrUploadText
   // confirmed): sampled with gameplay_preview_sampler_ (nearest) instead of
   // default_sampler_ (bilinear) in TryDraw, and optionally re-filtered with
   // the SDK's own configured post-process shader before caching here,
-  // toggleable via nocturne_gameplay_preview_post_process independently of
+  // toggleable via the scanlines cvar independently of
   // the SDK's post_process_shader_enabled. Swaps texture.image/memory/view
   // to the filtered result on success; on any failure (feature off, no
   // shader configured, compile error), texture keeps the raw upload from
@@ -2062,7 +2061,7 @@ NativeCommandProcessor::UploadedTexture* NativeCommandProcessor::GetOrUploadText
   // disappear.
   texture.is_gameplay_preview =
       width == kGameplayPreviewWidth && height == kGameplayPreviewHeight;
-  if (texture.is_gameplay_preview && REXCVAR_GET(nocturne_gameplay_preview_post_process)) {
+  if (texture.is_gameplay_preview && REXCVAR_GET(scanlines)) {
     VkImage filtered_image;
     VkDeviceMemory filtered_memory;
     VkImageView filtered_view;
