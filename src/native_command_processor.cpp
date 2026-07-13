@@ -4,8 +4,10 @@
 
 #include "native_command_processor.h"
 
+#include <chrono>
 #include <cmath>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <string>
 #include <thread>
@@ -456,7 +458,11 @@ bool NativeCommandProcessor::InitializePipelineResources() {
     binding.binding = 0;
     binding.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
     binding.descriptorCount = 1;
-    binding.stageFlags = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT;
+    // TESSELLATION_EVALUATION included because tessellated draws run the
+    // guest "vertex" shader -- and therefore its SSBO vertex fetches -- in
+    // the TES stage (see CreateTessellationHostShaders).
+    binding.stageFlags = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT |
+                         VK_SHADER_STAGE_TESSELLATION_EVALUATION_BIT;
     VkDescriptorSetLayoutCreateInfo layout_info{};
     layout_info.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
     layout_info.bindingCount = 1;
@@ -479,16 +485,22 @@ bool NativeCommandProcessor::InitializePipelineResources() {
       bindings[i].descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
       bindings[i].descriptorCount = 1;
     }
+    // Every "vertex" buffer also gets TESSELLATION_EVALUATION -- tessellated
+    // draws run the guest vertex shader in the TES stage (see
+    // CreateTessellationHostShaders).
     bindings[SpirvShaderTranslator::kConstantBufferSystem].stageFlags =
-        VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT;
+        VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT |
+        VK_SHADER_STAGE_TESSELLATION_EVALUATION_BIT;
     bindings[SpirvShaderTranslator::kConstantBufferFloatVertex].stageFlags =
-        VK_SHADER_STAGE_VERTEX_BIT;
+        VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_TESSELLATION_EVALUATION_BIT;
     bindings[SpirvShaderTranslator::kConstantBufferFloatPixel].stageFlags =
         VK_SHADER_STAGE_FRAGMENT_BIT;
     bindings[SpirvShaderTranslator::kConstantBufferBoolLoop].stageFlags =
-        VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT;
+        VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT |
+        VK_SHADER_STAGE_TESSELLATION_EVALUATION_BIT;
     bindings[SpirvShaderTranslator::kConstantBufferFetch].stageFlags =
-        VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT;
+        VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT |
+        VK_SHADER_STAGE_TESSELLATION_EVALUATION_BIT;
 
     VkDescriptorSetLayoutCreateInfo layout_info{};
     layout_info.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
@@ -814,6 +826,10 @@ bool NativeCommandProcessor::InitializePipelineResources() {
     }
   }
 
+  // Non-fatal: tessellated draws are just skipped if this fails (logged
+  // inside) -- everything else renders fine without it.
+  CreateTessellationHostShaders();
+
   return true;
 }
 
@@ -840,6 +856,14 @@ void NativeCommandProcessor::DestroyPipelineResources() {
     }
   }
   texture_set_layout_cache_.clear();
+  if (tess_control_point_vs_ != VK_NULL_HANDLE) {
+    dfn.vkDestroyShaderModule(device, tess_control_point_vs_, nullptr);
+    tess_control_point_vs_ = VK_NULL_HANDLE;
+  }
+  if (tess_quad_tcs_ != VK_NULL_HANDLE) {
+    dfn.vkDestroyShaderModule(device, tess_quad_tcs_, nullptr);
+    tess_quad_tcs_ = VK_NULL_HANDLE;
+  }
   for (auto& [key, entry] : shader_cache_) {
     if (entry.module != VK_NULL_HANDLE) {
       dfn.vkDestroyShaderModule(device, entry.module, nullptr);
@@ -886,6 +910,12 @@ void NativeCommandProcessor::DestroyPipelineResources() {
   if (default_sampler_ != VK_NULL_HANDLE) dfn.vkDestroySampler(device, default_sampler_, nullptr);
   if (gameplay_preview_sampler_ != VK_NULL_HANDLE)
     dfn.vkDestroySampler(device, gameplay_preview_sampler_, nullptr);
+  for (auto& [key, sampler] : sampler_cache_) {
+    if (sampler != VK_NULL_HANDLE) {
+      dfn.vkDestroySampler(device, sampler, nullptr);
+    }
+  }
+  sampler_cache_.clear();
 
   if (transient_descriptor_pool_ != VK_NULL_HANDLE)
     dfn.vkDestroyDescriptorPool(device, transient_descriptor_pool_, nullptr);
@@ -1102,6 +1132,12 @@ void NativeCommandProcessor::OnDraw(const rex::graphics::PacketInfo& info,
         index_buffer_size_words);
   }
 
+  // Mirror the initiator into the register file (on real hardware
+  // PM4_DRAW_INDX's first payload dword *is* a VGT_DRAW_INITIATOR register
+  // write, but this decode path never routes it through a RegisterWrite
+  // action) -- TryDraw reads major_mode from it for tessellation detection.
+  registers_[rex::graphics::XE_GPU_REG_VGT_DRAW_INITIATOR] = initiator.value;
+
   TryDraw(initiator.prim_type, num_indices);
 }
 
@@ -1215,7 +1251,8 @@ void NativeCommandProcessor::SetShaderDisabledByHash(uint64_t xxh3_ucode_hash, b
 
 NativeCommandProcessor::TranslatedShader* NativeCommandProcessor::GetOrTranslateShader(
     rex::graphics::xenos::ShaderType type, const std::vector<uint32_t>& ucode,
-    uint32_t interpolator_mask, rex::graphics::Shader::HostVertexShaderType host_vertex_shader_type) {
+    uint32_t interpolator_mask, rex::graphics::Shader::HostVertexShaderType host_vertex_shader_type,
+    uint32_t tessellation_mode) {
   rex::graphics::Shader* shader = GetOrAnalyzeShader(type, ucode);
   if (!shader) {
     return nullptr;
@@ -1229,7 +1266,8 @@ NativeCommandProcessor::TranslatedShader* NativeCommandProcessor::GetOrTranslate
   // aliasing onto the wrong one.
   uint64_t key = HashUcode(ucode) ^
                 (type == rex::graphics::xenos::ShaderType::kVertex ? 0x1ull : 0x2ull) ^
-                (uint64_t(host_vertex_shader_type) << 8) ^ (uint64_t(interpolator_mask) << 16);
+                (uint64_t(host_vertex_shader_type) << 8) ^ (uint64_t(tessellation_mode) << 14) ^
+                (uint64_t(interpolator_mask) << 16);
   auto existing = shader_cache_.find(key);
   if (existing != shader_cache_.end()) {
     return &existing->second;
@@ -1273,6 +1311,9 @@ NativeCommandProcessor::TranslatedShader* NativeCommandProcessor::GetOrTranslate
   // simply never wired up. See docs/native-renderer-headless-boot.md.
   if (type == rex::graphics::xenos::ShaderType::kVertex) {
     modification.vertex.interpolator_mask = interpolator_mask;
+    // Selects the TES spacing execution mode (equal vs fractional-even) for
+    // domain host vertex shader types; ignored otherwise.
+    modification.vertex.tessellation_mode = tessellation_mode & 0x3;
   } else {
     modification.pixel.interpolator_mask = interpolator_mask;
   }
@@ -1468,7 +1509,170 @@ struct PostProcessConstants {
 };
 static_assert(sizeof(PostProcessConstants) == 48);
 
+// Host-side stages for tessellated quad-patch draws (see the header comment
+// on CreateTessellationHostShaders). Assembled from text via SPIRV-Tools,
+// same rationale as kFullscreenTriangleVertexShaderSpirvAsm above.
+//
+// Vertex stage: one invocation per control point, exports gl_VertexIndex as
+// a float at location 0 -- the per-control-point index the TCS gathers.
+// Mirrors the D3D12 backend's tessellation_indexed_vs/"XEVERTEXID" scheme.
+constexpr char kTessellationControlPointVertexShaderSpirvAsm[] = R"(
+OpCapability Shader
+OpMemoryModel Logical GLSL450
+OpEntryPoint Vertex %main "main" %gl_VertexIndex %out_index
+OpDecorate %gl_VertexIndex BuiltIn VertexIndex
+OpDecorate %out_index Location 0
+%void = OpTypeVoid
+%voidfn = OpTypeFunction %void
+%int = OpTypeInt 32 1
+%float = OpTypeFloat 32
+%ptr_in_int = OpTypePointer Input %int
+%ptr_out_float = OpTypePointer Output %float
+%gl_VertexIndex = OpVariable %ptr_in_int Input
+%out_index = OpVariable %ptr_out_float Output
+%main = OpFunction %void None %voidfn
+%entry = OpLabel
+%vidx = OpLoad %int %gl_VertexIndex
+%fidx = OpConvertSToF %float %vidx
+OpStore %out_index %fidx
+OpReturn
+OpFunctionEnd
+)";
+
+// Tessellation control stage for 4-control-point quad patches: gathers the 4
+// control point indices into the per-patch float4 the SDK's quad-domain TES
+// translation reads (SpirvShaderTranslator's xe_in_patch_control_point_indices
+// -- patch-decorated, location 0), and sets every tessellation level to the
+// factor pushed per draw (VGT_HOS_MAX_TESS_LEVEL + 1.0, matching the real
+// backend's tessellation_factor_range_max and the D3D12 discrete_quad_4cp_hs
+// hull shader's use of it). All 4 invocations write identical values to the
+// patch outputs, which SPIR-V explicitly permits, so no per-invocation
+// branching is needed.
+constexpr char kTessellationQuadControlShaderSpirvAsm[] = R"(
+OpCapability Tessellation
+OpMemoryModel Logical GLSL450
+OpEntryPoint TessellationControl %main "main" %in_index %out_cp_indices %gl_TessLevelOuter %gl_TessLevelInner
+OpExecutionMode %main OutputVertices 4
+OpDecorate %in_index Location 0
+OpDecorate %out_cp_indices Location 0
+OpDecorate %out_cp_indices Patch
+OpDecorate %gl_TessLevelOuter BuiltIn TessLevelOuter
+OpDecorate %gl_TessLevelOuter Patch
+OpDecorate %gl_TessLevelInner BuiltIn TessLevelInner
+OpDecorate %gl_TessLevelInner Patch
+OpMemberDecorate %pc_struct 0 Offset 0
+OpDecorate %pc_struct Block
+%void = OpTypeVoid
+%voidfn = OpTypeFunction %void
+%int = OpTypeInt 32 1
+%uint = OpTypeInt 32 0
+%float = OpTypeFloat 32
+%v4float = OpTypeVector %float 4
+%uint_2 = OpConstant %uint 2
+%uint_4 = OpConstant %uint 4
+%uint_32 = OpConstant %uint 32
+%int_0 = OpConstant %int 0
+%int_1 = OpConstant %int 1
+%int_2 = OpConstant %int 2
+%int_3 = OpConstant %int 3
+%arr_in = OpTypeArray %float %uint_32
+%ptr_in_arr = OpTypePointer Input %arr_in
+%ptr_in_float = OpTypePointer Input %float
+%in_index = OpVariable %ptr_in_arr Input
+%ptr_out_v4 = OpTypePointer Output %v4float
+%out_cp_indices = OpVariable %ptr_out_v4 Output
+%arr_outer = OpTypeArray %float %uint_4
+%ptr_out_arr4 = OpTypePointer Output %arr_outer
+%gl_TessLevelOuter = OpVariable %ptr_out_arr4 Output
+%arr_inner = OpTypeArray %float %uint_2
+%ptr_out_arr2 = OpTypePointer Output %arr_inner
+%gl_TessLevelInner = OpVariable %ptr_out_arr2 Output
+%pc_struct = OpTypeStruct %float
+%ptr_pc = OpTypePointer PushConstant %pc_struct
+%pc = OpVariable %ptr_pc PushConstant
+%ptr_pc_float = OpTypePointer PushConstant %float
+%ptr_out_float = OpTypePointer Output %float
+%main = OpFunction %void None %voidfn
+%entry = OpLabel
+%in0p = OpAccessChain %ptr_in_float %in_index %int_0
+%in0 = OpLoad %float %in0p
+%in1p = OpAccessChain %ptr_in_float %in_index %int_1
+%in1 = OpLoad %float %in1p
+%in2p = OpAccessChain %ptr_in_float %in_index %int_2
+%in2 = OpLoad %float %in2p
+%in3p = OpAccessChain %ptr_in_float %in_index %int_3
+%in3 = OpLoad %float %in3p
+%cps = OpCompositeConstruct %v4float %in0 %in1 %in2 %in3
+OpStore %out_cp_indices %cps
+%factorp = OpAccessChain %ptr_pc_float %pc %int_0
+%factor = OpLoad %float %factorp
+%outer0 = OpAccessChain %ptr_out_float %gl_TessLevelOuter %int_0
+OpStore %outer0 %factor
+%outer1 = OpAccessChain %ptr_out_float %gl_TessLevelOuter %int_1
+OpStore %outer1 %factor
+%outer2 = OpAccessChain %ptr_out_float %gl_TessLevelOuter %int_2
+OpStore %outer2 %factor
+%outer3 = OpAccessChain %ptr_out_float %gl_TessLevelOuter %int_3
+OpStore %outer3 %factor
+%inner0 = OpAccessChain %ptr_out_float %gl_TessLevelInner %int_0
+OpStore %inner0 %factor
+%inner1 = OpAccessChain %ptr_out_float %gl_TessLevelInner %int_1
+OpStore %inner1 %factor
+OpReturn
+OpFunctionEnd
+)";
+
+// Assembles one of the SPIR-V text constants above into a VkShaderModule,
+// VK_NULL_HANDLE on failure (logged).
+VkShaderModule AssembleShaderModule(const rex::ui::vulkan::VulkanDevice* vulkan_device,
+                                    const char* spirv_asm, size_t spirv_asm_length,
+                                    const char* debug_name) {
+  spv_context spirv_context = spvContextCreate(SPV_ENV_VULKAN_1_0);
+  spv_binary assembled = nullptr;
+  spv_diagnostic diagnostic = nullptr;
+  spv_result_t assemble_result =
+      spvTextToBinary(spirv_context, spirv_asm, spirv_asm_length, &assembled, &diagnostic);
+  if (assemble_result != SPV_SUCCESS) {
+    REXGPU_ERROR("NativeCommandProcessor: failed to assemble {}: {}", debug_name,
+                diagnostic ? diagnostic->error : "unknown error");
+    if (diagnostic) spvDiagnosticDestroy(diagnostic);
+    spvContextDestroy(spirv_context);
+    return VK_NULL_HANDLE;
+  }
+  VkShaderModuleCreateInfo module_info{};
+  module_info.sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO;
+  module_info.codeSize = assembled->wordCount * sizeof(uint32_t);
+  module_info.pCode = assembled->code;
+  VkShaderModule module = VK_NULL_HANDLE;
+  VkResult module_result = vulkan_device->functions().vkCreateShaderModule(
+      vulkan_device->device(), &module_info, nullptr, &module);
+  spvBinaryDestroy(assembled);
+  spvContextDestroy(spirv_context);
+  if (module_result != VK_SUCCESS) {
+    REXGPU_ERROR("NativeCommandProcessor: failed to create the {} module", debug_name);
+    return VK_NULL_HANDLE;
+  }
+  return module;
+}
+
 }  // namespace
+
+bool NativeCommandProcessor::CreateTessellationHostShaders() {
+  const rex::ui::vulkan::VulkanDevice* vulkan_device = provider_->vulkan_device();
+  if (!vulkan_device->properties().tessellationShader) {
+    REXGPU_INFO(
+        "NativeCommandProcessor: device has no tessellation support -- tessellated draws (the "
+        "title-screen smoke overlay) will be skipped");
+    return false;
+  }
+  tess_control_point_vs_ = AssembleShaderModule(
+      vulkan_device, kTessellationControlPointVertexShaderSpirvAsm,
+      sizeof(kTessellationControlPointVertexShaderSpirvAsm) - 1, "tessellation passthrough VS");
+  tess_quad_tcs_ = AssembleShaderModule(vulkan_device, kTessellationQuadControlShaderSpirvAsm,
+                                        sizeof(kTessellationQuadControlShaderSpirvAsm) - 1,
+                                        "tessellation quad TCS");
+  return tess_control_point_vs_ != VK_NULL_HANDLE && tess_quad_tcs_ != VK_NULL_HANDLE;
+}
 
 bool NativeCommandProcessor::EnsurePostProcessPipeline() {
   const rex::ui::vulkan::VulkanDevice* vulkan_device = provider_->vulkan_device();
@@ -2259,6 +2463,61 @@ void NativeCommandProcessor::DestroyTextureCache() {
   texture_cache_.clear();
 }
 
+VkSampler NativeCommandProcessor::GetOrCreateSampler(rex::graphics::xenos::ClampMode clamp_x,
+                                                     rex::graphics::xenos::ClampMode clamp_y,
+                                                     rex::graphics::xenos::ClampMode clamp_z,
+                                                     bool nearest) {
+  uint32_t key = (uint32_t(clamp_x) << 0) | (uint32_t(clamp_y) << 3) | (uint32_t(clamp_z) << 6) |
+                (nearest ? 1u << 9 : 0);
+  auto existing = sampler_cache_.find(key);
+  if (existing != sampler_cache_.end()) {
+    return existing->second;
+  }
+
+  // Same approximations as the SDK Vulkan backend: the halfway/border modes
+  // Vulkan has no exact equivalent for degrade to the nearest edge-clamping
+  // behavior.
+  auto to_vk_address_mode = [](rex::graphics::xenos::ClampMode mode) {
+    using CM = rex::graphics::xenos::ClampMode;
+    switch (mode) {
+      case CM::kRepeat:
+        return VK_SAMPLER_ADDRESS_MODE_REPEAT;
+      case CM::kMirroredRepeat:
+        return VK_SAMPLER_ADDRESS_MODE_MIRRORED_REPEAT;
+      case CM::kMirrorClampToEdge:
+      case CM::kMirrorClampToHalfway:
+      case CM::kMirrorClampToBorder:
+        return VK_SAMPLER_ADDRESS_MODE_MIRRORED_REPEAT;
+      case CM::kClampToBorder:
+        return VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_BORDER;
+      case CM::kClampToEdge:
+      case CM::kClampToHalfway:
+      default:
+        return VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+    }
+  };
+
+  VkSamplerCreateInfo sampler_info{};
+  sampler_info.sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO;
+  sampler_info.magFilter = nearest ? VK_FILTER_NEAREST : VK_FILTER_LINEAR;
+  sampler_info.minFilter = nearest ? VK_FILTER_NEAREST : VK_FILTER_LINEAR;
+  sampler_info.mipmapMode = VK_SAMPLER_MIPMAP_MODE_NEAREST;
+  sampler_info.addressModeU = to_vk_address_mode(clamp_x);
+  sampler_info.addressModeV = to_vk_address_mode(clamp_y);
+  sampler_info.addressModeW = to_vk_address_mode(clamp_z);
+  sampler_info.maxLod = 0.0f;
+  const rex::ui::vulkan::VulkanDevice* vulkan_device = provider_->vulkan_device();
+  VkSampler sampler = VK_NULL_HANDLE;
+  if (vulkan_device->functions().vkCreateSampler(vulkan_device->device(), &sampler_info, nullptr,
+                                                 &sampler) != VK_SUCCESS) {
+    REXGPU_ERROR("NativeCommandProcessor: failed to create a sampler (clamp=({},{},{}))",
+                uint32_t(clamp_x), uint32_t(clamp_y), uint32_t(clamp_z));
+    return VK_NULL_HANDLE;
+  }
+  sampler_cache_.emplace(key, sampler);
+  return sampler;
+}
+
 VkDescriptorSetLayout NativeCommandProcessor::GetOrCreateTextureSetLayout(uint32_t texture_count,
                                                                           uint32_t sampler_count) {
   uint64_t key = (uint64_t(texture_count) << 32) | sampler_count;
@@ -2278,7 +2537,8 @@ VkDescriptorSetLayout NativeCommandProcessor::GetOrCreateTextureSetLayout(uint32
     binding.binding = i;
     binding.descriptorType = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE;
     binding.descriptorCount = 1;
-    binding.stageFlags = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT;
+    binding.stageFlags = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT |
+                         VK_SHADER_STAGE_TESSELLATION_EVALUATION_BIT;
     bindings.push_back(binding);
   }
   for (uint32_t i = 0; i < sampler_count; ++i) {
@@ -2286,7 +2546,8 @@ VkDescriptorSetLayout NativeCommandProcessor::GetOrCreateTextureSetLayout(uint32
     binding.binding = texture_count + i;
     binding.descriptorType = VK_DESCRIPTOR_TYPE_SAMPLER;
     binding.descriptorCount = 1;
-    binding.stageFlags = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT;
+    binding.stageFlags = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT |
+                         VK_SHADER_STAGE_TESSELLATION_EVALUATION_BIT;
     bindings.push_back(binding);
   }
 
@@ -2329,10 +2590,21 @@ VkPipelineLayout NativeCommandProcessor::GetOrCreatePipelineLayout(uint32_t vert
 
   VkDescriptorSetLayout set_layouts[4] = {shared_memory_layout_, constants_layout_,
                                           vertex_texture_layout, pixel_texture_layout};
+  // Tessellation factor for tessellated quad-patch draws, read by the fixed
+  // quad TCS (see CreateTessellationHostShaders) and pushed per draw in
+  // TryDraw. Declared on every layout (harmless for pipelines without
+  // tessellation stages) so tessellated and plain pipelines stay
+  // layout-compatible and share this cache.
+  VkPushConstantRange push_constant_range{};
+  push_constant_range.stageFlags = VK_SHADER_STAGE_TESSELLATION_CONTROL_BIT;
+  push_constant_range.offset = 0;
+  push_constant_range.size = sizeof(float);
   VkPipelineLayoutCreateInfo layout_info{};
   layout_info.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
   layout_info.setLayoutCount = 4;
   layout_info.pSetLayouts = set_layouts;
+  layout_info.pushConstantRangeCount = 1;
+  layout_info.pPushConstantRanges = &push_constant_range;
 
   const rex::ui::vulkan::VulkanDevice* vulkan_device = provider_->vulkan_device();
   VkPipelineLayout layout = VK_NULL_HANDLE;
@@ -2350,10 +2622,12 @@ VkPipelineLayout NativeCommandProcessor::GetOrCreatePipelineLayout(uint32_t vert
 
 NativeCommandProcessor::PipelineEntry NativeCommandProcessor::GetOrCreatePipeline(
     TranslatedShader* vertex_shader, TranslatedShader* pixel_shader, VkPrimitiveTopology topology,
-    bool primitive_restart_enable, uint32_t blend_control, uint32_t color_write_mask) {
+    bool primitive_restart_enable, uint32_t blend_control, uint32_t color_write_mask,
+    bool tessellated_quad) {
   uint64_t key = reinterpret_cast<uintptr_t>(vertex_shader) ^
                 (reinterpret_cast<uintptr_t>(pixel_shader) * 3) ^ (uint64_t(topology) << 1) ^
                 (primitive_restart_enable ? 0x8000000000000000ull : 0) ^
+                (tessellated_quad ? 0x4000000000000000ull : 0) ^
                 (uint64_t(blend_control) << 20) ^ (uint64_t(color_write_mask) << 8);
   auto existing = pipeline_cache_.find(key);
   if (existing != pipeline_cache_.end()) {
@@ -2402,14 +2676,38 @@ NativeCommandProcessor::PipelineEntry NativeCommandProcessor::GetOrCreatePipelin
   const rex::ui::vulkan::VulkanDevice::Functions& dfn = vulkan_device->functions();
   VkDevice device = vulkan_device->device();
 
-  VkPipelineShaderStageCreateInfo stages[2]{};
-  stages[0].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
-  stages[0].stage = VK_SHADER_STAGE_VERTEX_BIT;
-  stages[0].module = vertex_shader->module;
-  stages[0].pName = "main";
-  stages[1] = stages[0];
-  stages[1].stage = VK_SHADER_STAGE_FRAGMENT_BIT;
-  stages[1].module = pixel_shader->module;
+  // Plain draws: [VS, FS]. Tessellated quad-patch draws: [passthrough VS,
+  // quad TCS, guest shader as TES, FS] -- see CreateTessellationHostShaders.
+  VkPipelineShaderStageCreateInfo stages[4]{};
+  uint32_t stage_count;
+  if (tessellated_quad) {
+    if (tess_control_point_vs_ == VK_NULL_HANDLE || tess_quad_tcs_ == VK_NULL_HANDLE) {
+      return {};
+    }
+    stage_count = 4;
+    stages[0].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+    stages[0].stage = VK_SHADER_STAGE_VERTEX_BIT;
+    stages[0].module = tess_control_point_vs_;
+    stages[0].pName = "main";
+    stages[1] = stages[0];
+    stages[1].stage = VK_SHADER_STAGE_TESSELLATION_CONTROL_BIT;
+    stages[1].module = tess_quad_tcs_;
+    stages[2] = stages[0];
+    stages[2].stage = VK_SHADER_STAGE_TESSELLATION_EVALUATION_BIT;
+    stages[2].module = vertex_shader->module;
+    stages[3] = stages[0];
+    stages[3].stage = VK_SHADER_STAGE_FRAGMENT_BIT;
+    stages[3].module = pixel_shader->module;
+  } else {
+    stage_count = 2;
+    stages[0].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+    stages[0].stage = VK_SHADER_STAGE_VERTEX_BIT;
+    stages[0].module = vertex_shader->module;
+    stages[0].pName = "main";
+    stages[1] = stages[0];
+    stages[1].stage = VK_SHADER_STAGE_FRAGMENT_BIT;
+    stages[1].module = pixel_shader->module;
+  }
 
   // No classic vertex input state: translated shaders read vertex data via
   // raw shared-memory (SSBO) loads computed from the guest vertex fetch
@@ -2496,12 +2794,17 @@ NativeCommandProcessor::PipelineEntry NativeCommandProcessor::GetOrCreatePipelin
   dynamic_state.dynamicStateCount = 2;
   dynamic_state.pDynamicStates = dynamic_states;
 
+  VkPipelineTessellationStateCreateInfo tessellation_state{};
+  tessellation_state.sType = VK_STRUCTURE_TYPE_PIPELINE_TESSELLATION_STATE_CREATE_INFO;
+  tessellation_state.patchControlPoints = 4;
+
   VkGraphicsPipelineCreateInfo pipeline_info{};
   pipeline_info.sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO;
-  pipeline_info.stageCount = 2;
+  pipeline_info.stageCount = stage_count;
   pipeline_info.pStages = stages;
   pipeline_info.pVertexInputState = &vertex_input;
   pipeline_info.pInputAssemblyState = &input_assembly;
+  pipeline_info.pTessellationState = tessellated_quad ? &tessellation_state : nullptr;
   pipeline_info.pViewportState = &viewport_state;
   pipeline_info.pRasterizationState = &raster;
   pipeline_info.pMultisampleState = &multisample;
@@ -2520,10 +2823,10 @@ NativeCommandProcessor::PipelineEntry NativeCommandProcessor::GetOrCreatePipelin
     pipeline = VK_NULL_HANDLE;
   } else {
     REXGPU_INFO(
-        "NativeCommandProcessor: created a graphics pipeline (topology={} vs_tex=({},{}) "
-        "ps_tex=({},{}))",
-        static_cast<uint32_t>(topology), vertex_texture_count, vertex_sampler_count,
-        pixel_texture_count, pixel_sampler_count);
+        "NativeCommandProcessor: created a graphics pipeline (topology={} tessellated={} "
+        "vs_tex=({},{}) ps_tex=({},{}))",
+        static_cast<uint32_t>(topology), tessellated_quad, vertex_texture_count,
+        vertex_sampler_count, pixel_texture_count, pixel_sampler_count);
   }
   PipelineEntry entry{pipeline, layout};
   pipeline_cache_.emplace(key, entry);
@@ -2566,10 +2869,30 @@ void NativeCommandProcessor::UpdateSharedMemory(uint32_t guest_address_dwords,
     }
     if (all_zero) {
       ++zero_range_logged;
+      // Scan guest physical memory outward from this address for the nearest
+      // non-zero dword. If the "real" smoke quad data lives just nearby, this
+      // is a mislocated-address (renderer) bug; if the whole arena is zero for
+      // a wide window, the guest genuinely never wrote it (guest-side skip).
+      const uint8_t* base = reinterpret_cast<const uint8_t*>(shared_memory_mapped_ + byte_offset);
+      const uint64_t kScan = 256 * 1024;  // +/- 256 KB
+      int64_t nearest = 0;
+      uint32_t nearest_val = 0;
+      for (uint64_t d = 4; d <= kScan; d += 4) {
+        if (byte_offset + byte_size - 1 + d < kSharedMemorySize) {
+          uint32_t fwd;
+          std::memcpy(&fwd, base + byte_size + (d - 4), 4);
+          if (fwd != 0) { nearest = int64_t(d); nearest_val = fwd; break; }
+        }
+        if (byte_offset >= d) {
+          uint32_t bwd;
+          std::memcpy(&bwd, base - d, 4);
+          if (bwd != 0) { nearest = -int64_t(d); nearest_val = bwd; break; }
+        }
+      }
       REXGPU_INFO(
           "NativeCommandProcessor: UpdateSharedMemory range is ALL ZERO -- address_dwords={:08X} "
-          "size_dwords={}",
-          guest_address_dwords, size_dwords);
+          "size_dwords={} nearest_nonzero_byte_delta={} nearest_val={:08X}",
+          guest_address_dwords, size_dwords, nearest, nearest_val);
     }
   }
 }
@@ -2957,8 +3280,50 @@ void NativeCommandProcessor::TryDraw(rex::graphics::xenos::PrimitiveType prim_ty
     return;
   }
 
+  // Hardware tessellation (found via the title-screen smoke overlay, which
+  // never rendered): when an explicit-major-mode draw has VGT_OUTPUT_PATH_CNTL
+  // selecting kTessellationEnable, the "vertex shader" is really a *domain*
+  // shader -- for a quad list, each group of 4 vertices is one 4-control-point
+  // quad patch, and the guest shader expects r0.xy = tess coords and
+  // r0.z/r1.xyz = the 4 control point indices (kQuadDomainCPIndexed), not a
+  // plain vertex index in r0.x. Running it as a normal vertex shader
+  // deterministically collapses every vertex onto control point 0 (all those
+  // registers read 0) and rasterizes nothing. Matches the SDK
+  // PrimitiveProcessor's tessellation detection (primitive_processor.cpp) and
+  // the D3D12 backend's discrete/continuous quad 4cp hull shader path, which
+  // is the configuration this game's smoke draw actually uses (verified in a
+  // D3D12 xenos capture: HS+DS bound, 4-CP patch topology, ~600 tessellated
+  // vertices). Adaptive tessellation (per-edge factors in the index buffer)
+  // and non-quad patch types aren't used by observed content and fall through
+  // to the old path with a rate-limited log.
+  bool tessellation_enabled =
+      registers_.Get<rex::graphics::reg::VGT_DRAW_INITIATOR>().major_mode ==
+          rex::graphics::xenos::MajorMode::kExplicit &&
+      registers_.Get<rex::graphics::reg::VGT_OUTPUT_PATH_CNTL>().path_select ==
+          rex::graphics::xenos::VGTOutputPath::kTessellationEnable;
+  rex::graphics::xenos::TessellationMode tessellation_mode =
+      registers_.Get<rex::graphics::reg::VGT_HOS_CNTL>().tess_mode;
+  bool is_tessellated_quad =
+      tessellation_enabled && is_quad_list &&
+      (tessellation_mode == rex::graphics::xenos::TessellationMode::kDiscrete ||
+       tessellation_mode == rex::graphics::xenos::TessellationMode::kContinuous) &&
+      tess_control_point_vs_ != VK_NULL_HANDLE && tess_quad_tcs_ != VK_NULL_HANDLE;
+  if (tessellation_enabled && !is_tessellated_quad) {
+    static uint32_t unsupported_tess_logged = 0;
+    if (unsupported_tess_logged < 20) {
+      ++unsupported_tess_logged;
+      REXGPU_INFO(
+          "NativeCommandProcessor: tessellated draw with unsupported configuration "
+          "(prim_type={} tess_mode={} host_shaders_ready={}) -- drawing untessellated",
+          static_cast<uint32_t>(prim_type), static_cast<uint32_t>(tessellation_mode),
+          tess_control_point_vs_ != VK_NULL_HANDLE && tess_quad_tcs_ != VK_NULL_HANDLE);
+    }
+  }
+
   VkPrimitiveTopology topology;
-  if (is_quad_list) {
+  if (is_tessellated_quad) {
+    topology = VK_PRIMITIVE_TOPOLOGY_PATCH_LIST;
+  } else if (is_quad_list) {
     topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
   } else if (is_rect_list) {
     topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_STRIP;
@@ -3042,8 +3407,12 @@ void NativeCommandProcessor::TryDraw(rex::graphics::xenos::PrimitiveType prim_ty
 
   TranslatedShader* vertex_shader = GetOrTranslateShader(
       rex::graphics::xenos::ShaderType::kVertex, active_vertex_shader_.ucode, interpolator_mask,
-      is_rect_list ? rex::graphics::Shader::HostVertexShaderType::kRectangleListAsTriangleStrip
-                   : rex::graphics::Shader::HostVertexShaderType::kVertex);
+      is_tessellated_quad
+          ? rex::graphics::Shader::HostVertexShaderType::kQuadDomainCPIndexed
+          : (is_rect_list
+                 ? rex::graphics::Shader::HostVertexShaderType::kRectangleListAsTriangleStrip
+                 : rex::graphics::Shader::HostVertexShaderType::kVertex),
+      is_tessellated_quad ? uint32_t(tessellation_mode) : 0);
   TranslatedShader* pixel_shader = GetOrTranslateShader(
       rex::graphics::xenos::ShaderType::kPixel, active_pixel_shader_.ucode, interpolator_mask);
   if (!vertex_shader || !pixel_shader || vertex_shader->module == VK_NULL_HANDLE ||
@@ -3061,7 +3430,7 @@ void NativeCommandProcessor::TryDraw(rex::graphics::xenos::PrimitiveType prim_ty
 
   PipelineEntry pipeline_entry =
       GetOrCreatePipeline(vertex_shader, pixel_shader, topology, /*primitive_restart_enable=*/
-                         is_rect_list, blend_control, color_write_mask);
+                         is_rect_list, blend_control, color_write_mask, is_tessellated_quad);
   if (pipeline_entry.pipeline == VK_NULL_HANDLE) {
     return;
   }
@@ -3451,13 +3820,17 @@ void NativeCommandProcessor::TryDraw(rex::graphics::xenos::PrimitiveType prim_ty
       write.pImageInfo = &image_infos[i];
       writes.push_back(write);
     }
-    VkSampler sampler_for_draw =
-        draw_samples_gameplay_preview ? gameplay_preview_sampler_ : default_sampler_;
     for (uint32_t i = 0; i < smp_count; ++i) {
-      // sampler_bindings()[i]'s actual filter/wrap fields aren't decoded yet
-      // (pre-existing simplification) -- every slot reuses one sampler,
-      // chosen per-draw above.
-      sampler_infos[i] = {sampler_for_draw, VK_NULL_HANDLE, VK_IMAGE_LAYOUT_UNDEFINED};
+      // Address modes come from each binding's texture fetch constant (see
+      // GetOrCreateSampler -- the smoke overlay scrolls U past 1.0 and needs
+      // kRepeat); filtering stays the fixed linear/nearest choice.
+      auto tf = registers_.GetTextureFetch(uint32_t(smp_bindings[i].fetch_constant));
+      VkSampler sampler = GetOrCreateSampler(tf.clamp_x, tf.clamp_y, tf.clamp_z,
+                                             draw_samples_gameplay_preview);
+      if (sampler == VK_NULL_HANDLE) {
+        sampler = draw_samples_gameplay_preview ? gameplay_preview_sampler_ : default_sampler_;
+      }
+      sampler_infos[i] = {sampler, VK_NULL_HANDLE, VK_IMAGE_LAYOUT_UNDEFINED};
       VkWriteDescriptorSet write{};
       write.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
       write.dstSet = set;
@@ -3506,7 +3879,23 @@ void NativeCommandProcessor::TryDraw(rex::graphics::xenos::PrimitiveType prim_ty
     dfn.vkCmdDrawIndexed(command_buffer_, uint32_t(indices.size()), 1, 0, 0, 0);
   };
 
-  if (is_quad_list) {
+  if (is_tessellated_quad) {
+    // One 4-control-point patch per quad, drawn non-indexed: the passthrough
+    // VS turns gl_VertexIndex into the per-control-point index, the fixed
+    // quad TCS gathers each patch's 4 indices and sets the tessellation
+    // levels from the factor pushed here (VGT_HOS_MAX_TESS_LEVEL + 1.0 --
+    // "1.0 already added to the factor on the CPU" per the real backend's
+    // tessellation_factor_range_max), and the guest shader runs as the
+    // tessellation evaluation stage, fetching control point vertex data
+    // itself from the shared-memory SSBO.
+    float tessellation_factor =
+        registers_.Get<float>(rex::graphics::XE_GPU_REG_VGT_HOS_MAX_TESS_LEVEL) + 1.0f;
+    tessellation_factor = std::min(std::max(tessellation_factor, 1.0f), 64.0f);
+    dfn.vkCmdPushConstants(command_buffer_, pipeline_entry.layout,
+                           VK_SHADER_STAGE_TESSELLATION_CONTROL_BIT, 0, sizeof(float),
+                           &tessellation_factor);
+    dfn.vkCmdDraw(command_buffer_, num_indices, 1, 0, 0);
+  } else if (is_quad_list) {
     // Two triangles per quad (0,1,2,0,2,3), indexing the same autoindex
     // vertex stream a non-indexed draw of this quad list would have used --
     // the vertex shader still reads vertex 0..num_indices-1 via the shared
@@ -3550,6 +3939,7 @@ void NativeCommandProcessor::TryDraw(rex::graphics::xenos::PrimitiveType prim_ty
   }
 
   frame_has_draws_ = true;
+
   static bool logged_first_draw = false;
   if (!logged_first_draw) {
     logged_first_draw = true;

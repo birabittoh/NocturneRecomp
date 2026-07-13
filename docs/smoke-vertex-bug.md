@@ -1,4 +1,358 @@
-# Open bug: smoke quad (and a sibling solid-color quad) render degenerate
+# Smoke invisibility investigation — RESOLVED (2026-07-14)
+
+## Actual root cause: hardware tessellation
+
+The title-screen smoke is **not a plain quad — it's a tessellated
+4-control-point quad patch**. The draw's `VGT_DRAW_INITIATOR.major_mode` is
+explicit and `VGT_OUTPUT_PATH_CNTL.path_select` selects `kTessellationEnable`,
+so the guest "vertex shader" is really a **quad-domain domain shader**: on real
+Xenos it receives the tessellation coordinates in `r0.xy` and the 4 control
+point indices in `r0.z`/`r1.xyz` (`kQuadDomainCPIndexed`), then vfetches each
+control point itself and warps a ~600-vertex grid (the wavy mist motion).
+
+Translating that ucode as a plain vertex shader (index in `r0.x`) made every
+invocation read control point index 0 (`r0.z`/`r1.z` are zero-initialized on
+the host), collapsing all vertices onto vertex 0 — a zero-area primitive that
+rasterizes nothing, deterministically, live and under capture. This is also
+why the xenos plugin only shows the smoke on its **D3D12** backend (which has
+hull shaders and the `XEVERTEXID` passthrough VS) and not on Vulkan: the SDK's
+Vulkan backend never got the tessellation plumbing.
+
+**The decisive evidence** was a RenderDoc capture of the xenos D3D12 backend
+(`smoke_xenos.rdc`): the smoke draw has hull+domain shaders bound,
+4-control-point patch topology, and 600 post-tessellation vertices.
+
+## The fix (this repo, `native` branch)
+
+1. `nocturnerecomp_app.h`: create the Vulkan provider with
+   `with_gpu_emulation=true` so `VulkanDevice` enables the
+   `tessellationShader` device feature.
+2. `native_command_processor.{h,cpp}`:
+   - Mirror `VGT_DRAW_INITIATOR` into the register file in `OnDraw` (the PM4
+     decode path never routed it through a `RegisterWrite` action).
+   - Detect tessellated quad-list draws (explicit major mode +
+     `kTessellationEnable` + discrete/continuous `VGT_HOS_CNTL.tess_mode`).
+   - Translate the guest VS with
+     `HostVertexShaderType::kQuadDomainCPIndexed` (+ tessellation_mode for
+     the spacing execution mode) — the SDK's `SpirvShaderTranslator` already
+     supports emitting it as a SPIR-V tessellation *evaluation* shader.
+   - Run it through a real 4-stage pipeline: a hand-assembled passthrough VS
+     (`gl_VertexIndex` → float at location 0), a hand-assembled quad TCS that
+     gathers the patch's 4 control point indices into the per-patch
+     `xe_in_patch_control_point_indices` input the TES expects and sets all
+     tessellation levels from a push constant (`VGT_HOS_MAX_TESS_LEVEL + 1.0`,
+     pushed per draw), `VK_PRIMITIVE_TOPOLOGY_PATCH_LIST` with
+     `patchControlPoints=4`, drawn non-indexed.
+   - **Removed the "NaN-w fix" below — it was actively wrong.** In this
+     domain shader's vertex layout, dword 3 is the packed ubyte4 vertex
+     *color* (`0xFFFFFFFF` = opaque white), not `position.w`. Overwriting it
+     with the bytes of 1.0f recolored the smoke to (128,0,0,63)/255, which
+     after the draw's `src*(1-dstRGB) + dst` blend changed pixels by <1% —
+     invisible. (Also: the blend-equation theory below misdecodes
+     `RB_BLENDCONTROL 0x01090109` — bits [12:8]/[28:24] are `kOne`, not
+     `kOneMinusDstColor`; it's a screen-style additive blend and was never
+     the problem.)
+   - Decode the texture fetch constant's `clamp_x/y/z` into per-draw cached
+     samplers (`GetOrCreateSampler`) — the smoke scrolls U past 1.0 and needs
+     `kRepeat`; the old fixed clamp-to-edge sampler smeared the last texel
+     column across the seam instead of looping.
+
+Everything below this line is the historical investigation log, kept for
+reference. Its two "root cause" claims (NaN `position.w`, blend equation) are
+**superseded** by the tessellation finding above.
+
+---
+
+# (historical, superseded) Blend-equation theory (2026-07-14)
+
+## Summary
+
+The NaN-`w` vertex fix (see "ROOT CAUSE FOUND" section below) makes the smoke
+quad's geometry valid — vertices project to on-screen NDC, the draw reaches
+`vkCmdDrawIndexed`, and the texture is non-zero. **But the smoke remains
+invisible.** The root cause is now identified as a **blend equation problem**:
+the smoke's `(src + dst) * (1 - dst)` blend produces alpha=0 (and severely
+attenuated RGB) when the destination already contains opaque content from
+prior draws.
+
+## What was done
+
+1. **NaN-w fix**: always-on SSBO patch that overwrites `position.w = 0xFFFFFFFF`
+   (NaN) with `1.0f` for every smoke draw (keyed on the 852×128 texture). This
+   is confirmed working — vertices now project correctly to NDC.
+
+2. **SDK NaN guard is redundant**: `spirv_translator.cpp:2418-2425` already
+   catches NaN `w` in `gl_Position` and forces 1.0. The SSBO fix is technically
+   unnecessary but harmless.
+
+3. **Extensive diagnostic logging** added to `native_command_processor.cpp`:
+   - `SMOKE_VERT`: per-vertex position/uv/pad for each smoke draw
+   - `SMOKE_STATE`: full register dump (clip, vte, blend, depth, surface, etc.)
+   - `SMOKE_FIX`: w-verification log (confirms SSBO patch is applied)
+   - `SMOKE_TEX`: first 8 dwords of smoke texture from guest physical memory
+   - `SMOKE_SYSCONST`: ndc_scale/ndc_offset/color_target dimensions
+   - `SMOKE_DRAW_EXEC`: confirms draw reaches vkCmdDrawIndexed
+
+## Current root cause: blend equation kills alpha
+
+### The blend state
+
+```
+blend0 = 0x01090109
+```
+
+Decoded (per `RB_BLENDCONTROL` union in `registers.h:779`):
+- Bits [4:0]   = color_srcblend = 9 = `kOneMinusDstColor`
+- Bits [7:5]   = color_comb_fcn = 0 = `kAdd`
+- Bits [12:8]  = color_destblend = 9 = `kOneMinusDstColor`
+- Bits [20:16] = alpha_srcblend = 9 = `kOneMinusDstColor`
+- Bits [23:21] = alpha_comb_fcn = 0 = `kAdd`
+- Bits [28:24] = alpha_destblend = 9 = `kOneMinusDstColor`
+
+All 6 factors are `kOneMinusDstColor`, all 3 ops are `kAdd`.
+
+### Vulkan mapping
+
+Per Vulkan spec, `VK_BLEND_FACTOR_ONE_MINUS_DST_COLOR`:
+- For RGB: factor = `(1-R_d, 1-G_d, 1-B_d)` — uses destination RGB
+- For Alpha: factor = `1-A_d` — uses destination alpha
+
+Blend equation (kAdd):
+```
+output = src * (1-dst) + dst * (1-dst)
+       = (src + dst) * (1 - dst)
+```
+
+Per-component for both RGB and alpha.
+
+### Why the smoke is invisible
+
+The framebuffer starts each frame cleared to `(0.05, 0.05, 0.35, 1.0)` at
+line 2892-2893 of `native_command_processor.cpp`. Then 5955 draws before the
+first smoke draw (#5956) write opaque background content into the same
+framebuffer. There are **zero EDRAM resolve copies** in the log — the entire
+frame (background + smoke + HUD) renders into a single Vulkan render target.
+
+When the smoke draws, the destination already contains opaque content
+(alpha ≈ 1.0 from prior draws or the clear value). The blend computes:
+
+```
+output_a = (src_a + dst_a) * (1 - dst_a)
+```
+
+With `dst_a ≈ 1.0`:
+```
+output_a = (0.447 + 1.0) * (1 - 1.0) = 0.0
+```
+
+The alpha channel is zeroed. The A2B10G10R10_UNORM format stores this as
+2-bit alpha = 0 (fully transparent).
+
+For RGB, the output is also severely attenuated:
+```
+output_rgb = (src_rgb + dst_rgb) * (1 - dst_rgb)
+```
+
+If the background at the smoke's location (y=0–184) is bright (e.g. 0.8),
+`output ≈ (0.45 + 0.8) * 0.2 = 0.25` — dim but technically non-zero.
+Against a white background (dst=1.0), output = 0.
+
+### Why it works on Xbox 360
+
+On real hardware, the game would:
+1. Draw the background to EDRAM → resolve to a texture in main memory
+2. Clear/switch EDRAM tiles → fresh surface with alpha=0
+3. Draw smoke on the cleared surface → `dst=0` → blend simplifies to `src * 1 = src`
+4. Resolve smoke → composite background + smoke using standard alpha blend
+
+The recompiler doesn't model EDRAM surface switching. Everything goes into
+one framebuffer. The smoke blend is designed for `dst=0` but sees `dst=opaque
+background`.
+
+## Smoke draw details (from log 008)
+
+### Vertex positions (all smoke draws identical)
+
+```
+v0: pos=(1.0, 0.0, 1.0, NaN) uv=(0.001087, 0.003906)
+v1: pos=(1279.0, 0.0, 1.0, NaN) uv=(1.001087, 0.003906)
+v2: pos=(1279.0, 184.0, 1.0, NaN) uv=(1.001087, 1.003906)
+v3: pos=(1.0, 184.0, 1.0, NaN) uv=(0.001087, 1.003906)
+```
+
+Full screen width (1–1279), 184px tall at top of screen. UVs scroll
+horizontally across frames (smoke animation).
+
+### Render state
+
+```
+clip=00090000     clip_disable=1, dx_clip_space_def=1
+vte=00000400      vtx_w0_fmt=1 (WNotReciprocal), all vport enables OFF
+su_sc_mode=00010006  cull_back=1, face=0 (CCW front), vtx_window_offset_enable=1
+blend0=01090109   ALL factors=kOneMinusDstColor(9), ALL ops=kAdd(0)
+colorctrl=8700000C  alpha_test_enable=1, alpha_func=kGreater(4), ref=0.0
+depthctl=00700734   depth test disabled (z_enable=0), z_write_enable=1
+surface=14000500   surface_pitch=1280
+scissor_tl=00000000  scissor_br=20002000  (no clipping)
+vtx_cntl=00000004   pix_center=kD3DZero, quant_mode=1
+sq_prog=10200E0E
+color_exp_bias=0  → exp2(0) = 1.0 (no bias)
+alpha_ref=00000000 → 0.0f (any alpha > 0 passes test)
+```
+
+### Sysconst values
+
+```
+ndc_scale=(0.001563, 0.002778, 1.000000)
+ndc_offset=(-0.999219, -0.998611, 0.000000)
+color_target_w=1280  color_target_h=720
+```
+
+Manual NDC projection confirms vertices are on-screen (NDC within [-1,1]).
+
+### Texture data
+
+```
+phys=1EBB8000  size=0x6C000  format=BGRA8  dims=852×128×4
+d0=93727272 d1=93717171 d2=93707070 d3=93707070
+d4=95757575 d5=95747474 d6=95727272 d7=95727272
+```
+
+First pixel: B=0x93 G=0x72 R=0x72 A=0x72 → alpha ≈ 0.447 (non-zero).
+Texture data is non-zero; alpha test (kGreater ref=0.0) passes.
+
+### Draw execution
+
+`SMOKE_DRAW_EXEC` fires for every smoke draw (#1 through #93+), confirming
+the draw reaches `vkCmdDrawIndexed` — no silent `return` paths kill it.
+
+### Frame timing
+
+- 93+ smoke draws over ~1.8 seconds (23:16:49.548 to 23:16:51.324)
+- Draws are interleaved with non-smoke draws (draw numbers ~23 apart:
+  5956, 5979, 6002, 6025, ...)
+- Non-smoke draws between smoke draws are HUD elements (169×41, 300×160,
+  692×44, 256×512, 26×26 textures)
+
+## What does NOT explain the invisibility
+
+- **Vertex positions**: valid, on-screen, correct NDC projection
+- **Face culling**: face=CCW front, both smoke triangles are CCW in clip
+  space → front faces → NOT culled (Vulkan Y-flip handled by SDK viewport)
+- **Alpha test**: ref=0.0, func=kGreater → any alpha > 0 passes → NOT a blocker
+- **Depth test**: disabled → NOT blocking
+- **Draw execution**: reaches vkCmdDrawIndexed → NOT silently skipped
+- **Texture data**: non-zero, non-zero alpha → shader outputs non-zero color
+- **SSBO w-fix**: confirmed working, vertices project correctly
+
+## Next steps
+
+### Approach A: Clear framebuffer before smoke pass (targeted)
+
+Before the first smoke draw, issue `vkCmdClearAttachments` to clear the
+color attachment to `(0,0,0,0)`. This simulates the game's fresh EDRAM
+surface. The smoke blend would then see `dst=0` and produce `output=src`.
+
+**Risk**: destroys background content below y=184. But proves the theory —
+if smoke becomes visible, the blend is confirmed as root cause.
+
+**Location**: In `TryDraw`, after `current_draw_is_smoke` is set to true
+and before `draw_with_synthesized_indices` (around line 3744). Gate on
+a `static bool` to clear only once.
+
+### Approach B: Track EDRAM surface switching (correct fix)
+
+When the game changes `RB_COLOR_INFO.color_base` (indicating a switch to a
+new EDRAM tile/surface), clear `color_target_image_`. This models the real
+Xbox 360 rendering pipeline correctly.
+
+**Requires**: Adding RB_COLOR_INFO logging to SMOKE_STATE, monitoring
+color_base changes between draws, implementing `vkCmdClearColorImage` or
+equivalent at surface switches.
+
+### Approach C: Modify blend for smoke draws (shader-level)
+
+Replace the blend with `src*1 + dst*0` (opaque) for smoke draws, making
+the smoke render at full intensity regardless of destination. This doesn't
+match Xbox 360 behavior exactly but would make the smoke visible.
+
+### Recommended order
+
+1. Try **Approach A** first (quick diagnostic, proves theory)
+2. If theory confirmed, implement **Approach B** (correct architectural fix)
+3. **Approach C** as a fallback if A/B are too invasive
+
+---
+
+# ROOT CAUSE FOUND (2026-07-13): NaN vertex position.w, NOT vertex-fetch zeroing
+
+**The original investigation below chased a red herring.** The "vertex fetch
+comes back all-zero / degenerate" symptom only ever reproduces *under RenderDoc
+capture or injected per-draw latency* -- it is a capture/timing artifact, not
+the reason the smoke is missing in normal gameplay. Proven this session:
+
+- In a **normal, uninstrumented run** the smoke draw (`fetch_constant=95`,
+  `size=32`, a 4-corner quad at screen-space `(232,54)-(1048,666)`) is emitted
+  **every frame with fully valid geometry** (`degenerate=false`), its SSBO
+  mirror matches guest RAM exactly (`ssbo_mismatch=false`), and its render
+  state is normal (blend `07060706` = standard src-alpha/inv-src-alpha; color
+  mask `F`; alpha-test GREATER ref 0; depth test disabled). The smoke texture's
+  alpha is ~0.75 (not zero). Nothing about geometry, sync, blend, or alpha
+  explains the invisibility.
+- The one anomaly: the vertex **position.w is `0xFFFFFFFF` (NaN)**
+  (`guestV0=(43680000,42580000,3F800000,FFFFFFFF)` = x=232, y=54, z=1, w=NaN).
+  The smoke vertex shader feeds `gl_Position.w` from this w and computes `1/w`
+  in its epilogue, so `gl_Position` becomes NaN -> the primitive is clipped ->
+  invisible.
+- **Decisive experiment**: patching each of the 4 vertices' w to `1.0` in the
+  SSBO mirror right before the draw (env `NOCTURNE_SMOKE_FIX_W=1`, see
+  `native_command_processor.cpp`) makes the smoke **render** (confirmed
+  visually: the dark scrolling mist appears over the title-screen scene).
+- Why RenderDoc "sees zero": under capture the vertex data reads as all-zero,
+  so w=0 -> the VS transform yields a *finite* w=1.0 -- accidentally masking
+  the real NaN-w bug and sending every prior session down the vertex-fetch
+  rabbit hole. `smoke.rdc`'s post-VS `gl_Position=(-0.997,-0.998,1,1)` is the
+  transform of a zero input, not the real draw.
+
+## Why it happens / where the proper fix goes
+
+These are **pre-transformed, screen-space** vertices (positions are literal
+pixel coords). The guest leaves `position.w = 0xFFFFFFFF` as a don't-care
+because real Xenos, with the draw's `PA_CL_VTE_CNTL` state, neutralizes it
+(Xenos ALU float rules: `0 * NaN = 0`, NaN-flushing; w treated as 1 for
+window-space verts). The renderer already maps `PA_CL_VTE_CNTL.vtx_*_fmt` into
+`kSysFlag_XY/Z_DividedByW` / `kSysFlag_WNotReciprocal`
+(`native_command_processor.cpp` ~line 3308), but that flag only chooses `w` vs
+`1/w` -- both NaN -- so it does not tame a garbage w. The SDK's
+`SpirvShaderTranslator` `1/w` path does not reproduce Xenos NaN semantics.
+
+## Fix implemented (2026-07-13)
+
+The targeted SSBO patch is now **always-on** (no env gate) inside the
+`samples_smoke` block in `TryDraw` (`src/native_command_processor.cpp`). For
+every draw whose pixel shader samples the 852x128 texture, it scans each
+vertex's `position.w` in the shared-memory SSBO; if the dword is NaN or Inf
+(IEEE 754 exponent all 1s), it overwrites it with `1.0f` (`0x3F800000`) and
+re-flushes the mapped range. This is the same operation the earlier
+`NOCTURNE_SMOKE_FIX_W` env-gated probe validated, but unconditionally applied
+to the correctly-targeted draw.
+
+The unrelated full-screen red quad (which also has NaN w but renders correctly
+via a different code path) is not affected because the fix is keyed on the
+852x128 texture match, not on a NaN heuristic.
+
+General upstream fix (still desired long-term):
+1. In the SDK `SpirvShaderTranslator` position-export epilogue, apply Xenos
+   float semantics to the w path (flush NaN/Inf, or force w=1 when the
+   viewport-transform state marks the vertex as window-space/pre-transformed),
+   matching real hardware. This is the correct, general fix (SDK change, see
+   `../rexglue-sdk`).
+2. Verify `kSysFlag_WNotReciprocal` polarity vs Xenia for this VTE_CNTL state
+   -- if inverted, the shader may be taking the wrong branch.
+
+---
+
+# (historical) Open bug: smoke quad (and a sibling solid-color quad) render degenerate
 
 Read `docs/native-rendering.md` first for architecture/status. This file is a
 focused investigation log for one specific, still-open bug, kept separate
@@ -123,7 +477,7 @@ In addition to the ones woven into "What's confirmed" above:
   draw in the pass, including the broken ones. All auto-indexed; no real
   guest index buffer is being discarded.
 
-## Working theory (unconfirmed)
+## Working theory (unconfirmed — historical)
 
 The bug is real, reproducible on demand via RenderDoc capture, isolated to
 2 of 5 draws per frame (always the same *relative* two, not tied to a

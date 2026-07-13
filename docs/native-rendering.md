@@ -140,13 +140,15 @@ each step verified against a real capture or live run, not just code review.
 5. The `0x1f6f8000` full-screen EDRAM-resolve target's purpose is still
    unidentified (fires every frame, real but unrelated to bugs chased so
    far).
-6. **Open bug, own doc**: a smoke overlay (and a sibling solid-color quad)
-   never render — their vertex fetch comes back all-zero, but only under a
-   RenderDoc capture, never in an uninstrumented run. Extensive
-   investigation already ruled out fetch-constant decode, memory-sync
-   units/plumbing, IB dedup, and a `NativeCommandProcessor::OnPacket` mutex
-   (tried, reverted — broke frame pacing, didn't fix it). See
-   `docs/smoke-vertex-bug.md` before re-investigating.
+6. **RESOLVED (2026-07-14)**: the title-screen smoke overlay never rendered —
+   it's a hardware-tessellated 4-control-point quad patch, and its "vertex
+   shader" is really a quad-domain domain shader (`kQuadDomainCPIndexed`);
+   translating it as a plain vertex shader collapsed every vertex onto
+   control point 0. Fixed with a real Vulkan tessellation pipeline
+   (passthrough VS + hand-assembled quad TCS + guest shader as TES) plus
+   fetch-constant-driven sampler clamp modes (the smoke scrolls U past 1.0
+   and needs kRepeat). See `docs/smoke-vertex-bug.md` for the full story —
+   including why the earlier NaN-w and blend-equation theories were wrong.
 
 ## Quick reference: build/run/debug
 

@@ -196,8 +196,13 @@ class NocturnerecompApp : public rex::ReXApp {
     // GraphicsSystem::SetupPresentation for the equivalent SDK-mode call);
     // OnPreLaunchModule itself is not guaranteed to be the UI thread.
     window()->app_context().CallInUIThreadSynchronous([this] {
+      // with_gpu_emulation=true so VulkanDevice enables the guest-rendering
+      // device features -- tessellationShader in particular: the title-screen
+      // smoke overlay is a tessellated quad patch (see
+      // NativeCommandProcessor::CreateTessellationHostShaders), and without
+      // the feature enabled at device creation those draws are skipped.
       vulkan_provider_ = rex::ui::vulkan::VulkanProvider::Create(
-          /*with_gpu_emulation=*/false, /*with_presentation=*/true);
+          /*with_gpu_emulation=*/true, /*with_presentation=*/true);
       if (!vulkan_provider_) {
         REXGPU_ERROR("Native renderer: failed to create the Vulkan provider");
         return;

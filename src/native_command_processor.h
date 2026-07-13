@@ -171,11 +171,16 @@ class NativeCommandProcessor {
     rex::graphics::Shader* shader = nullptr;  // Owned by analyzed_shaders_.
     VkShaderModule module = VK_NULL_HANDLE;
   };
+  // tessellation_mode is xenos::TessellationMode as uint32_t and only
+  // meaningful when host_vertex_shader_type is a domain type (it selects the
+  // TES spacing execution mode -- equal for discrete, fractional-even for
+  // continuous); pass 0 otherwise.
   TranslatedShader* GetOrTranslateShader(
       rex::graphics::xenos::ShaderType type, const std::vector<uint32_t>& ucode,
       uint32_t interpolator_mask,
       rex::graphics::Shader::HostVertexShaderType host_vertex_shader_type =
-          rex::graphics::Shader::HostVertexShaderType::kVertex);
+          rex::graphics::Shader::HostVertexShaderType::kVertex,
+      uint32_t tessellation_mode = 0);
 
   // Gets (building on first use) a VkPipeline for this exact vertex/pixel
   // shader pair + primitive topology + blend state, plus the VkPipelineLayout
@@ -194,9 +199,32 @@ class NativeCommandProcessor {
     VkPipeline pipeline = VK_NULL_HANDLE;
     VkPipelineLayout layout = VK_NULL_HANDLE;
   };
+  // tessellated_quad selects the 4-stage tessellation pipeline variant (see
+  // CreateTessellationHostShaders): vertex_shader must then be a translation
+  // with a quad-domain HostVertexShaderType (its module is a tessellation
+  // *evaluation* shader), topology must be VK_PRIMITIVE_TOPOLOGY_PATCH_LIST,
+  // and the fixed passthrough VS/TCS supply the other two stages.
   PipelineEntry GetOrCreatePipeline(TranslatedShader* vertex_shader, TranslatedShader* pixel_shader,
                                     VkPrimitiveTopology topology, bool primitive_restart_enable,
-                                    uint32_t blend_control, uint32_t color_write_mask);
+                                    uint32_t blend_control, uint32_t color_write_mask,
+                                    bool tessellated_quad = false);
+
+  // Hardware tessellation support (the title-screen smoke overlay is drawn as
+  // a tessellated 4-control-point quad patch -- VGT_OUTPUT_PATH_CNTL selects
+  // kTessellationEnable and the "vertex shader" is really a quad-domain
+  // *domain* shader reading r0.xy = tess coords, r0.z/r1.xyz = control point
+  // indices; running it as a plain vertex shader collapses every vertex onto
+  // control point 0 and rasterizes nothing). Built once at init when the
+  // device supports tessellationShader: a passthrough vertex shader exporting
+  // gl_VertexIndex as the float control-point index the SDK's TES translation
+  // expects, and a quad TCS gathering the 4 indices into the per-patch
+  // xe_in_patch_control_point_indices input and setting all tess levels from
+  // a push constant (VGT_HOS_MAX_TESS_LEVEL + 1, pushed per draw in TryDraw).
+  // Hand-assembled with SpirvBuilder, same rationale as the post-process
+  // vertex shader above (no runtime GLSL compiler in the SDK).
+  bool CreateTessellationHostShaders();
+  VkShaderModule tess_control_point_vs_ = VK_NULL_HANDLE;
+  VkShaderModule tess_quad_tcs_ = VK_NULL_HANDLE;
 
   // Multi-texture-per-stage support: SpirvShaderTranslator assigns each
   // shader's SAMPLED_IMAGE bindings to [0, texture_bindings().size()) and its
@@ -392,6 +420,21 @@ class NativeCommandProcessor {
   // Nearest, used only for the gameplay-preview texture -- see
   // UploadedTexture::is_gameplay_preview.
   VkSampler gameplay_preview_sampler_ = VK_NULL_HANDLE;
+
+  // Real guest-driven sampler state (partial): gets (creating on first use) a
+  // sampler whose address modes match the texture fetch constant's
+  // clamp_x/y/z. Found necessary for the title-screen smoke overlay, whose U
+  // coordinate scrolls past 1.0 every frame and expects kRepeat wrapping --
+  // the fixed clamp-to-edge default_sampler_ smeared the texture's last
+  // column across the seam instead of looping it. Filter state is still the
+  // fixed linear (or nearest for the gameplay preview, same rule as before)
+  // rather than fetch-constant-driven -- clamp modes were the only observed
+  // wrong behavior. Border-color modes fall back to their edge-clamping
+  // cousins, matching the SDK Vulkan backend's own approximations.
+  VkSampler GetOrCreateSampler(rex::graphics::xenos::ClampMode clamp_x,
+                               rex::graphics::xenos::ClampMode clamp_y,
+                               rex::graphics::xenos::ClampMode clamp_z, bool nearest);
+  std::unordered_map<uint32_t, VkSampler> sampler_cache_;
 
   // Real uploaded textures, cached by a hash of the fetch constant's raw
   // dwords (address+format+dimensions+tiling all fold into that hash, so a
