@@ -447,6 +447,14 @@ NativeCommandProcessor::~NativeCommandProcessor() {
   }
 }
 
+void NativeCommandProcessor::InitializeTextureReplacement(
+    std::vector<std::filesystem::path> mod_roots, std::filesystem::path dump_root) {
+  texture_replacement_ =
+      std::make_unique<rex::graphics::TextureReplacement>(std::move(mod_roots), std::move(dump_root));
+  REXGPU_INFO("NativeCommandProcessor: texture replacement ready ({} mod root(s))",
+             texture_replacement_->mod_roots().size());
+}
+
 bool NativeCommandProcessor::InitializePipelineResources() {
   const rex::ui::vulkan::VulkanDevice* vulkan_device = provider_->vulkan_device();
   const rex::ui::vulkan::VulkanDevice::Functions& dfn = vulkan_device->functions();
@@ -2152,6 +2160,8 @@ NativeCommandProcessor::UploadedTexture* NativeCommandProcessor::GetOrUploadText
     uint32_t fetch_constant_index) {
   using rex::graphics::xenos::DataDimension;
   using rex::graphics::xenos::TextureFormat;
+  using rex::graphics::TextureReplacement;
+  using rex::graphics::TextureReplacementData;
 
   rex::graphics::xenos::xe_gpu_texture_fetch_t fetch = registers_.GetTextureFetch(fetch_constant_index);
   if (fetch.base_address == 0) {
@@ -2229,13 +2239,60 @@ NativeCommandProcessor::UploadedTexture* NativeCommandProcessor::GetOrUploadText
   bool byteswap = fetch.endianness == rex::graphics::xenos::Endian::k8in32 ||
                   fetch.endianness == rex::graphics::xenos::Endian::k8in16;
 
-  std::vector<uint8_t> rgba(size_t(width) * height * 4);
+  std::vector<uint8_t> rgba;
   // Guest-memory byte span this decode actually reads, for
-  // InvalidateTextureCacheRange overlap checks -- set inside each branch
-  // below (differs: block- vs. texel-granularity pitch).
-  uint32_t source_size_bytes = 0;
-
+  // InvalidateTextureCacheRange overlap checks -- set below (differs: block-
+  // vs. texel-granularity pitch), before either the replacement-lookup or
+  // the guest-decode path so both cover the same range.
+  uint32_t source_size_bytes;
+  uint32_t rgba_width = width;
+  uint32_t rgba_height = height;
   if (fetch.format == TextureFormat::k_DXT4_5) {
+    uint32_t block_w = (width + 3) / 4;
+    uint32_t block_h = (height + 3) / 4;
+    uint32_t pitch_blocks = std::max((fetch.pitch * 32u) / 4, block_w);
+    source_size_bytes = pitch_blocks * block_h * 16u;
+  } else {
+    uint32_t bytes_per_texel = fetch.format == TextureFormat::k_8_8_8_8   ? 4
+                               : fetch.format == TextureFormat::k_16_16_16_16 ? 8
+                                                                               : 2;
+    uint32_t pitch_texels = std::max(fetch.pitch * 32u, width);
+    source_size_bytes = pitch_texels * height * bytes_per_texel;
+  }
+
+  // Mod texture replacement (see InitializeTextureReplacement): hash the raw
+  // guest bytes exactly as rex::graphics::TextureReplacement::HashGuestData
+  // does for the D3D12/Vulkan xenos backends' own texture cache, so existing
+  // <mod_root>/<hash16>.dds|.png mods (and this SDK's own texture-dump
+  // output) resolve to the same content hash here -- content-hash-keyed, not
+  // fetch-constant-keyed, so it's address/run independent like the real
+  // backends' replacement lookup. The byte range hashed must match
+  // TextureKey::GetGuestLayout().base.level_data_extent_bytes exactly (the
+  // real backends' guest_size for both dumping and hashing, see
+  // TextureCache::CommitPreparedTextureLoad) -- that's the exact upper bound
+  // of addressed bytes accounting for tiling/pitch alignment, which is *not*
+  // the same as source_size_bytes above (a simpler "last row includes full
+  // pitch padding" estimate only good enough for this renderer's own
+  // cache-invalidation range, not for byte-for-byte hash parity with mods
+  // authored against the real backend's dumps).
+  const TextureReplacementData* replacement = nullptr;
+  if (texture_replacement_) {
+    rex::graphics::texture_util::TextureGuestLayout guest_layout =
+        rex::graphics::texture_util::GetGuestTextureLayout(
+            fetch.dimension, fetch.pitch, width, height, /*depth_or_array_size=*/1, fetch.tiled,
+            fetch.format, fetch.packed_mips, /*has_base=*/true, /*max_level=*/0);
+    uint32_t hash_size_bytes = guest_layout.base.level_data_extent_bytes;
+    const uint8_t* hash_base =
+        rex::system::kernel_state()->memory()->TranslatePhysical<const uint8_t*>(base_address);
+    uint64_t content_hash = TextureReplacement::HashGuestData(hash_base, hash_size_bytes);
+    replacement = texture_replacement_->FindReplacement(content_hash);
+  }
+
+  if (replacement) {
+    rgba_width = replacement->width;
+    rgba_height = replacement->height;
+    rgba = replacement->pixels;
+  } else if (fetch.format == TextureFormat::k_DXT4_5) {
     // Block-compressed: address math operates in block units (a 4x4-texel
     // block is the atomic unit for both pitch and tiling), not texel units --
     // see texture_util::GetTiledOffset2D's doc comment on util.h. The pitch
@@ -2258,6 +2315,7 @@ NativeCommandProcessor::UploadedTexture* NativeCommandProcessor::GetOrUploadText
     constexpr uint32_t kBytesPerBlockLog2 = 4;
     uint32_t pitch_blocks = std::max((fetch.pitch * 32u) / 4, block_w);
     source_size_bytes = pitch_blocks * block_h * kBytesPerBlock;
+    rgba.resize(size_t(width) * height * 4);
     for (uint32_t by = 0; by < block_h; ++by) {
       for (uint32_t bx = 0; bx < block_w; ++bx) {
         uint32_t block_offset =
@@ -2294,6 +2352,7 @@ NativeCommandProcessor::UploadedTexture* NativeCommandProcessor::GetOrUploadText
                                                                                     : 1u;
     uint32_t pitch_texels = std::max(fetch.pitch * 32u, width);
     source_size_bytes = pitch_texels * height * bytes_per_texel;
+    rgba.resize(size_t(width) * height * 4);
 
     // Replicates the top bits into the low bits when expanding an n-bit
     // channel to 8 bits, instead of a plain shift (which would clip white to
@@ -2365,7 +2424,7 @@ NativeCommandProcessor::UploadedTexture* NativeCommandProcessor::GetOrUploadText
   image_info.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
   image_info.imageType = VK_IMAGE_TYPE_2D;
   image_info.format = VK_FORMAT_R8G8B8A8_UNORM;
-  image_info.extent = {width, height, 1};
+  image_info.extent = {rgba_width, rgba_height, 1};
   image_info.mipLevels = 1;
   image_info.arrayLayers = 1;
   image_info.samples = VK_SAMPLE_COUNT_1_BIT;
@@ -2376,7 +2435,8 @@ NativeCommandProcessor::UploadedTexture* NativeCommandProcessor::GetOrUploadText
   if (!rex::ui::vulkan::util::CreateDedicatedAllocationImage(
           vulkan_device, image_info, rex::ui::vulkan::util::MemoryPurpose::kDeviceLocal,
           texture.image, texture.memory)) {
-    REXGPU_ERROR("NativeCommandProcessor: failed to create a texture image ({}x{})", width, height);
+    REXGPU_ERROR("NativeCommandProcessor: failed to create a texture image ({}x{})", rgba_width,
+                rgba_height);
     return nullptr;
   }
 
@@ -2393,8 +2453,9 @@ NativeCommandProcessor::UploadedTexture* NativeCommandProcessor::GetOrUploadText
     return nullptr;
   }
 
-  if (!UploadTexelsAndTransition(texture.image, width, height, rgba.data())) {
-    REXGPU_ERROR("NativeCommandProcessor: failed to upload texture data ({}x{})", width, height);
+  if (!UploadTexelsAndTransition(texture.image, rgba_width, rgba_height, rgba.data())) {
+    REXGPU_ERROR("NativeCommandProcessor: failed to upload texture data ({}x{})", rgba_width,
+                rgba_height);
     dfn.vkDestroyImageView(device, texture.view, nullptr);
     dfn.vkDestroyImage(device, texture.image, nullptr);
     dfn.vkFreeMemory(device, texture.memory, nullptr);

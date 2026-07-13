@@ -241,6 +241,17 @@ class NocturnerecompApp : public rex::ReXApp {
       // commands, per SetNativeGpuCommandCallback's contract.
       native_command_processor_ = std::make_unique<nocturne::NativeCommandProcessor>(
           vulkan_provider_.get(), vulkan_presenter_.get());
+
+      // Mirrors ReXApp's own IGraphicsSystem::InitializeAssetReplacement call
+      // for the normal xenos path (see rex_app.cpp) -- this renderer has no
+      // IGraphicsSystem, so nothing does that wiring automatically. Only
+      // texture replacement is wired here: the SDK's shader-replacement path
+      // (PipelineCache::ApplyDxbcReplacement) swaps in raw DXBC and is
+      // D3D12-only, with no SPIR-V equivalent this Vulkan-only renderer could
+      // reuse.
+      native_command_processor_->InitializeTextureReplacement(
+          runtime()->ModOverlayRoots("textures"), runtime()->ModDumpRoot());
+
       rex::system::kernel_state()->SetNativeGpuCommandCallback(
           [this](const rex::graphics::PacketInfo& info, const uint8_t* packet_base) {
             native_command_processor_->OnPacket(info, packet_base);

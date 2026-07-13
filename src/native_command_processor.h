@@ -13,10 +13,13 @@
 #include <unordered_set>
 #include <vector>
 
+#include <filesystem>
+
 #include <rex/graphics/packet_disassembler.h>
 #include <rex/graphics/pipeline/shader/shader.h>
 #include <rex/graphics/pipeline/shader/spirv.h>
 #include <rex/graphics/pipeline/shader/spirv_translator.h>
+#include <rex/graphics/pipeline/texture/replacement.h>
 #include <rex/graphics/register_file.h>
 #include <rex/ui/overlay/shader_debugger_overlay.h>
 #include <rex/ui/presenter.h>
@@ -78,6 +81,18 @@ class NativeCommandProcessor {
   // real backend's "zero overhead while the debugger is closed" behavior.
   void SetShaderProfilingEnabled(bool enabled) { shader_profiling_enabled_ = enabled; }
   void ResetShaderProfiling() { shader_profile_.clear(); }
+
+  // Wires this renderer's texture uploads (GetOrUploadTexture) into the
+  // SDK's own mod texture-replacement pipeline (rex::graphics::
+  // TextureReplacement) -- the same content-hash-keyed <mod_root>/<hash16>
+  // .dds|.png convention the D3D12/Vulkan xenos backends already use, so
+  // existing texture mods work unmodified against this renderer too. Call
+  // once after construction, mirroring ReXApp's own
+  // IGraphicsSystem::InitializeAssetReplacement call for the normal xenos
+  // path (see rex_app.cpp) -- this renderer has no IGraphicsSystem, so
+  // nothing does that wiring automatically.
+  void InitializeTextureReplacement(std::vector<std::filesystem::path> mod_roots,
+                                    std::filesystem::path dump_root);
 
  private:
   void PresentFrame();
@@ -453,6 +468,12 @@ class NativeCommandProcessor {
   bool texture_cache_limit_logged_ = false;
   std::unordered_map<uint64_t, UploadedTexture> texture_cache_;
   void DestroyTextureCache();
+
+  // See InitializeTextureReplacement. Null until that's called (or if it's
+  // never called, e.g. a standalone debug build) -- GetOrUploadTexture treats
+  // that the same as "no replacement found" and falls back to the normal
+  // guest-memory decode path.
+  std::unique_ptr<rex::graphics::TextureReplacement> texture_replacement_;
   // Constants descriptor sets differ per draw (each draw gets fresh constant
   // buffers -- see TransientBuffer) and Vulkan disallows updating a
   // descriptor set already bound within a not-yet-executed command buffer,
