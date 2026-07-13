@@ -678,6 +678,25 @@ bool NativeCommandProcessor::InitializePipelineResources() {
     dfn.vkUpdateDescriptorSets(device, 1, &write, 0, nullptr);
   }
 
+  // Constants arena (see header): one persistently-mapped uniform buffer that
+  // upload_constant_buffer suballocates from, replacing per-draw allocations.
+  {
+    constants_arena_alignment_ =
+        std::max<VkDeviceSize>(1, vulkan_device->properties().minUniformBufferOffsetAlignment);
+    if (!rex::ui::vulkan::util::CreateDedicatedAllocationBuffer(
+            vulkan_device, kConstantsArenaSize, VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT,
+            rex::ui::vulkan::util::MemoryPurpose::kUpload, constants_arena_buffer_,
+            constants_arena_memory_)) {
+      REXGPU_ERROR("NativeCommandProcessor: failed to create the constants arena buffer");
+      return false;
+    }
+    if (dfn.vkMapMemory(device, constants_arena_memory_, 0, kConstantsArenaSize, 0,
+                        reinterpret_cast<void**>(&constants_arena_mapped_)) != VK_SUCCESS) {
+      REXGPU_ERROR("NativeCommandProcessor: failed to map the constants arena buffer");
+      return false;
+    }
+  }
+
   // Offscreen color target draws accumulate into across a frame.
   {
     VkImageCreateInfo image_info{};
@@ -849,6 +868,12 @@ void NativeCommandProcessor::DestroyPipelineResources() {
   if (shared_memory_memory_ != VK_NULL_HANDLE)
     dfn.vkFreeMemory(device, shared_memory_memory_, nullptr);
 
+  if (constants_arena_mapped_) dfn.vkUnmapMemory(device, constants_arena_memory_);
+  if (constants_arena_buffer_ != VK_NULL_HANDLE)
+    dfn.vkDestroyBuffer(device, constants_arena_buffer_, nullptr);
+  if (constants_arena_memory_ != VK_NULL_HANDLE)
+    dfn.vkFreeMemory(device, constants_arena_memory_, nullptr);
+
   DestroyPostProcessPipeline();
 
   DestroyTextureCache();
@@ -912,7 +937,43 @@ void NativeCommandProcessor::OnPacket(const rex::graphics::PacketInfo& info,
   }
 
   const char* name = info.type_info ? info.type_info->name : "";
-  if (std::strcmp(name, "PM4_IM_LOAD") == 0) {
+  // Note: PM4_INTERRUPT (the swap-completion CPU interrupt) is dispatched by
+  // the SDK's HeadlessWriteRegister decode walk, not here -- it owns the
+  // scratch-register write-back state needed to check that the guest's
+  // interrupt-callback slot is actually armed before firing (dispatching
+  // while the slot holds the 0x0BADF00D "disarmed" filler makes the guest
+  // ISR trap with "Unanticipated CPU_INTERRUPT").
+  if (std::strcmp(name, "PM4_EVENT_WRITE_SHD") == 0) {
+    // GPU-completion fence: on real hardware (and on the xenos backend --
+    // CommandProcessor::ExecutePacketType3_EVENT_WRITE_SHD) the GPU writes
+    // either the packet's literal value or the swap counter to a guest
+    // physical address once the preceding commands complete. The guest's D3D
+    // runtime polls these words to gauge GPU progress (frame-completion
+    // fences, command-buffer consumption). Never servicing them left every
+    // fence frozen, so the game's frame-pacing logic saw a GPU that made no
+    // progress and periodically fast-forwarded to compensate (the ~6s
+    // "skip ahead" burst -- see docs/native-renderer-pacing-investigation.md).
+    // Since the native path consumes commands synchronously, "the GPU is done
+    // with everything decoded so far" is truthful at the moment this packet is
+    // decoded, so write the fence immediately.
+    auto payload_dword = [packet_base](uint32_t index) {
+      return rex::memory::load_and_swap<uint32_t>(packet_base + index * 4);
+    };
+    uint32_t initiator = payload_dword(1);
+    uint32_t address = payload_dword(2);
+    uint32_t value = payload_dword(3);
+    // Bit 31 of the initiator selects "write the GPU swap counter" (xenos
+    // increments its counter_ once per PM4_XE_SWAP; swap_counter_ mirrors
+    // that, incremented once per PresentFrame).
+    uint32_t data_value = (initiator >> 31) ? swap_counter_ : value;
+    auto endianness = static_cast<rex::graphics::xenos::Endian>(address & 0x3);
+    address &= ~0x3u;
+    data_value = rex::graphics::xenos::GpuSwap(data_value, endianness);
+    if (address != 0) {
+      rex::memory::store(
+          rex::system::kernel_state()->memory()->TranslatePhysical(address), data_value);
+    }
+  } else if (std::strcmp(name, "PM4_IM_LOAD") == 0) {
     OnShaderLoad(info, packet_base, /*immediate=*/false);
   } else if (std::strcmp(name, "PM4_IM_LOAD_IMMEDIATE") == 0) {
     OnShaderLoad(info, packet_base, /*immediate=*/true);
@@ -921,6 +982,10 @@ void NativeCommandProcessor::OnPacket(const rex::graphics::PacketInfo& info,
   }
 
   if (info.type_info && info.type_info->category == rex::graphics::PacketCategory::kSwap) {
+    // Mirrors xenos's CommandProcessor: counter_ increments once per
+    // PM4_XE_SWAP; EVENT_WRITE_SHD fences with the counter-select initiator
+    // bit report this value (see the fence handler above).
+    ++swap_counter_;
     PresentFrame();
   }
 }
@@ -2791,6 +2856,10 @@ void NativeCommandProcessor::EnsureFrameBegun() {
   FreeTransientBuffers();
   dfn.vkResetDescriptorPool(device, transient_descriptor_pool_, 0);
 
+  // The fence wait above guarantees the GPU has finished reading last frame's
+  // constants, so it's now safe to reuse the arena from the top.
+  constants_arena_offset_ = 0;
+
   VkCommandBufferBeginInfo begin_info{};
   begin_info.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
   begin_info.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
@@ -3061,22 +3130,21 @@ void NativeCommandProcessor::TryDraw(rex::graphics::xenos::PrimitiveType prim_ty
   // constants were written last, not its own.
   using rex::graphics::SpirvShaderTranslator;
   auto upload_constant_buffer = [&](const void* data, size_t size, uint32_t binding) {
-    VkBuffer buffer;
-    VkDeviceMemory memory;
-    if (!rex::ui::vulkan::util::CreateDedicatedAllocationBuffer(
-            vulkan_device, size, VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT,
-            rex::ui::vulkan::util::MemoryPurpose::kUpload, buffer, memory)) {
-      REXGPU_ERROR("NativeCommandProcessor: failed to allocate a constant buffer");
+    // Suballocate from the persistently-mapped constants arena by offset,
+    // instead of a fresh vkCreateBuffer + dedicated vkAllocateMemory per call
+    // (see the constants_arena_* members' doc). The used range is flushed once
+    // per frame in PresentFrame; the offset resets once per frame in
+    // EnsureFrameBegun after the fence wait confirms the GPU is done reading it.
+    VkDeviceSize aligned_offset = (constants_arena_offset_ + constants_arena_alignment_ - 1) &
+                                  ~(constants_arena_alignment_ - 1);
+    if (aligned_offset + size > kConstantsArenaSize) {
+      REXGPU_ERROR("NativeCommandProcessor: constants arena exhausted, skipping a constant buffer");
       return;
     }
-    void* mapped = nullptr;
-    dfn.vkMapMemory(device, memory, 0, size, 0, &mapped);
-    std::memcpy(mapped, data, size);
-    FlushMapped(vulkan_device, memory);
-    dfn.vkUnmapMemory(device, memory);
-    frame_transient_buffers_.push_back({buffer, memory});
+    std::memcpy(constants_arena_mapped_ + aligned_offset, data, size);
+    constants_arena_offset_ = aligned_offset + size;
 
-    VkDescriptorBufferInfo buffer_info{buffer, 0, size};
+    VkDescriptorBufferInfo buffer_info{constants_arena_buffer_, aligned_offset, size};
     VkWriteDescriptorSet write{};
     write.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
     write.dstSet = constants_set;
@@ -3591,6 +3659,14 @@ void NativeCommandProcessor::PresentFrame() {
   const rex::ui::vulkan::VulkanDevice* vulkan_device = provider_->vulkan_device();
   const rex::ui::vulkan::VulkanDevice::Functions& dfn = vulkan_device->functions();
   VkDevice device = vulkan_device->device();
+
+  // Flush all of this frame's constant-buffer writes to the arena in one call
+  // (kUpload memory is only guaranteed host-visible, not coherent -- see the
+  // FlushMapped comment), replacing the old per-buffer flush. Must happen
+  // before the command buffer that reads the arena is submitted below.
+  if (constants_arena_offset_ > 0) {
+    FlushMapped(vulkan_device, constants_arena_memory_);
+  }
 
   // Render pass's finalLayout is already TRANSFER_SRC_OPTIMAL, so
   // color_target_image_ needs no barrier before the blit below.

@@ -499,6 +499,30 @@ class NativeCommandProcessor {
   std::vector<TransientBuffer> frame_transient_buffers_;
   void FreeTransientBuffers();
 
+  // Constants arena: one large, persistently-mapped uniform buffer that
+  // upload_constant_buffer suballocates from by offset, instead of doing a
+  // fresh vkCreateBuffer + dedicated vkAllocateMemory per constant buffer per
+  // draw (up to 5/draw x hundreds of draws/frame ~= thousands of
+  // vkAllocateMemory calls/frame). That per-draw allocation cost is the
+  // dominant reason inline PM4 processing balloons into multi-second stalls
+  // that freeze the guest thread (the "skip ahead" -- see
+  // docs/native-renderer-pacing-investigation.md). The offset is reset once
+  // per frame in EnsureFrameBegun, right after the fence wait guarantees the
+  // GPU has finished reading last frame's region, and the used range is
+  // flushed once per frame in PresentFrame before submit.
+  static constexpr VkDeviceSize kConstantsArenaSize = 64ull * 1024 * 1024;
+  VkBuffer constants_arena_buffer_ = VK_NULL_HANDLE;
+  VkDeviceMemory constants_arena_memory_ = VK_NULL_HANDLE;
+  uint8_t* constants_arena_mapped_ = nullptr;
+  VkDeviceSize constants_arena_offset_ = 0;
+  VkDeviceSize constants_arena_alignment_ = 256;
+
+  // GPU swap counter, mirroring xenos CommandProcessor::counter_: increments
+  // once per swap packet; EVENT_WRITE_SHD fences whose initiator selects the
+  // counter (bit 31) write this value to guest memory as the GPU-progress
+  // signal the game's frame-pacing logic reads (see OnPacket).
+  uint32_t swap_counter_ = 0;
+
   // HeadlessRingWaitBypass (docs/native-renderer-headless-boot.md) removes
   // all real GPU backpressure from the guest's frame loop, so without this it
   // free-runs at thousands of "frames" per second -- pace it to something
