@@ -191,6 +191,19 @@ class NocturnerecompApp : public rex::ReXApp {
   // just a presentable surface for phase 3's native command processor (and,
   // in the meantime, the SDK's own ImGui overlays) to draw into.
   void OnPreLaunchModule() override {
+    // If a gpu_plugin cvar was set (e.g. "xenos"), ReXApp::SetupPresentation
+    // already loaded that plugin as config_.graphics and ran its own
+    // SetupPresentation -- runtime()->graphics_system() is non-null in that
+    // case. Skip standing up the native Vulkan swapchain/command-processor
+    // entirely then; doing both left the native presenter's swapchain image
+    // (which nothing ever draws into, since PM4 packets go to the plugin's
+    // real CommandProcessor instead) as the one actually presented, i.e. a
+    // solid black screen despite the game running fine through the plugin.
+    if (runtime()->graphics_system()) {
+      REXGPU_INFO("Native renderer: gpu_plugin set, deferring to plugin's own presentation");
+      return;
+    }
+
     REXGPU_INFO("Native renderer: OnPreLaunchModule entered");
     // VulkanProvider::CreatePresenter must run on the UI thread (see
     // GraphicsSystem::SetupPresentation for the equivalent SDK-mode call);
