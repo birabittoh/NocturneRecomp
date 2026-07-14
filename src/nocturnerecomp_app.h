@@ -39,6 +39,17 @@
 
 #include <rex/system/kernel_state.h>
 
+// Single on/off vsync toggle for this renderer, layered on top of the SDK's
+// vulkan_allow_present_mode_immediate cvar (vulkan_presenter.cpp): disabling
+// it drops "immediate" (tearing) out of swapchain present-mode selection,
+// leaving mailbox (tear-free, non-blocking -- see OnPreLaunchModule below
+// for why mailbox and not FIFO) as the effective vsync-on mode.
+REXCVAR_DEFINE_BOOL(vsync, true, "Video", "Enable vsync");
+
+// Defined in rexglue-sdk/src/ui/vulkan/vulkan_presenter.cpp; the vsync cvar
+// above drives this rather than duplicating present-mode selection here.
+REXCVAR_DECLARE(bool, vulkan_allow_present_mode_immediate);
+
 class NocturnerecompApp : public rex::ReXApp {
  public:
   using rex::ReXApp::ReXApp;
@@ -193,6 +204,19 @@ class NocturnerecompApp : public rex::ReXApp {
   // just a presentable surface for phase 3's native command processor (and,
   // in the meantime, the SDK's own ImGui overlays) to draw into.
   void OnPreLaunchModule() override {
+    // Applied before either presentation path (native or gpu_plugin) builds
+    // its swapchain below, since both share vulkan_presenter.cpp's present-
+    // mode selection. Only toggles "immediate" (the tearing mode) -- mailbox
+    // is left enabled either way since it's also tear-free. Forcing a hard
+    // FIFO fallback here (disabling mailbox too) was tried first and caused
+    // guest logic to run at half its normal rate: FIFO's vkQueuePresent
+    // blocks for a real vsync interval (~16ms), which stacks with
+    // NativeCommandProcessor::PresentFrame's own steady_clock-based pacing
+    // sleep (also ~16ms, needed for fast_forward's guest_time_scalar
+    // decoupling) instead of replacing it, roughly doubling per-frame time.
+    // Mailbox is tear-free but non-blocking, so it doesn't double-count.
+    REXCVAR_SET(vulkan_allow_present_mode_immediate, !REXCVAR_GET(vsync));
+
     // If a gpu_plugin cvar was set (e.g. "xenos"), ReXApp::SetupPresentation
     // already loaded that plugin as config_.graphics and ran its own
     // SetupPresentation -- runtime()->graphics_system() is non-null in that
