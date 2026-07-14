@@ -146,7 +146,7 @@ constexpr uint32_t kRoomsAddrVanilla = 0x83164CD0u;
 // assets/default.xex (imagebase 0x82000000) and live-probed.
 //
 // Consumers must not trust this blindly: dereference it, then sanity-check
-// the pointed-to struct (see mods_src/fast_forward's plausibility guard)
+// the pointed-to struct (see src/fast_forward.cpp's plausibility guard)
 // before reading/writing game_time/target_time through it, in case this
 // ever runs against a build where the address doesn't hold what's expected.
 constexpr uint32_t kAppSingletonPtrAddrVanilla = 0x82E4F808u;

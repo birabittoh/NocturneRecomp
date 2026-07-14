@@ -1,5 +1,5 @@
-// fast_forward mod - hold a key (default Ctrl) or a controller button
-// (default RB) to speed up the game.
+// fast_forward - hold a key (default Ctrl) or a controller button (default
+// RB) to speed up the game.
 //
 // Two complementary mechanisms:
 //
@@ -23,14 +23,14 @@
 //    builds); guarded by a plausibility check before ever writing.
 //
 // Both are restored/stopped whenever both the key and button are released,
-// and in the destructor, so a mod reload/shutdown never leaves the game
-// stuck sped up.
-
-#include <rex/system/mod_plugin.h>
+// and on unbind, so a shutdown never leaves the game stuck sped up.
+#include "fast_forward.h"
 
 #include <algorithm>
-#include <cstdint>
+#include <cmath>
 #include <cstdlib>
+#include <string>
+#include <unordered_map>
 
 #include <rex/chrono/clock.h>
 #include <rex/cvar.h>
@@ -42,17 +42,15 @@
 #include <rex/system/mod_registry.h>
 #include <rex/system/xmemory.h>
 #include <rex/ui/imgui_dialog.h>
+#include <rex/ui/imgui_drawer.h>
 #include <rex/ui/keybinds.h>
 #include <rex/ui/window.h>
 #include <rex/ui/window_listener.h>
 
-#include <chrono>
-#include <cmath>
-#include <string>
-#include <unordered_map>
-
 REXCVAR_DEFINE_DOUBLE(fast_forward_scale, 2.5, "Fast Forward",
                       "Guest time multiplier applied while the fast-forward key/button is held");
+
+namespace nocturne {
 
 namespace {
 
@@ -82,7 +80,7 @@ constexpr int64_t kMaxPlausibleTimeDelta = 10'000;
 
 // Gamepad has no per-button event stream (XInput is poll-based, unlike
 // rex::ui::KeyEvent) -- unlike kKeyNames in rexglue-sdk's keybinds.cpp, this
-// table isn't shared by the SDK, so it's duplicated here at mod scope.
+// table isn't shared by the SDK, so it's duplicated here at file scope.
 const std::unordered_map<std::string, rex::input::X_INPUT_GAMEPAD_BUTTON>& GamepadButtonNames() {
   static const std::unordered_map<std::string, rex::input::X_INPUT_GAMEPAD_BUTTON> kNames = {
       {"A", rex::input::X_INPUT_GAMEPAD_A},
@@ -113,16 +111,23 @@ void WriteGuestI32BE(rex::memory::Memory* memory, uint32_t guest_address, int32_
   rex::memory::store_and_swap<uint32_t>(host_address, static_cast<uint32_t>(value));
 }
 
+}  // namespace
+
 // Listens for both the keyboard hold (real key-down/up events) and the
 // controller hold (polled once per UI frame via OnDraw -- XInput has no
 // button-event callback, see achievements_menu.cpp's B-watcher for the same
 // polling pattern in the base game). Speed-up is active whenever either
 // input is held; released only once both are up.
-class FastForwardListener : public rex::ui::WindowInputListener, public rex::ui::ImGuiDialog {
+class FastForwardWatcher : public rex::ui::WindowInputListener, public rex::ui::ImGuiDialog {
  public:
-  FastForwardListener(rex::ui::Window* window, rex::ui::ImGuiDrawer* drawer,
-                      rex::input::InputSystem* input_system, rex::Runtime* runtime)
-      : ImGuiDialog(drawer), window_(window), input_system_(input_system), runtime_(runtime) {
+  // `window`/`input_system`/`runtime` may all still be null here -- the
+  // app's own OnCreateDialogs (where this watcher is attached) runs before
+  // its OnPostSetup (where FastForward::Bind supplies them), the reverse of
+  // mod-loading order this code was ported from. SetContext() is called once
+  // they're actually known.
+  FastForwardWatcher(rex::ui::Window* window, rex::ui::ImGuiDrawer* drawer,
+                     rex::input::InputSystem* input_system, rex::Runtime* runtime)
+      : ImGuiDialog(drawer) {
     // Registered the same way rex::ui::RegisterBind registers its own binds
     // (same CVAR category, so these show up alongside other keybinds in the
     // settings overlay) -- RegisterBind itself only dispatches on key-down,
@@ -154,25 +159,31 @@ class FastForwardListener : public rex::ui::WindowInputListener, public rex::ui:
         .lifecycle = rex::cvar::Lifecycle::kHotReload,
         .default_value = std::string(kDefaultBindButton),
     });
-    window_->AddInputListener(this, 0);
+    SetContext(window, input_system, runtime);
   }
 
-  ~FastForwardListener() override {
-    window_->RemoveInputListener(this);
+  ~FastForwardWatcher() override {
+    if (window_) {
+      window_->RemoveInputListener(this);
+    }
     if (key_held_ || pad_held_) {
       rex::chrono::Clock::set_guest_time_scalar(1.0);
     }
   }
 
-  // Looks up game_symbols's "app.singleton_ptr" (published in its own
-  // OnCreateDialogs, ordered before this mod's via `requires` in mod.toml).
-  void ResolveAddress() {
-    if (runtime_ && runtime_->mod_registry()) {
-      if (auto addr = runtime_->mod_registry()->FindAddress("app.singleton_ptr")) {
-        app_singleton_ptr_addr_ = *addr;
-        addr_resolved_ = true;
-      }
+  // Called once window/input_system/runtime are known -- either immediately
+  // (constructor, if FastForward::Bind already ran) or later from
+  // FastForward::Bind itself. The input listener is only registered once,
+  // the first time a non-null window shows up.
+  void SetContext(rex::ui::Window* window, rex::input::InputSystem* input_system,
+                  rex::Runtime* runtime) {
+    input_system_ = input_system;
+    runtime_ = runtime;
+    if (window_ || !window) {
+      return;
     }
+    window_ = window;
+    window_->AddInputListener(this, 0);
   }
 
   void OnKeyDown(rex::ui::KeyEvent& e) override {
@@ -195,11 +206,20 @@ class FastForwardListener : public rex::ui::WindowInputListener, public rex::ui:
  protected:
   // Runs once per UI frame regardless of visibility (no ImGui::Begin call
   // here, so nothing is actually drawn) -- used as a per-frame poll point
-  // for the controller's held state, and as the per-frame tick for the
-  // target_time bump below (real elapsed time is measured here rather than
-  // assuming a fixed rate, since this can run at monitor refresh -- see
-  // src/repaint_pump.h).
+  // for the controller's held state, as the lazy resolve point for
+  // game_symbols's "app.singleton_ptr" (published in its own
+  // OnCreateDialogs, which may run before or after this one), and as the
+  // per-frame tick for the target_time bump below (real elapsed time is
+  // measured here rather than assuming a fixed rate, since this can run at
+  // monitor refresh -- see src/repaint_pump.h).
   void OnDraw(ImGuiIO&) override {
+    if (!addr_resolved_ && runtime_ && runtime_->mod_registry()) {
+      if (auto addr = runtime_->mod_registry()->FindAddress("app.singleton_ptr")) {
+        app_singleton_ptr_addr_ = *addr;
+        addr_resolved_ = true;
+      }
+    }
+
     if (input_system_) {
       auto it = GamepadButtonNames().find(bind_button_);
       if (it != GamepadButtonNames().end()) {
@@ -306,9 +326,9 @@ class FastForwardListener : public rex::ui::WindowInputListener, public rex::ui:
                reason);
   }
 
-  rex::ui::Window* window_;
-  rex::input::InputSystem* input_system_;
-  rex::Runtime* runtime_;
+  rex::ui::Window* window_ = nullptr;
+  rex::input::InputSystem* input_system_ = nullptr;
+  rex::Runtime* runtime_ = nullptr;
   std::string bind_key_ = kDefaultBindKey;
   std::string bind_button_ = kDefaultBindButton;
   bool key_held_ = false;
@@ -321,45 +341,31 @@ class FastForwardListener : public rex::ui::WindowInputListener, public rex::ui:
   double target_time_remainder_ = 0.0;
 };
 
-class FastForwardMod : public rex::system::IModPlugin {
- public:
-  FastForwardMod(rex::ui::Window* window, rex::input::InputSystem* input_system,
-                 rex::Runtime* runtime)
-      : window_(window), input_system_(input_system), runtime_(runtime) {}
+FastForward::FastForward() = default;
+FastForward::~FastForward() = default;
 
-  void OnCreateDialogs(rex::ui::ImGuiDrawer* drawer) override {
-    listener_ = std::make_unique<FastForwardListener>(window_, drawer, input_system_, runtime_);
+void FastForward::Bind(rex::ui::Window* window, rex::input::InputSystem* input_system,
+                       rex::Runtime* runtime) {
+  window_ = window;
+  input_system_ = input_system;
+  runtime_ = runtime;
+  // OnCreateDialogs (AttachWatcher) runs before OnPostSetup (Bind) for the
+  // app itself, unlike for a mod -- if the watcher already exists, hand it
+  // the now-known context so it can register its input listener.
+  if (watcher_) {
+    watcher_->SetContext(window_, input_system_, runtime_);
   }
-
-  void OnModuleLaunched() override {
-    if (listener_) {
-      listener_->ResolveAddress();
-    }
-  }
-
-  void OnShutdown() override {
-    // Guarantees the guest clock isn't left sped up if the key/button was
-    // still held at shutdown.
-    listener_.reset();
-  }
-
- private:
-  rex::ui::Window* window_;
-  rex::input::InputSystem* input_system_;
-  rex::Runtime* runtime_;
-  std::unique_ptr<FastForwardListener> listener_;
-};
-
-}  // namespace
-
-extern "C" REX_MOD_PLUGIN_EXPORT uint32_t rex_mod_abi_version(void) {
-  return rex::system::kModPluginAbiVersion;
 }
 
-extern "C" REX_MOD_PLUGIN_EXPORT rex::system::IModPlugin* rex_mod_create(
-    uint32_t abi_version, const rex::system::ModHostContext* ctx) {
-  if (abi_version != rex::system::kModPluginAbiVersion || !ctx || !ctx->window) {
-    return nullptr;
+void FastForward::AttachWatcher(rex::ui::ImGuiDrawer* drawer) {
+  if (drawer && !watcher_) {
+    watcher_ = std::make_unique<FastForwardWatcher>(window_, drawer, input_system_, runtime_);
   }
-  return new FastForwardMod(ctx->window, ctx->input_system, ctx->runtime);
 }
+
+FastForward& GetFastForward() {
+  static FastForward instance;
+  return instance;
+}
+
+}  // namespace nocturne

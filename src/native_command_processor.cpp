@@ -4202,9 +4202,9 @@ void NativeCommandProcessor::PresentFrame() {
   }
 
   // Scaled by the guest clock's time scalar (see rex::chrono::Clock::
-  // set_guest_time_scalar, used by mods_src/fast_forward) so this real-time
+  // set_guest_time_scalar, used by src/fast_forward.h) so this real-time
   // floor doesn't cap out the guest's own effective speed while
-  // fast-forwarding -- without this, a mod scaling guest time to 2.5x would
+  // fast-forwarding -- without this, scaling guest time to 2.5x would
   // still only be allowed to submit one frame per real 16ms here, visibly
   // capping the game back at 60fps despite the guest logic running faster
   // underneath.
