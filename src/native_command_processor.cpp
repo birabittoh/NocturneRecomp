@@ -1204,7 +1204,7 @@ rex::graphics::Shader* NativeCommandProcessor::GetOrAnalyzeShader(
   static uint32_t disasm_logged = 0;
   if (disasm_logged < 6) {
     ++disasm_logged;
-    REXGPU_INFO("NativeCommandProcessor: shader disasm ({} dwords, type={}):\n{}", ucode.size(),
+    REXGPU_DEBUG("NativeCommandProcessor: shader disasm ({} dwords, type={}):\n{}", ucode.size(),
                type == rex::graphics::xenos::ShaderType::kVertex ? "vertex" : "pixel",
                shader->ucode_disassembly());
   }
@@ -2611,7 +2611,7 @@ NativeCommandProcessor::UploadedTexture* NativeCommandProcessor::GetOrUploadText
   static uint32_t debug_upload_logged = 0;
   if (debug_upload_logged < 100) {
     ++debug_upload_logged;
-    REXGPU_INFO("NativeCommandProcessor: texture uploaded {}x{} base={:#x} size={:#x}", width,
+    REXGPU_DEBUG("NativeCommandProcessor: texture uploaded {}x{} base={:#x} size={:#x}", width,
                height, texture.base_address_bytes, texture.size_bytes);
   }
   return &inserted->second;
@@ -3271,7 +3271,7 @@ void NativeCommandProcessor::TryResolveCopy() {
     static uint32_t debug_resolve_logged = 0;
     if (debug_resolve_logged < 100) {
       ++debug_resolve_logged;
-      REXGPU_INFO(
+      REXGPU_DEBUG(
           "NativeCommandProcessor: EDRAM resolve copy ({},{})-({},{}) {}x{} -> dest_base={:#x} "
           "pitch={}",
           x0, y0, x1, y1, width, height, dest_base, pitch_texels);
