@@ -34,6 +34,7 @@
 #include "icon.generated.h"
 #include "native_command_processor.h"
 #include "native_immediate_drawer.h"
+#include "repaint_pump.h"
 #include "version.generated.h"
 
 #include <rex/system/kernel_state.h>
@@ -250,6 +251,16 @@ class NocturnerecompApp : public rex::ReXApp {
         if (auto* drawer = imgui_drawer()) {
           vulkan_presenter_->AddUIDrawerFromUIThread(drawer, 0);
         }
+
+        // Decouple host present rate from the guest's paced 60fps: with no
+        // continuous paint request, RefreshGuestOutput only pokes one host
+        // paint per guest frame, capping presentation at 60fps even though
+        // the swapchain/present mode could go faster. This drawer requests
+        // another UI-thread paint every frame it draws (which draws nothing
+        // itself), keeping the UI thread re-presenting the latest guest-
+        // output mailbox image at monitor refresh -- see repaint_pump.h.
+        repaint_pump_ = std::make_unique<nocturne::RepaintPumpDrawer>(vulkan_presenter_.get());
+        vulkan_presenter_->AddUIDrawerFromUIThread(repaint_pump_.get(), 1000);
         REXGPU_INFO("Native renderer: Vulkan swapchain ready");
       } else {
         REXGPU_ERROR("Native renderer: failed to initialize the Vulkan immediate drawer");
@@ -336,4 +347,5 @@ class NocturnerecompApp : public rex::ReXApp {
   std::unique_ptr<rex::ui::vulkan::VulkanProvider> vulkan_provider_;
   std::unique_ptr<rex::ui::Presenter> vulkan_presenter_;
   std::unique_ptr<nocturne::NativeCommandProcessor> native_command_processor_;
+  std::unique_ptr<nocturne::RepaintPumpDrawer> repaint_pump_;
 };

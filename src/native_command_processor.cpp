@@ -15,6 +15,7 @@
 #include <spirv-tools/libspirv.h>
 #include <xxhash.h>
 
+#include <rex/chrono/clock.h>
 #include <rex/cvar.h>
 #include <rex/graphics/flags.h>
 #include <rex/graphics/pipeline/texture/util.h>
@@ -4200,11 +4201,23 @@ void NativeCommandProcessor::PresentFrame() {
     return;
   }
 
-  constexpr auto kMinFrameInterval = std::chrono::milliseconds(16);
+  // Scaled by the guest clock's time scalar (see rex::chrono::Clock::
+  // set_guest_time_scalar, used by mods_src/fast_forward) so this real-time
+  // floor doesn't cap out the guest's own effective speed while
+  // fast-forwarding -- without this, a mod scaling guest time to 2.5x would
+  // still only be allowed to submit one frame per real 16ms here, visibly
+  // capping the game back at 60fps despite the guest logic running faster
+  // underneath.
+  double guest_time_scalar = rex::chrono::Clock::guest_time_scalar();
+  if (!(guest_time_scalar > 0.0)) {
+    guest_time_scalar = 1.0;
+  }
+  auto min_frame_interval = std::chrono::duration_cast<std::chrono::steady_clock::duration>(
+      std::chrono::duration<double, std::milli>(16.0 / guest_time_scalar));
   auto now = std::chrono::steady_clock::now();
   auto elapsed = now - last_present_time_;
-  if (elapsed < kMinFrameInterval) {
-    std::this_thread::sleep_for(kMinFrameInterval - elapsed);
+  if (elapsed < min_frame_interval) {
+    std::this_thread::sleep_for(min_frame_interval - elapsed);
   }
   last_present_time_ = std::chrono::steady_clock::now();
 
@@ -4212,23 +4225,49 @@ void NativeCommandProcessor::PresentFrame() {
   // if this frame had zero (or all-skipped) draws.
   EnsureFrameBegun();
 
-  const rex::ui::vulkan::VulkanDevice* vulkan_device = provider_->vulkan_device();
-  const rex::ui::vulkan::VulkanDevice::Functions& dfn = vulkan_device->functions();
-  VkDevice device = vulkan_device->device();
+  // Fast-forward frame-skip: the guest's mode loop calls PresentFrame once
+  // per logic iteration (docs/native-renderer-pacing-investigation.md), so
+  // without this gate, real GPU present work below would run every single
+  // call and cap guest FPS at whatever the Vulkan submit/present/fence-wait
+  // round trip costs (~95fps measured) regardless of how high
+  // guest_time_scalar is set. Gate physical presentation to a fixed,
+  // *unscaled* ~60Hz real-time interval instead -- logic keeps iterating
+  // (and drawing into the still-open frame below, via EnsureFrameBegun's
+  // no-op fast path) between real presents. kMaxFramesBetweenPresents is a
+  // safety valve bounding worst-case accumulated-draws growth if the scaled
+  // sleep above collapses toward zero at extreme scale values (existing
+  // transient descriptor pool / constants arena headroom was sized for 4096
+  // draws/frame -- see bug #6 in native-renderer-pacing-investigation.md's
+  // history -- so 64 accumulated logical frames is comfortably inside that
+  // margin).
+  constexpr auto kPhysicalPresentInterval = std::chrono::milliseconds(16);
+  constexpr uint32_t kMaxFramesBetweenPresents = 64;
+  ++frames_since_present_;
+  bool do_present = (last_present_time_ - last_physical_present_time_ >=
+                     kPhysicalPresentInterval) ||
+                    frames_since_present_ >= kMaxFramesBetweenPresents;
 
-  // Flush all of this frame's constant-buffer writes to the arena in one call
-  // (kUpload memory is only guaranteed host-visible, not coherent -- see the
-  // FlushMapped comment), replacing the old per-buffer flush. Must happen
-  // before the command buffer that reads the arena is submitted below.
-  if (constants_arena_offset_ > 0) {
-    FlushMapped(vulkan_device, constants_arena_memory_);
-  }
+  if (do_present) {
+    frames_since_present_ = 0;
+    last_physical_present_time_ = last_present_time_;
 
-  // Render pass's finalLayout is already TRANSFER_SRC_OPTIMAL, so
-  // color_target_image_ needs no barrier before the blit below.
-  dfn.vkCmdEndRenderPass(command_buffer_);
+    const rex::ui::vulkan::VulkanDevice* vulkan_device = provider_->vulkan_device();
+    const rex::ui::vulkan::VulkanDevice::Functions& dfn = vulkan_device->functions();
+    VkDevice device = vulkan_device->device();
 
-  bool refreshed = presenter_->RefreshGuestOutput(
+    // Flush all of this frame's constant-buffer writes to the arena in one call
+    // (kUpload memory is only guaranteed host-visible, not coherent -- see the
+    // FlushMapped comment), replacing the old per-buffer flush. Must happen
+    // before the command buffer that reads the arena is submitted below.
+    if (constants_arena_offset_ > 0) {
+      FlushMapped(vulkan_device, constants_arena_memory_);
+    }
+
+    // Render pass's finalLayout is already TRANSFER_SRC_OPTIMAL, so
+    // color_target_image_ needs no barrier before the blit below.
+    dfn.vkCmdEndRenderPass(command_buffer_);
+
+    bool refreshed = presenter_->RefreshGuestOutput(
       color_target_width_, color_target_height_, color_target_width_, color_target_height_,
       [this, vulkan_device, &dfn, device](
           rex::ui::Presenter::GuestOutputRefreshContext& context) -> bool {
@@ -4360,27 +4399,31 @@ void NativeCommandProcessor::PresentFrame() {
 
         return true;
       });
-  if (!refreshed) {
-    static bool logged_refresh_failure = false;
-    if (!logged_refresh_failure) {
-      logged_refresh_failure = true;
-      REXGPU_ERROR("NativeCommandProcessor: RefreshGuestOutput failed");
+    if (!refreshed) {
+      static bool logged_refresh_failure = false;
+      if (!logged_refresh_failure) {
+        logged_refresh_failure = true;
+        REXGPU_ERROR("NativeCommandProcessor: RefreshGuestOutput failed");
+      }
     }
-  }
 
-  // Whether or not the refresh succeeded, this frame's command buffer has
-  // either been submitted or is unusable garbage either way -- start fresh
-  // next time. frame_transient_buffers_/the transient descriptor pool are
-  // reclaimed at the *start* of next frame's EnsureFrameBegun, once its
-  // fence wait confirms this frame's GPU work (which references them) is
-  // actually done.
-  frame_active_ = false;
+    // Whether or not the refresh succeeded, this frame's command buffer has
+    // either been submitted or is unusable garbage either way -- start fresh
+    // next time. frame_transient_buffers_/the transient descriptor pool are
+    // reclaimed at the *start* of next frame's EnsureFrameBegun, once its
+    // fence wait confirms this frame's GPU work (which references them) is
+    // actually done.
+    frame_active_ = false;
+  }  // do_present
 
   // See SetOnFramePresented's doc comment -- this is the only "GPU swap"
   // event this renderer has, so it's what drives the F3 overlay's guest-FPS
   // counter (and ModRegistry::DispatchTick for any mod relying on it), which
   // otherwise never fire at all under headless native rendering (no
   // GraphicsSystem exists to call the normal SetHostSwapCallback chain).
+  // Fires every logical frame regardless of do_present -- during
+  // fast-forward this should reflect true logic throughput (guest FPS), not
+  // the throttled physical present rate.
   if (on_frame_presented_) {
     on_frame_presented_();
   }

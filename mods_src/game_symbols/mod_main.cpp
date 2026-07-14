@@ -136,6 +136,22 @@ constexpr uint32_t kPlayerStatsAddrTU = 0x8317493Cu;
 // Vanilla only so far -- not yet found in the TU build.
 constexpr uint32_t kRoomsAddrVanilla = 0x83164CD0u;
 
+// Guest global holding a POINTER to the Application/framework singleton
+// object (the `a1` passed to the game's fwmain mode loop / fixed-timestep
+// tick, sub_8258B8A0 / sub_8258B3B8). On the pointed-to object: +2236 =
+// game_time, +2232 = target_time (the fixed-timestep catch-up loop's own
+// clock, units "300ths of a second" -- one 60Hz frame = 5 units). See
+// docs/native-renderer-pacing-investigation.md, "full frame-pacing chain
+// reverse-engineered", for the full derivation -- verified against
+// assets/default.xex (imagebase 0x82000000) and live-probed.
+//
+// Vanilla only -- not yet found in the TU build. Consumers must not trust
+// this blindly: dereference it, then sanity-check the pointed-to struct
+// (see mods_src/fast_forward's plausibility guard) before reading/writing
+// game_time/target_time through it, in case this ever runs against a build
+// where the address doesn't hold what's expected.
+constexpr uint32_t kAppSingletonPtrAddrVanilla = 0x82E4F808u;
+
 class GameSymbolsMod : public rex::system::IModPlugin {
  public:
   explicit GameSymbolsMod(rex::Runtime* runtime) : runtime_(runtime) {}
@@ -155,6 +171,8 @@ class GameSymbolsMod : public rex::system::IModPlugin {
       runtime_->mod_registry()->RegisterAddress("player.stats", kPlayerStatsAddrVanilla,
                                                 kPlayerStatsAddrTU);
       runtime_->mod_registry()->RegisterAddress("player.rooms", kRoomsAddrVanilla);
+      runtime_->mod_registry()->RegisterAddress("app.singleton_ptr",
+                                                kAppSingletonPtrAddrVanilla);
     }
   }
 

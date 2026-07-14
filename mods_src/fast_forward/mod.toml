@@ -1,0 +1,11 @@
+manifest_version = 2
+name = "Fast Forward"
+version = "1.0.0"
+author = "NocturneRecomp"
+description = "Hold a key (default Ctrl) to speed up the game."
+code = "fast_forward"
+requires = "game_symbols"
+# Auto-managed by scripts/make_mods.py after each build -- lists which
+# platform(s) mods/<name>/code/ currently ships a binary for. Don't edit by
+# hand; leave it empty in a fresh mod (see docs/making-mods.md).
+platform = "windows-x64"

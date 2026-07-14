@@ -633,6 +633,19 @@ class NativeCommandProcessor {
   // resembling real hardware so per-frame debug logging and CPU usage stay
   // sane. Milestone 3b may replace this with real vsync-driven pacing.
   std::chrono::steady_clock::time_point last_present_time_{};
+
+  // Fast-forward frame-skip (see docs/native-renderer-pacing-investigation.md
+  // and mods_src/fast_forward): last_present_time_ above paces how often this
+  // function is even *called* (scaled by the guest clock's time scalar), but
+  // the guest's mode loop calls PresentFrame once per logic iteration, so
+  // real GPU present work was coupled 1:1 with logic throughput and capped it
+  // at the real Vulkan submit/present/fence-wait round-trip cost (~95fps
+  // measured). These two track a separate, *unscaled* real-time gate that
+  // caps actual presentation at a safe ~60Hz regardless of fast-forward
+  // intensity, while logic keeps accumulating draws into a still-open frame
+  // in between (see PresentFrame's do_present branch).
+  std::chrono::steady_clock::time_point last_physical_present_time_{};
+  uint32_t frames_since_present_ = 0;
 };
 
 }  // namespace nocturne
