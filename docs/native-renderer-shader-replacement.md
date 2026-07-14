@@ -1,10 +1,57 @@
-# Native renderer: wiring up shader replacement (not yet done)
+# Native renderer: shader dumping and replacement
 
 Texture replacement is done (see `NativeCommandProcessor::InitializeTextureReplacement`
 and the replacement lookup in `GetOrUploadTexture`, `src/native_command_processor.cpp`)
 and works with the same `<mod_root>/textures/<hash16>.dds|.png` mods the real
-xenos backends use. Shader replacement is not — this is what's left, and why
-it's a materially different problem.
+xenos backends use. Shader dumping/replacement is now done too, via a
+SPIR-V-only path scoped to this renderer (see "What was implemented" below) —
+the rest of this doc is kept as the design record for why it had to be a new
+mechanism rather than a small follow-up to the texture work.
+
+## What was implemented
+
+* `NativeCommandProcessor::InitializeShaderReplacement(mod_roots, dump_root)`
+  (`native_command_processor.h`/`.cpp`), called from `nocturnerecomp_app.h`
+  right next to `InitializeTextureReplacement`, using
+  `runtime()->ModOverlayRoots("shaders")` (not `"textures"`) for mod roots.
+* Dumping: `GetOrTranslateShader` calls `DumpShaderTranslation` right after a
+  successful translation, gated on the SDK's own `shader_dump_enabled` cvar
+  (shared with the D3D12/Vulkan xenos backends, so one setting controls
+  dumping everywhere). Writes raw SPIR-V words to
+  `<dump_root>/shaders/<hash16>.<vert|frag>.native.spv`, once per (hash,
+  stage) — distinct filename suffix (`.native.spv`) from the SDK's own
+  `.vk.bin.vert`/`d3d12` dumps so the two never collide in the same
+  directory. Same directory also gets `<hash16>.ucode.bin.<vert|frag>` and
+  `<hash16>.ucode.<vert|frag>` "for free" from `Shader::AnalyzeUcode` (SDK
+  code, called for every shader by `GetOrAnalyzeShader` regardless of this
+  renderer) — raw pre-translation ucode + disassembly, not SPIR-V. Originally
+  those came out as `shader_<HASH16-uppercase>...`; patched
+  `rexglue-sdk/src/graphics/pipeline/shader/shader.cpp`'s `DumpUcode` to drop
+  the `shader_` prefix and lowercase the hex so every file in this directory
+  uses the same `<hash16>` convention (lowercase, no prefix) — redeploy via
+  `deploy-sdk.py` if pulling a fresh SDK checkout that predates this. Only
+  `DumpUcode` was touched, not `Translation::Dump` (used by the D3D12/Vulkan
+  xenos backends' own shader-storage dumps, which this renderer doesn't call
+  into) — so xenos-path dump naming is unchanged.
+* Replacement: `ApplyShaderReplacement`, called from `GetOrTranslateShader`
+  right after dumping, looks for `<mod_root>/<hash16>.spv` across
+  `shader_mod_roots_` (first root wins) and, if found, overwrites the real
+  translation's `translated_binary()` in place — mirroring
+  `PipelineCache::ApplyDxbcReplacement`'s "keep the real translation's
+  metadata, only swap the final binary" approach, so `GetOrCreatePipelineLayout`
+  still sees the correct texture/sampler binding counts. Gated purely on
+  `shader_mod_roots_` being non-empty (no `shader_load_enabled` cvar check —
+  that cvar is only defined in the SDK's own `TextureCache` translation unit,
+  which this renderer never links in).
+* Scoped to the *default* modification only (no tessellation, `kVertex` host
+  vertex shader type for vertex shaders): anything else falls through to
+  normal translation untouched, with a rate-limited log, per the
+  "Modification-sensitivity" complication below. Binding-layout compatibility
+  (the "Pipeline layout compatibility" complication below) is left as a
+  documentation concern for mod authors, not solved in code, same as
+  originally scoped.
+
+## Why this wasn't a small follow-up to the texture work
 
 ## Why this isn't a small follow-up to the texture work
 
@@ -30,17 +77,35 @@ it back to the user rather than assuming it during implementation.
 
 ## Hash to key on
 
-Use the same hash the F2 shader debugger overlay already computes and
-displays: `XXH3UcodeHash` (`native_command_processor.cpp:1190`), an XXH3 hash
-over the raw big-endian ucode dwords. This is deliberately the same
-convention as the real backend's `Shader::ucode_data_hash()`
-(`d3d12/pipeline_cache.cpp:470`, `XXH3_64bits` over `ucode_dwords.data()`,
-`ucode_byte_count` bytes) — confirmed in this renderer's own code comment at
-`native_command_processor.h:62-70` ("a hash from the old xenos-plugin
-renderer's F2 overlay is directly comparable to one reported here"). That
-means a mod author could plausibly ship *both* a DXBC replacement (for
-D3D12/xenos users) and a SPIR-V replacement (for this renderer) under the
-same hash, in parallel folders, without the two schemes colliding.
+Use `Shader::ucode_data_hash()` directly (read, not recomputed) — every hash
+consumer in this file (`GetShaderSnapshot`/`GetShaderDetails`, the F2
+debugger overlay, `GetOrTranslateShader`'s dump/replacement lookup,
+`TryDraw`'s `last_active_*_ucode_xxh3_` tracking) now reads this one field
+instead of each recomputing its own hash. It's set once, in
+`GetOrAnalyzeShader`, to `XXH3_64bits` over the **raw, guest/big-endian ucode
+bytes exactly as captured** — matching the real backend's own
+`Shader::ucode_data_hash()` convention (`d3d12/pipeline_cache.cpp:470`,
+`vulkan/pipeline_cache.cpp:974`: `XXH3_64bits` over `host_address` straight
+from guest memory, *before* any byteswap). That means a mod author can ship
+*both* a DXBC replacement (for D3D12/xenos users) and a SPIR-V replacement
+(for this renderer) under the same hash, in parallel folders, without the two
+schemes colliding — and a hash read off this renderer's F2 overlay is
+directly usable to name a `.spv` mod file.
+
+An earlier version of this code got this wrong in a way worth flagging:
+`Shader`'s constructor byteswaps `ucode_dwords` into host-native order before
+storing it as `ucode_data()` (for the translator's own convenience), so
+hashing `shader->ucode_data()` instead of the raw pre-swap bytes silently
+produces a *different* hash than the real backend's — even though it's the
+same `XXH3_64bits` algorithm. `GetShaderSnapshot`/`GetShaderDetails`/
+`last_active_*_ucode_xxh3_` originally did exactly that (hashed
+`ucode_data()`), which not only broke parity with the real backend but also
+disagreed with this feature's own dump/replacement hash (which correctly
+used the raw pre-swap bytes) — so the F2 overlay's displayed hash didn't even
+match what `GetOrTranslateShader` was keying dumps/replacements by, in the
+same renderer. Fixed by computing the hash exactly once, in
+`GetOrAnalyzeShader`, over the right (raw) bytes, and storing it on the
+`Shader` object itself so nothing downstream can recompute it wrong again.
 
 ## Where to hook it in
 

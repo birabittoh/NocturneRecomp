@@ -16,6 +16,7 @@
 #include <xxhash.h>
 
 #include <rex/cvar.h>
+#include <rex/graphics/flags.h>
 #include <rex/graphics/pipeline/texture/util.h>
 #include <rex/graphics/video_mode_util.h>
 #include <rex/logging.h>
@@ -453,6 +454,14 @@ void NativeCommandProcessor::InitializeTextureReplacement(
       std::make_unique<rex::graphics::TextureReplacement>(std::move(mod_roots), std::move(dump_root));
   REXGPU_INFO("NativeCommandProcessor: texture replacement ready ({} mod root(s))",
              texture_replacement_->mod_roots().size());
+}
+
+void NativeCommandProcessor::InitializeShaderReplacement(
+    std::vector<std::filesystem::path> mod_roots, std::filesystem::path dump_root) {
+  shader_mod_roots_ = std::move(mod_roots);
+  shader_dump_root_ = std::move(dump_root);
+  REXGPU_INFO("NativeCommandProcessor: shader replacement ready ({} mod root(s))",
+             shader_mod_roots_.size());
 }
 
 bool NativeCommandProcessor::InitializePipelineResources() {
@@ -1161,6 +1170,23 @@ rex::graphics::Shader* NativeCommandProcessor::GetOrAnalyzeShader(
     return existing->second.get();
   }
   using rex::graphics::Shader;
+  // ucode_data_hash (the Shader object's ucode_data_hash(), distinct from
+  // this function's own internal `key`) must be XXH3_64bits over the raw
+  // guest/big-endian ucode bytes exactly as the real D3D12/Vulkan xenos
+  // backends compute it in PipelineCache::LoadShader (see
+  // rexglue-sdk/src/graphics/vulkan/pipeline_cache.cpp:974 -- XXH3_64bits
+  // over host_address straight from guest memory, before any byteswap) --
+  // NOT over shader->ucode_data(), which the Shader constructor below
+  // byteswaps to host-native order for its own internal use. Passing
+  // ucode_data() there would make ucode_data_hash() a different value than
+  // the real backends report for the same shader, breaking hash parity for
+  // mod authors migrating from the old xenos-plugin renderer (its F2
+  // overlay reports the real, unswapped-input hash). Every other reader of
+  // this shader's hash (GetShaderSnapshot/Details, GetOrTranslateShader,
+  // TryDraw's last_active_* tracking) reads shader->ucode_data_hash()
+  // instead of recomputing anything, so there is exactly one place this can
+  // go wrong.
+  uint64_t ucode_data_hash = XXH3_64bits(ucode.data(), ucode.size() * sizeof(uint32_t));
   // Must be a concrete SpirvShader (not the base Shader class) -- after
   // translation, GetOrCreatePipeline/TryDraw need
   // GetTextureBindingsAfterTranslation()/GetSamplerBindingsAfterTranslation(),
@@ -1171,8 +1197,8 @@ rex::graphics::Shader* NativeCommandProcessor::GetOrAnalyzeShader(
   // output actually expects -- distinct from (and not necessarily the same
   // count as) base Shader::texture_bindings(), which is the raw per-fetch-
   // instruction list from ucode analysis before any dedup.
-  auto shader = std::make_unique<rex::graphics::SpirvShader>(type, key, ucode.data(), ucode.size(),
-                                                              std::endian::big);
+  auto shader = std::make_unique<rex::graphics::SpirvShader>(
+      type, ucode_data_hash, ucode.data(), ucode.size(), std::endian::big);
   rex::string::StringBuffer disasm_buffer;
   shader->AnalyzeUcode(disasm_buffer);
   static uint32_t disasm_logged = 0;
@@ -1187,24 +1213,15 @@ rex::graphics::Shader* NativeCommandProcessor::GetOrAnalyzeShader(
   return ptr;
 }
 
-namespace {
-// XXH3 over the raw ucode dwords -- matches Shader::ucode_data_hash() as
-// computed by the xenos/Vulkan backend's pipeline cache (see
-// rexglue-sdk/src/graphics/vulkan/pipeline_cache.cpp), so a hash reported by
-// this renderer's F2 overlay is directly comparable to one from the old
-// xenos-plugin renderer's F2 overlay for the same shader. Deliberately not
-// HashUcode/analyzed_shaders_'s internal key, which is FNV-1a XORed with a
-// type-discriminator bit and therefore never matches.
-uint64_t XXH3UcodeHash(const std::vector<uint32_t>& ucode) {
-  return XXH3_64bits(ucode.data(), ucode.size() * sizeof(uint32_t));
-}
-}  // namespace
-
 std::vector<rex::ui::ShaderDebuggerEntry> NativeCommandProcessor::GetShaderSnapshot() const {
   std::vector<rex::ui::ShaderDebuggerEntry> out;
   out.reserve(analyzed_shaders_.size());
   for (const auto& [key, shader] : analyzed_shaders_) {
-    uint64_t xxh3_hash = XXH3UcodeHash(shader->ucode_data());
+    // ucode_data_hash() is the real, SDK-parity XXH3 hash set at
+    // construction time (see GetOrAnalyzeShader) -- read it, don't
+    // recompute it from shader->ucode_data(), which is byteswapped to host
+    // order and would give a different (wrong) hash.
+    uint64_t xxh3_hash = shader->ucode_data_hash();
     rex::ui::ShaderDebuggerEntry entry;
     entry.ucode_hash = xxh3_hash;
     entry.type = static_cast<uint32_t>(shader->type());
@@ -1225,7 +1242,7 @@ rex::ui::ShaderDebuggerDetails NativeCommandProcessor::GetShaderDetails(
     uint64_t xxh3_ucode_hash) const {
   rex::ui::ShaderDebuggerDetails out;
   for (const auto& [key, shader] : analyzed_shaders_) {
-    if (XXH3UcodeHash(shader->ucode_data()) != xxh3_ucode_hash) {
+    if (shader->ucode_data_hash() != xxh3_ucode_hash) {
       continue;
     }
     out.found = true;
@@ -1247,6 +1264,66 @@ rex::ui::ShaderDebuggerDetails NativeCommandProcessor::GetShaderDetails(
     break;
   }
   return out;
+}
+
+void NativeCommandProcessor::DumpShaderTranslation(uint64_t ucode_hash,
+                                                   rex::graphics::xenos::ShaderType type,
+                                                   const std::vector<uint8_t>& spirv_bytes) const {
+  if (spirv_bytes.empty()) {
+    return;
+  }
+  const auto dump_dir =
+      (shader_dump_root_.empty() ? std::filesystem::path("dumps") : shader_dump_root_) /
+      "shaders";
+  char name[64];
+  std::snprintf(name, sizeof(name), "%016llx.%s.native.spv",
+               static_cast<unsigned long long>(ucode_hash),
+               type == rex::graphics::xenos::ShaderType::kVertex ? "vert" : "frag");
+  const auto dest = dump_dir / name;
+  // Write once per unique (hash, stage) -- same "don't hammer the disk"
+  // rule as TextureReplacement::DumpTexture.
+  if (std::filesystem::exists(dest)) {
+    return;
+  }
+  std::error_code ec;
+  std::filesystem::create_directories(dump_dir, ec);
+  FILE* f = std::fopen(dest.string().c_str(), "wb");
+  if (!f) {
+    return;
+  }
+  std::fwrite(spirv_bytes.data(), 1, spirv_bytes.size(), f);
+  std::fclose(f);
+}
+
+bool NativeCommandProcessor::ApplyShaderReplacement(uint64_t ucode_hash,
+                                                     rex::graphics::Shader::Translation& translation) {
+  for (const auto& mod_root : shader_mod_roots_) {
+    char name[32];
+    std::snprintf(name, sizeof(name), "%016llx.spv", static_cast<unsigned long long>(ucode_hash));
+    const auto mod_path = mod_root / name;
+    FILE* f = std::fopen(mod_path.string().c_str(), "rb");
+    if (!f) {
+      continue;
+    }
+    std::fseek(f, 0, SEEK_END);
+    long size = std::ftell(f);
+    std::fseek(f, 0, SEEK_SET);
+    bool applied = false;
+    if (size > 0) {
+      std::vector<uint8_t> replacement(static_cast<size_t>(size));
+      if (std::fread(replacement.data(), 1, replacement.size(), f) == replacement.size()) {
+        translation.set_translated_binary(std::move(replacement));
+        REXGPU_INFO("NativeCommandProcessor: loaded replacement SPIR-V {:016x} from {}", ucode_hash,
+                   mod_path.string());
+        applied = true;
+      }
+    }
+    std::fclose(f);
+    if (applied) {
+      return true;
+    }
+  }
+  return false;
 }
 
 void NativeCommandProcessor::SetShaderDisabledByHash(uint64_t xxh3_ucode_hash, bool disabled) {
@@ -1327,6 +1404,36 @@ NativeCommandProcessor::TranslatedShader* NativeCommandProcessor::GetOrTranslate
   }
   Shader::Translation* translation = shader->GetOrCreateTranslation(modification.value);
   bool ok = translator.TranslateAnalyzedShader(*translation);
+
+  uint64_t ucode_hash = shader->ucode_data_hash();
+  if (ok && REXCVAR_GET(shader_dump_enabled)) {
+    DumpShaderTranslation(ucode_hash, type, translation->translated_binary());
+  }
+  // Replacement is scoped to the default modification only (see
+  // docs/native-renderer-shader-replacement.md, "Modification-sensitivity"):
+  // a replacement module has to already match this draw's interpolator mask/
+  // host vertex shader type/tessellation mode or binding/interface mismatches
+  // will misrender or fail validation, so anything but the plain default
+  // vertex modification (no tessellation) falls through to the normal
+  // translation untouched, with a rate-limited log.
+  bool is_default_modification =
+      type != rex::graphics::xenos::ShaderType::kVertex ||
+      (host_vertex_shader_type == Shader::HostVertexShaderType::kVertex && tessellation_mode == 0);
+  if (ok && !shader_mod_roots_.empty()) {
+    if (is_default_modification) {
+      ApplyShaderReplacement(ucode_hash, *translation);
+    } else {
+      static uint32_t skipped_logged = 0;
+      if (skipped_logged < 20) {
+        ++skipped_logged;
+        REXGPU_INFO(
+            "NativeCommandProcessor: skipping shader replacement lookup for {:016x} -- "
+            "non-default modification (host_vertex_shader_type={} tessellation_mode={}) not "
+            "supported yet",
+            ucode_hash, static_cast<uint32_t>(host_vertex_shader_type), tessellation_mode);
+      }
+    }
+  }
 
   VkShaderModule module = VK_NULL_HANDLE;
   if (ok && !translation->translated_binary().empty()) {
@@ -3427,8 +3534,8 @@ void NativeCommandProcessor::TryDraw(rex::graphics::xenos::PrimitiveType prim_ty
   // real backend's shader-blacklist behavior closely enough for the toggle
   // to visibly do something. Also records which two shaders this draw
   // bound, for GetShaderSnapshot's "active" flag.
-  last_active_vertex_ucode_xxh3_ = XXH3UcodeHash(vertex_shader_analyzed->ucode_data());
-  last_active_pixel_ucode_xxh3_ = XXH3UcodeHash(pixel_shader_analyzed->ucode_data());
+  last_active_vertex_ucode_xxh3_ = vertex_shader_analyzed->ucode_data_hash();
+  last_active_pixel_ucode_xxh3_ = pixel_shader_analyzed->ucode_data_hash();
   if (disabled_shader_hashes_.count(last_active_vertex_ucode_xxh3_) ||
       disabled_shader_hashes_.count(last_active_pixel_ucode_xxh3_)) {
     return;

@@ -94,6 +94,20 @@ class NativeCommandProcessor {
   void InitializeTextureReplacement(std::vector<std::filesystem::path> mod_roots,
                                     std::filesystem::path dump_root);
 
+  // Same idea as InitializeTextureReplacement, but for shaders: this
+  // renderer's own SPIR-V-only replacement path (see
+  // docs/native-renderer-shader-replacement.md). There's no SDK-side class to
+  // reuse here (unlike rex::graphics::TextureReplacement) since the SDK's
+  // only shader-replacement implementation, PipelineCache::
+  // ApplyDxbcReplacement, is D3D12/DXBC-only -- so mod_roots/dump_root are
+  // just kept on this object and consulted directly from
+  // GetOrTranslateShader. Gated purely on mod_roots being non-empty, same as
+  // texture_replacement_ -- the SDK's shader_load_enabled cvar isn't usable
+  // here (it's only defined in the SDK's own TextureCache TU, which this
+  // renderer never links in).
+  void InitializeShaderReplacement(std::vector<std::filesystem::path> mod_roots,
+                                   std::filesystem::path dump_root);
+
  private:
   void PresentFrame();
   std::function<void()> on_frame_presented_;
@@ -474,6 +488,33 @@ class NativeCommandProcessor {
   // that the same as "no replacement found" and falls back to the normal
   // guest-memory decode path.
   std::unique_ptr<rex::graphics::TextureReplacement> texture_replacement_;
+
+  // See InitializeShaderReplacement. Empty (both) until that's called --
+  // GetOrTranslateShader then just never finds a replacement and always
+  // translates, same "absent means normal path" convention as
+  // texture_replacement_ being null. mod_roots is priority-ordered (first
+  // root wins per hash), matching the texture pipeline's convention.
+  std::vector<std::filesystem::path> shader_mod_roots_;
+  std::filesystem::path shader_dump_root_;
+  // Looks up a <hash16>.spv replacement for ucode_hash in shader_mod_roots_
+  // (first root wins) and, if found and readable, overwrites translation's
+  // translated_binary() with its raw bytes in place -- mirroring
+  // PipelineCache::ApplyDxbcReplacement's "keep the real translation's
+  // metadata (texture/sampler binding layout), only swap the final binary"
+  // approach, since this renderer's descriptor set/pipeline layouts are built
+  // from that metadata (see GetOrCreatePipelineLayout) and a replacement
+  // module has to match it exactly (see docs/native-renderer-shader-
+  // replacement.md, "Pipeline layout compatibility"). Returns true if a
+  // replacement was applied.
+  bool ApplyShaderReplacement(uint64_t ucode_hash, rex::graphics::Shader::Translation& translation);
+  // Dumps translation's current translated_binary() (the real, untouched
+  // translation -- called before ApplyShaderReplacement, matching the
+  // D3D12 backend's dump-then-replace ordering) to
+  // <shader_dump_root_>/shaders/<hash16>.<vert|frag>.native.spv, once per
+  // hash (skips if the file already exists, same rationale as
+  // TextureReplacement::DumpTexture's "write once" rule).
+  void DumpShaderTranslation(uint64_t ucode_hash, rex::graphics::xenos::ShaderType type,
+                             const std::vector<uint8_t>& spirv_bytes) const;
   // Constants descriptor sets differ per draw (each draw gets fresh constant
   // buffers -- see TransientBuffer) and Vulkan disallows updating a
   // descriptor set already bound within a not-yet-executed command buffer,
