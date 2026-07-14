@@ -41,3 +41,28 @@ return_on_true = true
 address = 0x82524330
 name = "HeadlessRingWaitBypass"
 return_on_true = true
+
+# Main Menu -> Leaderboards routes through FE page 8 (the Xbox Live logon
+# interstitial, ctor sub_825B69A0 / vtable 0x82013ec0). With no real Live
+# signin the logon fails and page 8's Update (sub_825B6AB0) posts a
+# page-switch event back to the main menu (page 1) at loc_825B6E48. When the
+# logon was started with mode 1 (the Leaderboards intent, obj+544 == 1),
+# reroute that exit to page 3 (the actual Leaderboards screen) so the menu
+# opens with local/empty data instead of bouncing back to the main menu.
+# r5 = destination page index, r31 = page-8 object pointer.
+# See LEADERBOARD_HANG_INVESTIGATION.md session 8.
+[[midasm_hook]]
+address = 0x825B6E48
+name = "LeaderboardLogonRouteToScreen"
+registers = ["r5", "r31"]
+
+# The Leaderboards screen's page-activate (sub_825C1AB8) busy-spins on the
+# async leaderboard-read status (sub_82584C18 == 1/2) with no timeout. The
+# SDK never reports a Live signin, so the read can never reach a terminal
+# state -- skip the spin entirely (mirrors the pause menu, which never enters
+# this path when Live is unavailable). Spin body 0x825C1B24..0x825C1B40;
+# first instruction after it is 0x825C1B44.
+[[midasm_hook]]
+address = 0x825C1B24
+name = "LeaderboardActivateSpinSkip"
+jump_address_on_true = 0x825C1B44
