@@ -29,16 +29,6 @@
 #include <rex/ui/vulkan/presenter.h>
 #include <rex/ui/vulkan/util.h>
 
-// Toggleable per-texture equivalent of the SDK's own post_process_shader_path/
-// post_process_shader_enabled (see ApplyGameplayPreviewPostProcess): applies
-// that same configured shader to just the gameplay-preview texture instead of
-// the whole composited frame. Off by default -- this is a narrower, opt-in
-// variant of an already-opt-in SDK feature.
-REXCVAR_DEFINE_BOOL(scanlines, false, "GPU",
-                    "Apply the game's configured post-process shader "
-                    "to just the gameplay instead of the whole screen.")
-    .lifecycle(rex::cvar::Lifecycle::kHotReload);
-
 namespace nocturne {
 
 // Known real dimensions of the gameplay-preview texture (see
@@ -2062,11 +2052,12 @@ bool NativeCommandProcessor::ApplyGameplayPreviewPostProcess(VkImageView source_
                                                               VkImage& out_image,
                                                               VkDeviceMemory& out_memory,
                                                               VkImageView& out_view) {
-  // Deliberately independent of post_process_shader_enabled (the SDK's own
-  // whole-screen toggle): the scanlines cvar is this
-  // texture's own on/off switch, so the two can be set differently (e.g.
-  // scanlines only on the preview, a clean full screen otherwise). Only
-  // post_process_shader_path (the actual shader source) is shared.
+  // Reuses the SDK's own post_process_shader_enabled/post_process_shader_path
+  // cvars (normally applied to the whole composited frame). The native
+  // renderer calls Presenter::SetCustomPostProcessShaderAppliesToGuestOutput
+  // (nocturnerecomp_app.h) to suppress that whole-screen application, so this
+  // is the only place the shader ends up applied when this renderer is
+  // active -- see docs/native-rendering.md.
   if (!EnsurePostProcessPipeline()) {
     return false;
   }
@@ -2578,16 +2569,18 @@ NativeCommandProcessor::UploadedTexture* NativeCommandProcessor::GetOrUploadText
   // kGameplayPreviewWidth/Height's doc comment for how this size was
   // confirmed): sampled with gameplay_preview_sampler_ (nearest) instead of
   // default_sampler_ (bilinear) in TryDraw, and optionally re-filtered with
-  // the SDK's own configured post-process shader before caching here,
-  // toggleable via the scanlines cvar independently of
-  // the SDK's post_process_shader_enabled. Swaps texture.image/memory/view
-  // to the filtered result on success; on any failure (feature off, no
-  // shader configured, compile error), texture keeps the raw upload from
-  // just above, so this can never make an otherwise-working texture
-  // disappear.
+  // the SDK's own configured post-process shader before caching here. Gated
+  // on the same post_process_shader_enabled/post_process_shader_path cvars
+  // the SDK uses for its whole-screen effect; the native renderer redirects
+  // that effect here instead (see docs/native-rendering.md and
+  // ApplyGameplayPreviewPostProcess). Swaps texture.image/memory/view to the
+  // filtered result on success; on any failure (feature off, no shader
+  // configured, compile error), texture keeps the raw upload from just
+  // above, so this can never make an otherwise-working texture disappear.
   texture.is_gameplay_preview =
       width == kGameplayPreviewWidth && height == kGameplayPreviewHeight;
-  if (texture.is_gameplay_preview && REXCVAR_GET(scanlines)) {
+  if (texture.is_gameplay_preview && rex::cvar::Query<bool>("post_process_shader_enabled") &&
+      !rex::cvar::Query<std::string>("post_process_shader_path").empty()) {
     VkImage filtered_image;
     VkDeviceMemory filtered_memory;
     VkImageView filtered_view;

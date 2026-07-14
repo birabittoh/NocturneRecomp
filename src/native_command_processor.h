@@ -321,9 +321,8 @@ class NativeCommandProcessor {
   bool UploadTexelsAndTransition(VkImage image, uint32_t width, uint32_t height,
                                  const void* rgba_data);
 
-  // Toggleable (scanlines cvar) per-texture
-  // equivalent of the SDK's own post_process_shader_path/enabled: runs the
-  // same configured shader, but only over the gameplay-preview texture
+  // Reuses the SDK's own post_process_shader_path/post_process_shader_enabled
+  // cvars, but runs the configured shader only over the gameplay-preview texture
   // (identified by its known 852x480 size -- see GetOrUploadTexture) rather
   // than the whole composited frame. Renders source_view through the
   // compiled post_process_shader_path fragment shader into a fresh

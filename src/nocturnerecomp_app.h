@@ -18,6 +18,7 @@
 #include <rex/version.h>
 #include <rex/ui/imgui_drawer.h>
 #include <rex/ui/imgui_theme.h>
+#include <rex/ui/presenter.h>
 #include <rex/ui/vulkan/provider.h>
 #include <rex/ui/window.h>
 
@@ -205,6 +206,13 @@ class NocturnerecompApp : public rex::ReXApp {
     }
 
     REXGPU_INFO("Native renderer: OnPreLaunchModule entered");
+    // This renderer applies post_process_shader_enabled/post_process_shader_path
+    // (see docs/native-rendering.md) only to the gameplay-preview texture
+    // (NativeCommandProcessor::ApplyGameplayPreviewPostProcess), not to the
+    // whole composited frame the way the xenos gpu_plugin's own Presenter
+    // does -- suppress the SDK's default whole-guest-output application
+    // before this app's own Presenter is initialized below.
+    rex::ui::Presenter::SetCustomPostProcessShaderAppliesToGuestOutput(false);
     // VulkanProvider::CreatePresenter must run on the UI thread (see
     // GraphicsSystem::SetupPresentation for the equivalent SDK-mode call);
     // OnPreLaunchModule itself is not guaranteed to be the UI thread.
