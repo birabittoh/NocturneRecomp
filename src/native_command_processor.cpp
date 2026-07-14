@@ -2286,6 +2286,11 @@ NativeCommandProcessor::UploadedTexture* NativeCommandProcessor::GetOrUploadText
         rex::system::kernel_state()->memory()->TranslatePhysical<const uint8_t*>(base_address);
     uint64_t content_hash = TextureReplacement::HashGuestData(hash_base, hash_size_bytes);
     replacement = texture_replacement_->FindReplacement(content_hash);
+    if (!replacement && REXCVAR_GET(texture_dump_enabled)) {
+      texture_replacement_->DumpTexture(content_hash, width, height, fetch.pitch,
+                                         fetch.tiled != 0, fetch.format, fetch.endianness,
+                                         hash_base, hash_size_bytes);
+    }
   }
 
   if (replacement) {
