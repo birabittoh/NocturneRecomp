@@ -145,12 +145,20 @@ constexpr uint32_t kRoomsAddrVanilla = 0x83164CD0u;
 // reverse-engineered", for the full derivation -- verified against
 // assets/default.xex (imagebase 0x82000000) and live-probed.
 //
-// Vanilla only -- not yet found in the TU build. Consumers must not trust
-// this blindly: dereference it, then sanity-check the pointed-to struct
-// (see mods_src/fast_forward's plausibility guard) before reading/writing
-// game_time/target_time through it, in case this ever runs against a build
-// where the address doesn't hold what's expected.
+// Consumers must not trust this blindly: dereference it, then sanity-check
+// the pointed-to struct (see mods_src/fast_forward's plausibility guard)
+// before reading/writing game_time/target_time through it, in case this
+// ever runs against a build where the address doesn't hold what's expected.
 constexpr uint32_t kAppSingletonPtrAddrVanilla = 0x82E4F808u;
+
+// TU address: the TU relocates the image's .data statics by -0x240 (same
+// delta as kAccentAddrVanilla/TU and kPlayerStatsAddrVanilla/TU above).
+// Derived from TU codegen output, not guessed from the delta: the TU build
+// of the Live-logon screen's Update (TU sub_825B6CB0, vanilla sub_825B6AB0)
+// loads this global as lis 0x82E50000 + offset -2616 = 0x82E4F5C8, where
+// vanilla uses offset -2040 = 0x82E4F808. See scripts/match_tu_functions.py
+// for the vanilla->TU function-matching workflow.
+constexpr uint32_t kAppSingletonPtrAddrTU = 0x82E4F5C8u;
 
 class GameSymbolsMod : public rex::system::IModPlugin {
  public:
@@ -172,7 +180,8 @@ class GameSymbolsMod : public rex::system::IModPlugin {
                                                 kPlayerStatsAddrTU);
       runtime_->mod_registry()->RegisterAddress("player.rooms", kRoomsAddrVanilla);
       runtime_->mod_registry()->RegisterAddress("app.singleton_ptr",
-                                                kAppSingletonPtrAddrVanilla);
+                                                kAppSingletonPtrAddrVanilla,
+                                                kAppSingletonPtrAddrTU);
     }
   }
 

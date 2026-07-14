@@ -18,9 +18,9 @@
 //    vblank rate, so scaling vblank delivery sped up the vblank ISR without
 //    speeding up simulation. Bumping target_time directly drives the game's
 //    own designed catch-up do-while (sub_8258B3B8) to run extra Update()s,
-//    which is the actual internal-framerate lever. Vanilla-build address
-//    only (see game_symbols's "app.singleton_ptr"); guarded by a
-//    plausibility check before ever writing.
+//    which is the actual internal-framerate lever. Address comes from
+//    game_symbols's "app.singleton_ptr" (registered for both vanilla and TU
+//    builds); guarded by a plausibility check before ever writing.
 //
 // Both are restored/stopped whenever both the key and button are released,
 // and in the destructor, so a mod reload/shutdown never leaves the game
