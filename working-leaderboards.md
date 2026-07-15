@@ -12,15 +12,51 @@ after live debugging. Read this whole doc before continuing; don't restart
 from `LEADERBOARD_BACKEND_PLAN.md`'s original assumptions, several are
 superseded below.
 
-## Current status: still crashing
+## Current status: WORKING (Overall + My Score); Friends still TODO
 
-The "Records" submenu inside Leaderboards still segfaults on a null/garbage
-pointer dereference. The main list screen still shows "error loading this
-leaderboard." Multiple hypotheses have been tested and ruled out (see
-"Timeline" below). The crash is now narrowed to a **very specific
-byte offset** inside a struct we don't fully control the shape of, but
-fixing the one confirmed bad field didn't fix it — meaning there is at
-least one more layout mismatch we haven't found yet.
+Resolved. The "Overall"/Records tab and the "My Score" tab both load and show
+real scores/times. Fixes (all in the SDK, committed there):
+
+1. **Buffer layout.** The enumerate buffer is one `XUSER_STATS_RESULTS`
+   (`dwNumViews@0, pViews@4`) followed by the `XUSER_STATS_VIEW`(s), rows and
+   columns — confirmed by the real xam.xex sizing `(48*rows+16)*specs + 8` and
+   by the consumer `sub_82584B88`, which reads `*(*(buffer+4)+8)` =
+   `pViews->NumRows`. The prior "pRows at view+4" change was a MISREAD: the
+   pointer being dereferenced is `pViews` (RESULTS+4), and view+8 is a count.
+   The original Xenia view order (`ViewId, TotalViewRows, NumRows, pRows`) was
+   correct. Also fixed the `XUSER_STATS_ROW` sub-field offsets to the real
+   8-aligned XDK layout (`xuid@0, dwRank@8, i64Rating@16, szGamertag@24,
+   dwNumColumns@40, pColumns@44`).
+
+2. **Score/time value.** The game displays each row's score/time from
+   `i64Rating` (row+16), read straight from the row header by `sub_825C1E98`
+   — NOT from the columns array. `LeaderboardManager::GetRows` now fills
+   `LeaderboardRow::rating` from the ranking column's value and
+   `WriteStatsView` writes it at row+16. (Time boards format row+16/3600000 as
+   HH:MM:SS.)
+
+3. **Param order.** The wrappers `sub_825D77C0/7820/7880` insert a literal
+   `scope` as arg2, so the real prototype is
+   `(a1, scope, user_index+1, num_rows, num_specs, specs, pcbBuffer, phEnum)`.
+   Our old labels were shifted: real `num_specs` is arg5 (reliably 1), and
+   arg3 is `user_index+1` (or a XUID = uninitialised `0xBABEBABE` on the My
+   Score/Friends paths). The old code rejected the My Score call because it
+   validated arg3 as num_specs. Now num_specs comes from arg5.
+
+**Friends** tab: still shows the generic error. It uses Path A — a serialized
+`XMsgInProcessCall(0xFC, 0x58020)` (packed by `sub_82813718`, driven by
+`sub_82584928`/`sub_82813760`) — and fundamentally lists Xbox Live friends'
+scores, which don't exist without a Live friends system. Left unimplemented.
+
+Note: `GetRows` still ignores `scope`, so every tab shows the same global list
+(a scope-tagged-gamertag diagnostic confirmed the tabs are distinct calls). To
+make My Score show only the signed-in user, seed a row whose xuid matches the
+real user XUID and filter by scope.
+
+---
+
+_Original handoff notes (pre-fix) below, kept for the reverse-engineering
+breadcrumbs._
 
 ## Key confirmed facts (hard evidence, not guesses)
 
