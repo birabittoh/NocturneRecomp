@@ -55,6 +55,117 @@ real user XUID and filter by scope.
 
 ---
 
+## "You are not signed in to Xbox Live" gate — ROOT CAUSE + FIX
+
+The pause-menu **Leaderboards** option showed "You are not signed in to Xbox
+Live." Root cause, confirmed in `default.xex`:
+
+- The leaderboard screen's action handler `sub_825C2CB0` opens with
+  `if (user_index == -1 || XamUserGetSigninState(user_index) ==
+  eXamUserSigninState_SignedInToLive) { ...leaderboard... } else { show
+  "not signed in" error; return 0; }`. `sub_825C5880` has the same
+  `== eXamUserSigninState_SignedInToLive` (value **2**) check.
+- The SDK's `UserProfile::signin_state()` (`rexglue-sdk/include/rex/system/xam/
+  user_profile.h`) hardcoded `return 1` (signed in **locally**), so the Live
+  branch never ran and the error always fired.
+CONFIRMED WORKING (2026-07-15): the pause-menu Leaderboards screen now opens.
+Three cooperating checks all had to pass — diagnosed by logging every
+`XamUser*` gate call and watching which one failed at screen-open time:
+
+- **Part 1 — `signin_state()` 1→2.** The screen (`sub_825C2CB0` /
+  `sub_825C5880`) gates on `XamUserGetSigninState() == SignedInToLive` (2).
+  Necessary but not sufficient on its own.
+- **Part 2 — seed `XN_SYS_SIGNINCHANGED` at listener creation.** The netmgr
+  keeps its own per-user signed-in bitmask at `netmgr+0x9AC` (`dword_82E4F808`,
+  vtable `0x820099c8`; `sub_82577AF0` = vtable+108 reads it), rebuilt from
+  `XamUserGetSigninState` only when its pump `sub_825774A8` processes an
+  `XN_SYS_SIGNINCHANGED` (id `0x0A`; handler vtable+196 `sub_825778C8` also
+  sets the Live bitmask at `netmgr+0x9A8`). Nothing broadcast it at boot, so
+  `xeXamNotifyCreateListener` now seeds each new listener with it (mirrors real
+  hardware; mask check drops it for non-subscribers).
+- **Part 3 — `XamUserCheckPrivilege` grant, not deny (the actual blocker).**
+  The `[LBDIAG]` log showed the screen calling `XamUserCheckPrivilege(0,
+  mask=0xF9)` every frame and the SDK returning `out_value=0` (denied). The
+  screen requires that presence/online privilege granted; denying it produced
+  the error. `XamUserCheckPrivilege_entry` now returns `out_value=1`.
+
+All three committed in the SDK (`native` branch). The score-*write* path
+(below) is still open — but this same gate very likely blocked it too, so it's
+worth re-checking now that the user reads as fully signed in to Live.
+
+## WRITE path (score submission) — RE findings (this session)
+
+The read path works via XLiveBase app 0xFC, msg `0x00058020`
+(`CreateStatsEnumeration`, driver `sub_82813760`). The **write** path is a
+sibling on the *same* app 0xFC, but it took RE to establish that:
+
+1. **The SDK's `XSessionWriteStats` (XGI msg `0x000B0025`) handler is dead code
+   for this title.** Enumerating every `XMsgInProcessCall`/`XMsgStartIORequest`
+   call site in `default.xex`, the game never sends XGI `0x000B0025` (nor
+   `0xB0021`). Only XGI msg observed is `0xB0019` (`sub_82812D48`). So the
+   already-implemented `SubmitRow`/`Save()` write-through in
+   `xgi_app.cpp` + `leaderboard_manager.cpp` is correct but **never invoked** —
+   that's why nothing hits disk.
+
+2. **Scores are written via an *async* XLiveBase RPC**, not a synchronous
+   in-process call. The write family lives in `default.xex` at
+   `sub_828139F0`, `sub_82814230`, `sub_82814498`, `sub_82814778`,
+   `sub_82814A08`, `sub_82814CA0`, `sub_82814EE0`. Each ends with:
+   ```c
+   XMsgStartIORequest((HXAMAPP)0xFC, (unsigned __int16)descriptor | 0x50000,
+                      overlapped, packed_request, 0x28);
+   ```
+   Payload is serialized by `sub_82813718`/`sub_82813598` (not a flat struct).
+   `sub_82814EE0` (RPC descriptor 1540) reads `XamUserGetXUID` + machine id +
+   title id + a 16-byte blob — a logon/arbitration-style write; the score-stat
+   write is one of the others in the cluster.
+
+3. **Why there's no constant to grep for.** The message number is computed at
+   runtime: `sub_82813388(rpc_id)` binary-searches a table (`dword_82E7C4FC`,
+   `word_82E7C4F8` entries × 4 bytes, layout `{u16 rpc_id, u16 msg_num}`) and
+   returns `msg_num`; the sent message is `msg_num | 0x50000`. The table
+   pointer is populated at load/init, so it isn't statically resolvable from
+   the IDB. (Validation: read path rpc_id 518 → msg `0x8020` → `0x58020`.)
+   None of the write wrappers have direct code xrefs (they're XLive library
+   API entrypoints resolved indirectly), so static caller tracing is a dead
+   end too.
+
+4. **Async routing IS wired in the SDK.** `XMsgStartIORequest` →
+   `xeXMsgStartIORequestEx` → `AppManager::DispatchMessageAsync` →
+   `App::DispatchMessageSync` (async falls straight through to the sync
+   handler; see `app_manager.cpp:41`). So the write RPC **does** reach
+   `XLiveBaseApp::DispatchMessageSync`, falls through to the "Unimplemented
+   XLIVEBASE message" branch, returns `X_E_FAIL`, and the score is dropped.
+
+### Concrete next step (how to finish the write path)
+
+The exact write message number + payload layout is best captured live rather
+than guessed. `xlivebase_app.cpp`'s fall-through now hex-dumps the first 128
+bytes of the request buffer for any unhandled 0xFC message. So:
+
+1. Rebuild SDK + game, run, sign in, finish a run that submits a score
+   (e.g. a boss-rush/time-attack completion or beating a leaderboard entry).
+2. Grep logs for `Unimplemented XLIVEBASE message` around the save — the
+   `msg=000580xx` on the save is the write message; the hex dump is the
+   serialized request. Correlate the dump against `sub_82813718`'s field order
+   (XUID, view/score fields) to decode it.
+3. Add a `case 0x000580xx:` to `XLiveBaseApp::DispatchMessageSync` that parses
+   the payload and calls `kernel_state_->leaderboards().SubmitRow(title_id,
+   view_id, xuid, gamertag, columns)` — reuse the existing
+   `LeaderboardManager` (already write-through to
+   `Documents/nocturnerecomp/leaderboards/{title_id:08X}.toml`). Use the XUID
+   from the payload and the gamertag from `XamUserGetName`/the profile.
+4. Complete the overlapped with success and return `X_E_SUCCESS` so the game
+   doesn't treat the save as failed.
+
+Open question: whether the game gates the write on a valid signed-in
+user/username first (the repeated "reads the username" behaviour). `XamUserGetName`
+(user 0) already returns the profile name, so the username itself is available;
+confirm from the live log that the save RPC actually fires (vs. the game
+aborting before sending it).
+
+---
+
 _Original handoff notes (pre-fix) below, kept for the reverse-engineering
 breadcrumbs._
 
