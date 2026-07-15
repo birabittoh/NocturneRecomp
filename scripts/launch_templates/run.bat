@@ -7,7 +7,7 @@ if exist "%DIR%assets" (
   set "ASSETS=%DIR%..\..\..\assets"
 )
 
-set ARGS=--game_data_root "%ASSETS%" --gpu_plugin=xenos --license_mask=1
+set ARGS=--game_data_root "%ASSETS%" --license_mask=1
 
 if exist "%DIR%update" (
   set ARGS=%ARGS% --update_data_root "%DIR%update"
