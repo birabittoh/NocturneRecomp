@@ -40,3 +40,19 @@ void LeaderboardLogonRouteToScreen(PPCRegister& r5, PPCRegister& r31) {
 bool LeaderboardActivateSpinSkip() {
   return true;
 }
+
+// The Leaderboards screen's per-frame event handler (sub_825C2CB0) gates its
+// entire switch on XamUserGetSigninState(user) == SignedInToLive at its very
+// top; if not signed in it immediately re-posts a page-switch event back to
+// the logon interstitial/main menu (sub_825CE8E8(8, ...)) instead of falling
+// through to handle the event. With no real Live signin this fires on
+// *every* call -- including the very first Update tick right after
+// LeaderboardActivateSpinSkip lets the screen open -- so the screen flashes
+// its "error" state for a frame (set earlier in sub_825C0848, since the
+// leaderboard read never completes) and then immediately bounces back to
+// the main menu. Skip the signin check and always take the "signed in"
+// path (loc_825C2D0C), mirroring the spin-skip: the pause-menu leaderboard
+// flow proves the screen works fine locally without a real signin.
+bool LeaderboardEventSigninBypass() {
+  return true;
+}

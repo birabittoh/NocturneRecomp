@@ -66,3 +66,15 @@ registers = ["r5", "r31"]
 address = 0x825C1B24
 name = "LeaderboardActivateSpinSkip"
 jump_address_on_true = 0x825C1B44
+
+# The Leaderboards screen's per-frame event handler (sub_825C2CB0) gates on
+# XamUserGetSigninState(user) == SignedInToLive at its very top; when not
+# signed in it immediately re-posts a page-switch event back to the logon
+# interstitial (sub_825CE8E8(8, ...)) instead of handling the event, so the
+# screen flashes its error state for a frame and bounces back to the main
+# menu. Skip the signin check and always take the "signed in" path
+# (loc_825C2D0C) -- same rationale as the spin-skip above.
+[[midasm_hook]]
+address = 0x825C2CD0
+name = "LeaderboardEventSigninBypass"
+jump_address_on_true = 0x825C2D0C
