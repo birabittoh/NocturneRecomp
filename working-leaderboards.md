@@ -137,7 +137,184 @@ sibling on the *same* app 0xFC, but it took RE to establish that:
    `XLiveBaseApp::DispatchMessageSync`, falls through to the "Unimplemented
    XLIVEBASE message" branch, returns `X_E_FAIL`, and the score is dropped.
 
-### Concrete next step (how to finish the write path)
+### UPDATE 2 (this session): the REAL write is XSessionWriteStats (XGI 0xB0025)
+
+**Correction to everything below and above:** the score write is the standard
+XGI session-stats path. Both prior hypotheses were wrong — the async XLiveBase
+stubs are dead code AND the earlier "game never sends 0xB0025" claim was false
+(it was based on an incomplete XMsg enumeration).
+
+Confirmed in `default.xex`:
+- `sub_82812EC8` is the **XSessionWriteStats** wrapper:
+  `XMsgStartIORequest((HXAMAPP)0xFB, 0xB0025, ovl, {sessionObj, xuid(8),
+  dwNumViews, pViews}, 0x18)`. `sub_82812DA8` = **XSessionFlushStats** (0xB0026).
+- Score-submit driver `sub_8257CD48(records, userIndex, statType)` — the "go up"
+  target the user asked for. Per `statType` (switch 1..6) it fills an
+  `XSESSION_VIEW_PROPERTIES` (`dwViewId` = `dword_828B14AC/B0/B4/B8/BC/C0`;
+  one `XUSER_PROPERTY`: propertyId `828B14A0/A4`, `XUSER_DATA` type 2 = INT64,
+  int64 value), **gates on `XamUserGetSigninState(user)==2` (SignedInToLive)**,
+  acquires a session handle via `sub_825850C8`, then calls `sub_82812EC8`
+  (case 6 also flushes). Callers: `sub_8257D1E0` and `sub_8257D6F0` (six sites
+  each — per-stat end-of-run submit).
+- Resolved view/property IDs (static constants, big-endian):
+  - Property (column) IDs: `828B14A0` = **0x20000002**, `828B14A4` =
+    **0x20000001** (0x2_ prefix = XUSER_DATA_TYPE INT64).
+  - Six boards, `dwViewId` **1..6**. Write mapping (statType→view→prop→value):
+    view 1 = score/max (prop 0x20000001); view 6 = time, +flush (prop
+    0x20000001); views 2–5 = counters stored negated (prop 0x20000002).
+  - Screen tab order (`sub_825C1AB8`, 6 tabs): view 1, 6, 2, 3, 4, 5. Tab
+    labels are localized string-resource indices (131–139) rendered by the game
+    — **the SDK needs no label knowledge**; both write and read key on
+    `dwViewId` only. `LeaderboardManager` keying by `(title_id, viewId)` is
+    already correct.
+- Full XSession surface the game uses (app 0xFB): 0xB0010 Create, 0xB0011
+  Delete, 0xB0012 JoinLocal, 0xB0013 JoinRemote, 0xB0014/15 Leave L/R, 0xB0018
+  Start, 0xB0019 End, 0xB001A/1B/1C Modify/Search, **0xB0025 WriteStats**,
+  0xB0026 FlushStats.
+
+### UPDATE 3: SDK 0xB0025 handler was wrong on two counts — FIXED
+
+Verified the SDK's existing `xgi_app.cpp` `case 0x000B0025` against the real
+wire format (disasm of `sub_82812EC8` + writer `sub_8257CD48`). It was broken:
+
+1. **Top-level offsets/size.** Real buffer is **24 bytes** (`cbUserBuffer=0x18`):
+   `obj@0, XUID@8 (u64), dwNumViews@16, pViews@20`. The handler read
+   `xuid@4, num_views@12, views_ptr@16` and asserted length 20 — so `num_views`
+   got XUID bits and `views_ptr` got the literal `1`; every score was dropped.
+2. **Wrong structure model.** It parsed each view as read-side
+   `XUSER_STATS_VIEW → rows(48) → columns(28)`. WriteStats uses
+   `XSESSION_VIEW_PROPERTIES { dwViewId@0; dwNumProperties@4; pProperties@8 }`
+   (12B) with `XUSER_PROPERTY { dwPropertyId@0; XUSER_DATA{ type@8; value@16 } }`
+   (24B stride). No rows; the value is one INT64 for the top-level XUID.
+
+Both fixed in `rexglue-sdk/src/kernel/xam/apps/xgi_app.cpp` (0xB0025 and the
+0xB0026 flush's matching offsets). `column_id` = low 16 bits of the u32
+propertyId. Gamertag left "" (read enumerator supplies the display name; TODO
+fill from XamUserGetName if My Score needs it).
+
+### UPDATE 4: write CONFIRMED working; read-precedence bug fixed
+
+Tested (run 015). `XSessionWriteStats(DEADF00D, B13EBABEBABEBABE, 00000001,
+7010FB70)` fired with correct args (num_views=1, valid pViews) — the offset fix
+works. A real row persisted to
+`Documents/nocturnerecomp/leaderboards/58410847.toml`:
+`title_id=0x58410847 (=1480656967), view_id=5, column id=2, type=2 INT64,
+value=-28965000, xuid=0xB13EBABEBABEBABE`. So the end-to-end write path is done.
+(Only view 5 wrote this run — each stat type 1..6 in `sub_8257CD48` has its own
+gate `dword_831418xx > 0`; finishing the game triggered just the case-5 counter.
+Score/time boards, views 1 and 6, need the run to actually set those stats.)
+
+BUT the score didn't appear on screen — a second bug: the read
+(`xam_user.cpp` ~L671) preferred `arg1` (== 0, the test-seed store keyed under
+`title_id 0`) and only fell back to the running title `0x58410847` when title 0
+had **no** rows for that view. The seed populates views 1–6 under title 0, so the
+fallback never fired and the player's real rows (under the running title) were
+permanently shadowed. Fixed: read now queries the **running title first**, falls
+back to the seed (title 0) only for views with no real data. Real submitted rows
+now win; seed is just filler.
+
+Rebuilt + deployed. To verify: signed-in end-of-run, then the tab for the view
+you set (tab order is view 1,6,2,3,4,5 — so the case-5 counter is the **last**
+tab) should show your row; grep logs for `XSessionWriteStats(` and confirm the
+TOML row's `title_id` is `0x58410847`.
+
+Known cosmetic follow-ups: scope isn't filtered yet so every tab shows the same
+global list; view-5 value is stored negated (game's convention — display may
+re-negate).
+
+### UPDATE 5: XUID > INT64_MAX corrupted the whole store — FIXED
+
+After the first real write, ALL boards went blank. Root cause: the written XUID
+`0xB13EBABEBABEBABE` = 12771850921608919742 exceeds INT64_MAX, and `Save()`
+wrote it as a bare TOML decimal. TOML integers are signed 64-bit, so on the next
+launch `toml::parse_file` failed on that literal ("not representable in 64
+bits") and the *entire* store failed to load → `GetRows` returned 0 for every
+view (seed included). Fixes in `leaderboard_manager.cpp`:
+- `Save()` writes `xuid = "{:016x}"` (quoted hex string).
+- `Load()` parses a quoted hex string via `strtoull(.,.,16)`, falling back to a
+  bare integer for legacy/seed rows (`xuid = 1000`). Added `#include <cstdlib>`.
+The already-corrupted store file was hand-repaired (bare giant int → quoted
+hex); validated it now parses to 7 boards.
+
+Also (test aid): the 0xB0025 handler now writes `gamertag = "User"` instead of
+"" so submitted rows show a visible name. NOTE the pre-existing view-5 row keeps
+`gamertag=""`; only NEW submissions get "User".
+
+Rebuilt + deployed. Expected on next run: view-5 tab shows the real row; other
+tabs fall back to the title-0 seed; a fresh submission shows "User".
+
+**(historical) Still-to-do note, now done:** `deploy-sdk --config RelWithDebInfo
+--project NocturneRecomp` + `build.py` + signed-in end-of-run.
+
+**Implication for the SDK.** The SDK is already the "Xbox Live server" for this:
+XGI 0xB0025 lands in `XGIApp`'s DispatchMessage, and the SDK already has a
+0xB0025 (`XSessionWriteStats`) handler (`xgi_app.cpp`, SubmitRow→Save into
+`LeaderboardManager`). It is NOT dead code. If scores still don't persist, the
+cause is (a) the Live signin gate — now satisfied since `signin_state()` returns
+2 — and/or (b) the handler's `XSESSION_VIEW_PROPERTIES` parsing, not a missing
+call. Next step: finish a run signed-in-to-Live and confirm the 0xB0025 handler
+fires and parses; fix the view/property offsets if not. No XLiveBase work needed.
+
+Do NOT pursue the XLiveBase async stubs or the `case 0x000580xx:` idea below —
+that was a dead end. Kept only as a record of the ruled-out path.
+
+---
+
+### (RULED OUT) The async-RPC write hypothesis — FALSIFIED
+
+Evidence the async XLiveBase write family is dead code (all in `default.xex`):
+
+1. **The async write family is dead code.** `xrefs_to` each of
+   `sub_828139F0 / 82814230 / 82814498 / 82814778 / 82814A08 / 82814CA0 /
+   82814EE0` returns exactly ONE xref — a *data* reference from the stub
+   registration table at `0x8222C400..0x8222C5A8` (8-byte entries
+   `{u32 funcptr, u32 0x4000xxxx descriptor}`, a few hundred XLiveBase library
+   stubs). None has a *code* xref. The two XLiveBase stubs the game actually
+   uses are called **directly by address**, not through this table:
+   - `sub_82813760` (sync `XMsgInProcessCall(0xFC, 0x58020)`, stats READ) ←
+     called from `sub_82584928` (the known Path-A driver).
+   - `sub_828138C0` (sync `XMsgInProcessCall(0xFC, 0x58023)`) ← called from
+     `sub_8281C440`, a per-frame notification pump, only in response to system
+     notification `0x02000002` (a presence/connection-change response, not a
+     score write).
+   So the table is essentially registration metadata; live reach is via direct
+   calls, and the write stubs have zero direct callers.
+
+2. **No stats-write import exists at all.** Import scan: no `XSessionWriteStats`,
+   no `XUserWriteStats`, no `XUser*` stat write. Combined with the earlier
+   finding that the game never sends XGI `0x000B0025` (nor `0xB0021`), there are
+   now **three independent confirmations** that this client issues no
+   leaderboard-score write the SDK could intercept.
+
+3. **The only `XamUserWriteProfileSettings` caller is the options/config save,
+   not a score.** `XamUserWriteProfileSettings` (`xam.xex`) has one caller,
+   `sub_82813060` (thin wrapper: `XamUserGetXUID` then
+   `XamUserWriteProfileSettings(0, user, n, settings, ovl)`), which is reached
+   only from `sub_82580680`. `sub_82580680` writes a single title-specific
+   **binary** profile setting, id `0x63E1223F`, a ~1000-byte blob. Its callers
+   (`sub_825BA678` etc.) are audio/video **options** handlers (slider values
+   clamped 1–50 / 1–30, brightness lerps) — this is the settings/records blob,
+   not a leaderboard metric.
+
+**Conclusion.** On this title the Leaderboards screen is purely server-driven
+*read* (`XamUserCreateStatsEnumerator` + XLiveBase `0x58020`). There is no
+client-side score-write call to hook; a real 360 submits scores server-side via
+Live in a way the offline recomp never observes as a distinct kernel/XLiveBase
+request. So "capture the write msg from a live run" will yield nothing for
+scores — the tedious playthrough is not just tedious, it's futile for this
+purpose.
+
+**Recommended path to make "My Score" show the player's own result offline:**
+synthesize it on the read side. When we service the stats enumeration for the
+signed-in user, inject a row for their real XUID whose value we pull from a
+source we *can* see locally — the game's records/title-settings blob (profile
+setting `0x63E1223F`, written via the path above) if it contains the leaderboard
+metric, or a value the game keeps in its own save. This reuses the existing
+`LeaderboardManager` but seeds it from a hookable local write instead of a
+non-existent online one. (Verify `0x63E1223F`'s blob layout actually carries the
+board's score/time before relying on it.)
+
+### (Superseded) Original next step — kept for context
 
 The exact write message number + payload layout is best captured live rather
 than guessed. `xlivebase_app.cpp`'s fall-through now hex-dumps the first 128
