@@ -435,7 +435,6 @@ def main():
     shutil.copy2(build_output, exe_name)
 
     copy_runtime_libs(is_windows, sdk_dir, build_type)
-    copy_post_process_shader(root)
 
     if tu_version:
         print(
