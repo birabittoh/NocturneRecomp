@@ -130,7 +130,7 @@ jobs:
 
       - name: Build (vanilla)
         shell: bash
-        run: python scripts/build.py --sdk-dir sdk/${{ matrix.sdk_dir }}
+        run: python scripts/build.py --release --sdk-dir sdk/${{ matrix.sdk_dir }}
 
       - name: Package (vanilla)
         shell: bash
@@ -160,7 +160,7 @@ jobs:
 
       - name: Build (tu)
         shell: bash
-        run: python scripts/build.py --sdk-dir sdk/${{ matrix.sdk_dir }} --tu tu_packages/
+        run: python scripts/build.py --release --sdk-dir sdk/${{ matrix.sdk_dir }} --tu tu_packages/
 
       - name: Package (tu)
         shell: bash

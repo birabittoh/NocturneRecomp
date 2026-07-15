@@ -248,7 +248,7 @@ def parse_args():
     p = argparse.ArgumentParser()
     p.add_argument("--sdk-dir", default="sdk", help="Path to the ReXGlue SDK (default: sdk)")
     p.add_argument("--package", metavar="NAME", help="Package built output into NAME.zip (Windows) or NAME.tar.gz (Linux); skips the build")
-    p.add_argument("--debug", action="store_true", help="Build with debug symbols (uses the debug CMake preset)")
+    p.add_argument("--release", action="store_true", help="Build an optimized release without debug symbols (uses the release CMake preset); default is RelWithDebInfo")
     p.add_argument("--force-codegen", action="store_true", help="Force codegen even if inputs are unchanged")
     p.add_argument("--strict-codegen", action="store_true", help="Abort the build if codegen returns a non-zero exit code")
     p.add_argument(
@@ -374,7 +374,7 @@ def main():
 
     check_deps()
 
-    build_type = "relwithdebinfo" if args.debug else "release"
+    build_type = "release" if args.release else "relwithdebinfo"
     preset = detect_preset(build_type)
     exe_name = f"{project_name}.exe" if is_windows else project_name
     build_output = os.path.join("out", "build", preset, exe_name)

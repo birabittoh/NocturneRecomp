@@ -77,10 +77,7 @@
             "name": "win-amd64-relwithdebinfo",
             "displayName": "Windows AMD64 RelWithDebInfo",
             "inherits": "windows-base",
-            "cacheVariables": {
-                "CMAKE_BUILD_TYPE": "RelWithDebInfo",
-                "CMAKE_MAP_IMPORTED_CONFIG_RELWITHDEBINFO": "Release"
-            }
+            "cacheVariables": { "CMAKE_BUILD_TYPE": "RelWithDebInfo" }
         },
         {
             "name": "linux-amd64-relwithdebinfo",
@@ -104,10 +101,7 @@
             "name": "win-arm64-relwithdebinfo",
             "displayName": "Windows ARM64 RelWithDebInfo",
             "inherits": "windows-arm64-base",
-            "cacheVariables": {
-                "CMAKE_BUILD_TYPE": "RelWithDebInfo",
-                "CMAKE_MAP_IMPORTED_CONFIG_RELWITHDEBINFO": "Release"
-            }
+            "cacheVariables": { "CMAKE_BUILD_TYPE": "RelWithDebInfo" }
         },
         {
             "name": "linux-arm64-debug",
