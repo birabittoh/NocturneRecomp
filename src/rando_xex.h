@@ -64,8 +64,9 @@ namespace nocturne {
 // xex must exist in the game data root, be a XEX2 image, and match the base
 // image's size (the randomizer patches in place, so any size difference
 // means it isn't a same-layout variant and guest addresses wouldn't line
-// up). On any mismatch this warns and leaves the base image to boot --
-// vanilla beats a half-validated image.
+// up). It also refuses on a title-update build (a "<module>p" delta patch
+// staged next to the boot module. On any mismatch this warns and leaves the
+// base image to boot.
 //
 // Returns true when the boot module was redirected, filling out_base_xex/
 // out_patched_xex with the host paths of the two images; the caller must
@@ -86,6 +87,21 @@ inline bool MaybeApplyRandoXex(const std::filesystem::path& game_data_root,
     return false;
   }
   std::string base_name = module_path.substr(sep + 1);
+
+  // UserModule::LoadFromFile (rexglue-sdk/src/system/user_module.cpp) applies
+  // any sibling "<module>p" file it finds next to the boot module as a XEX2
+  // delta patch (title update), independently of and before any of this.
+  // The rando .text diff below is computed against the *unpatched* base_xex,
+  // so if a TU is staged, the diff and the resulting interpreted bounds are
+  // against the wrong base image.
+  std::error_code tu_ec;
+  if (std::filesystem::exists(game_data_root / (base_name + "p"), tu_ec)) {
+    REXLOG_WARN("[rando] {} is a title-update build ({}p is staged) -- randomizer .text "
+                "interpretation only supports the vanilla base image; booting the base "
+                "image without rando overrides",
+                base_name, base_name);
+    return false;
+  }
 
   std::error_code ec;
   auto patched_size = std::filesystem::file_size(game_data_root / configured, ec);
