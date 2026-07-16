@@ -1,7 +1,8 @@
-// nocturnerecomp - hold a key (default Ctrl) or a controller button (default
-// RB) to speed up the game. Moved in-app from the former fast_forward mod;
-// see fast_forward.cpp for the two-mechanism approach (guest_time_scalar +
-// direct target_time bump) and why both are needed.
+// nocturnerecomp - hold a key (default Tab) or a controller button (default
+// LThumb) to speed up the game. Moved in-app from the former fast_forward mod.
+// This only sets the guest time scalar (rex::chrono::Clock); src/frame_pacer.cpp
+// reads that scalar and does the actual internal-framerate speed-up by driving
+// the game's target_time clock at (real time * scalar).
 #pragma once
 
 #include <memory>
