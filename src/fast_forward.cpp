@@ -54,8 +54,8 @@ namespace nocturne {
 
 namespace {
 
-constexpr const char* kDefaultBindKey = "Control";
-constexpr const char* kDefaultBindButton = "RB";
+constexpr const char* kDefaultBindKey = "Tab";
+constexpr const char* kDefaultBindButton = "LThumb";
 
 // Application-object field offsets (see docs/native-renderer-pacing-
 // investigation.md, "full frame-pacing chain reverse-engineered").
