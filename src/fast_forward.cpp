@@ -12,7 +12,6 @@
 #include "fast_forward.h"
 
 #include <string>
-#include <unordered_map>
 
 #include <rex/chrono/clock.h>
 #include <rex/cvar.h>
@@ -34,29 +33,6 @@ namespace {
 
 constexpr const char* kDefaultBindKey = "Tab";
 constexpr const char* kDefaultBindButton = "LThumb";
-
-// Gamepad has no per-button event stream (XInput is poll-based, unlike
-// rex::ui::KeyEvent) -- unlike kKeyNames in rexglue-sdk's keybinds.cpp, this
-// table isn't shared by the SDK, so it's duplicated here at file scope.
-const std::unordered_map<std::string, rex::input::X_INPUT_GAMEPAD_BUTTON>& GamepadButtonNames() {
-  static const std::unordered_map<std::string, rex::input::X_INPUT_GAMEPAD_BUTTON> kNames = {
-      {"A", rex::input::X_INPUT_GAMEPAD_A},
-      {"B", rex::input::X_INPUT_GAMEPAD_B},
-      {"X", rex::input::X_INPUT_GAMEPAD_X},
-      {"Y", rex::input::X_INPUT_GAMEPAD_Y},
-      {"LB", rex::input::X_INPUT_GAMEPAD_LEFT_SHOULDER},
-      {"RB", rex::input::X_INPUT_GAMEPAD_RIGHT_SHOULDER},
-      {"LThumb", rex::input::X_INPUT_GAMEPAD_LEFT_THUMB},
-      {"RThumb", rex::input::X_INPUT_GAMEPAD_RIGHT_THUMB},
-      {"Start", rex::input::X_INPUT_GAMEPAD_START},
-      {"Back", rex::input::X_INPUT_GAMEPAD_BACK},
-      {"DPadUp", rex::input::X_INPUT_GAMEPAD_DPAD_UP},
-      {"DPadDown", rex::input::X_INPUT_GAMEPAD_DPAD_DOWN},
-      {"DPadLeft", rex::input::X_INPUT_GAMEPAD_DPAD_LEFT},
-      {"DPadRight", rex::input::X_INPUT_GAMEPAD_DPAD_RIGHT},
-  };
-  return kNames;
-}
 
 }  // namespace
 
@@ -156,19 +132,17 @@ class FastForwardWatcher : public rex::ui::WindowInputListener, public rex::ui::
   // the controller's held state (XInput has no button-event callback).
   void OnDraw(ImGuiIO&) override {
     if (input_system_) {
-      auto it = GamepadButtonNames().find(bind_button_);
-      if (it != GamepadButtonNames().end()) {
+      uint16_t mask = rex::ui::ParseGamepadButton(bind_button_);
+      if (mask != 0) {
         rex::input::X_INPUT_STATE state{};
         input_system_->GetState(0, &state);
-        const uint16_t buttons = state.gamepad.buttons;
-        const bool down = (buttons & it->second) != 0;
+        const bool down = (state.gamepad.buttons & mask) != 0;
         if (down != pad_held_) {
           pad_held_ = down;
           ApplyState();
         }
       }
     }
-
   }
 
  private:
