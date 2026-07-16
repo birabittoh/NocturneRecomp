@@ -160,6 +160,16 @@ constexpr uint32_t kAppSingletonPtrAddrVanilla = 0x82E4F808u;
 // for the vanilla->TU function-matching workflow.
 constexpr uint32_t kAppSingletonPtrAddrTU = 0x82E4F5C8u;
 
+// Guest address of the driver function behind XSessionWriteStats (XGI
+// 0xB0025), the game's leaderboard-score write path -- see
+// docs/leaderboard-write-path-xsessionwritestats.md (or the equivalent
+// memory note) for how this was found. Registered here (rather than a
+// data address) so mods_src/function_override_demo can look it up by name
+// and pass it to rex::runtime::FunctionDispatcher::OverrideFunction --
+// see docs/making-mods.md's "Overriding a recompiled function" section.
+// Vanilla only so far -- not yet confirmed in the TU build.
+constexpr uint32_t kLeaderboardWriteStatsFnAddrVanilla = 0x8257CD48u;
+
 class GameSymbolsMod : public rex::system::IModPlugin {
  public:
   explicit GameSymbolsMod(rex::Runtime* runtime) : runtime_(runtime) {}
@@ -182,6 +192,8 @@ class GameSymbolsMod : public rex::system::IModPlugin {
       runtime_->mod_registry()->RegisterAddress("app.singleton_ptr",
                                                 kAppSingletonPtrAddrVanilla,
                                                 kAppSingletonPtrAddrTU);
+      runtime_->mod_registry()->RegisterAddress("leaderboard.write_stats_fn",
+                                                kLeaderboardWriteStatsFnAddrVanilla);
     }
   }
 

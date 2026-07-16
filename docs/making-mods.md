@@ -171,6 +171,10 @@ running at process exit; use `OnShutdown()` instead.
 - **`mods_src/ui_color/`**: consumes `game_symbols`'s published address
   (`requires = "game_symbols >= 1.0.0"` in its `mod.toml`) instead of
   hardcoding or re-deriving it.
+- **`mods_src/function_override_demo/`**: wraps a recompiled guest
+  *function*'s behavior at runtime, rather than poking a data field like
+  `ui_color`. See
+  [Overriding a recompiled function](#overriding-a-recompiled-function).
 - **`mods_src/event_ping/`** and **`mods_src/event_pong/`**: a
   producer/consumer pair over the shared registry's event bus rather than
   addresses. `event_ping` has no UI: it uses `RegisterTick` to publish a
@@ -375,6 +379,59 @@ registration order and only the first match fires and consumes the event --
 the later one is silently shadowed, not an error. Give every mod's bind both
 a unique name (it doubles as the backing CVar name) and, by convention, a
 unique default key.
+
+## Overriding a recompiled function
+
+Everything above changes *data* the game reads. `rex::runtime::FunctionDispatcher`,
+reached via `runtime->function_dispatcher()`, additionally lets a mod replace
+the *behavior* of any recompiled guest function for every caller -- direct
+(`bl`) and indirect (`bctrl`/function-pointer) call sites alike -- even
+though the exe was already built and linked before the mod loaded.
+
+```cpp
+// 1. Look up the target's guest address the same way as a data address --
+//    via the shared registry, so the lookup is vanilla/TU-safe. A library
+//    mod publishes function addresses with RegisterAddress exactly like
+//    data addresses (see mods_src/game_symbols's "leaderboard.write_stats_fn").
+auto addr = runtime->mod_registry()->FindAddress("leaderboard.write_stats_fn");
+
+// 2. Replacement signature matches REX_HOOK_RAW: full ctx/base access.
+PPCFunc* original = nullptr;
+extern "C" void MyReplacement(PPCContext& ctx, uint8_t* base) {
+  // ... do something, then optionally call through to `original` to wrap
+  // rather than fully replace.
+}
+
+// 3. Install it. OverrideFunction hands back the function pointer that was
+// active before the override, so a wrapper can call through to it.
+runtime->function_dispatcher()->OverrideFunction(*addr, &MyReplacement, &original);
+
+// 4. Undo it (e.g. in OnShutdown()) with the same original pointer.
+runtime->function_dispatcher()->RestoreFunction(*addr, original);
+```
+
+`mods_src/function_override_demo/` is a complete worked example: it
+overrides the game's leaderboard write-stats driver, logs the call, and
+calls through to the original so leaderboard writes still happen normally.
+
+A few things that differ from the data-poke case:
+
+- **Overrides are exclusive, not chainable.** If another mod already holds
+  the override for an address, `OverrideFunction` fails (returns `false`
+  and logs) rather than silently stacking on top of it -- unlike keybind
+  collisions (below), which silently shadow. Only the mod that installed
+  an override can undo it via `RestoreFunction`, and only by passing back
+  the exact original pointer `OverrideFunction` returned.
+- **Safe to call anytime**, not just during startup/registration:
+  `OverrideFunction`/`RestoreFunction` take the dispatcher's own lock and
+  are safe to call from `OnModuleLaunched`, a tick callback, or later. A
+  guest thread already inside the old function body when the override
+  lands finishes running it; the *next* call to that address sees the
+  replacement.
+- **The target must already have a default table entry**, which every
+  recompiled function gets automatically when its module registers (before
+  any mod's `OnModuleLaunched` runs), so in practice this just works for
+  any guest function address -- there's nothing to opt in ahead of time.
 
 ## Patching static game text/data
 
