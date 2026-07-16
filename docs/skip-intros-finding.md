@@ -42,3 +42,49 @@ Caveats / TODO before using it as a real feature:
 - It was found by a diagnostic write from `FrameTickProbe`
   (`src/nocturnerecomp_hooks.cpp`); that probe is temporary and unrelated to
   this feature.
+
+## Attempted implementation (reverted) -- +184 is the wrong lever for this
+
+Tried a `skip_intros` cvar + midasm hook at `sub_8258B3B8`'s entry (r3 == a1,
+runs once per fixed-timestep Update tick) that set `a1+184=1` whenever the FE
+page id (`a1-144`) read 0, gated on `game_time` (`a1+2236`) > 0 so the mode got
+at least one real tick before being cut short. Live-tested and reverted:
+
+- **A one-shot write only skips the current logo, not the sequence.**
+  `sub_8258B8A0`'s outer loop resets `a1+184`, `a1+2232`, and `a1+2236` to 0
+  once at the top of *every* mode-loop iteration, and the intro is a series of
+  separate iterations (one per logo) -- firing once during logo 1 gets wiped
+  by logo 2's own reset before anything reads it.
+- **Re-firing every tick causes an infinite loop, not a skip.** `a1+184`
+  doesn't mean "advance to the next page" -- it means "tear down and fully
+  reinit the current top-level mode object" (`sub_825AAE90`/`sub_825ABED0`
+  chain). Reinit unconditionally sets the page id back to 0 as part of setup.
+  So firing it repeatedly just repeats: enter mode -> run one Update tick
+  (`game_time` 0->5) -> hook fires -> full teardown/reinit -> land back at
+  page 0 -> repeat, forever, at roughly one full cycle per tick (~16ms).
+  Confirmed live: `game_time` never advanced past 5 and the FE page id never
+  left 0 across 20+ consecutive cycles. Visually this presented as either a
+  black screen (nothing ever renders a full frame) or the logos appearing to
+  loop indefinitely, depending on exactly where in the cycle the hook fired.
+- The original doc finding above (single manual write from a live debugger,
+  well after the intro had been running for a while, landing cleanly on the
+  main menu and staying there) is **not reproduced by firing this hook
+  automatically from the very first tick** -- the manual probe likely caught
+  the framework in a later, different state (e.g. `dword_82E4F80C` already
+  settled to the "attract" mode object rather than mid-initialization) where
+  the same write has different, non-looping consequences.
+
+### What a real fix probably needs
+
+`a1+184` is too blunt an instrument. The page-navigation primitive the game
+itself uses to move between FE pages is `sub_825CFF90` (writes the page id at
+`root+4` and invokes the outgoing/incoming page's vtable teardown/setup,
+`root` being `a1-148`), dispatched via `sub_825CE8E8` (see the
+`LeaderboardLogonRouteToScreen`/`LeaderboardEventSigninBypass` hooks in
+`nocturnerecomp_hooks.cpp` for existing examples of intercepting page-switch
+call sites in this codebase). A working skip-intros feature almost certainly
+needs to hook wherever the intro's own Update logic *already* calls
+`sub_825CFF90`/`sub_825CE8E8` to advance off page 0 (e.g. its own logo-timer
+expiry) and redirect that call's destination straight to page 1 (main menu),
+the same pattern as the existing leaderboard-routing hooks -- not toggle the
+mode-exit flag from outside that logic entirely.

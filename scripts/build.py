@@ -213,6 +213,21 @@ def do_package(name, project_name, is_windows):
 
     copy_post_process_shader(pkg_dir)
 
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    pkg_scripts_dir = os.path.join(pkg_dir, "scripts")
+    os.makedirs(pkg_scripts_dir, exist_ok=True)
+    for script_name in ("extract-game.py", "extract_tu.py"):
+        src = os.path.join(script_dir, script_name)
+        print(f"+ cp {src} {pkg_scripts_dir}/")
+        shutil.copy2(src, pkg_scripts_dir)
+
+    root_dir = os.path.normpath(os.path.join(script_dir, ".."))
+    readme_src = os.path.join(root_dir, "README.md")
+    print(f"+ cp {readme_src} {pkg_dir}/")
+    shutil.copy2(readme_src, pkg_dir)
+
+    os.makedirs(os.path.join(pkg_dir, "game"), exist_ok=True)
+
     if is_windows:
         launcher_path = os.path.join(pkg_dir, "run.bat")
         print(f"+ write {launcher_path}")
@@ -227,7 +242,10 @@ def do_package(name, project_name, is_windows):
         archive_path = f"{name}.zip"
         print(f"+ zip {archive_path}")
         with zipfile.ZipFile(archive_path, "w", zipfile.ZIP_DEFLATED) as zf:
-            for dirpath, _, filenames in os.walk(pkg_dir):
+            for dirpath, dirnames, filenames in os.walk(pkg_dir):
+                if not filenames and not dirnames:
+                    arcname = os.path.relpath(dirpath, pkg_dir) + "/"
+                    zf.writestr(arcname, "")
                 for f in sorted(filenames):
                     src = os.path.join(dirpath, f)
                     arcname = os.path.relpath(src, pkg_dir)
