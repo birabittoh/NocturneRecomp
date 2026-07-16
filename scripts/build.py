@@ -206,10 +206,11 @@ def do_package(name, project_name, is_windows):
         f.write('texture_dump_skip_sizes = "512x256,1024x512,2048x1024,1920x1080,1280x720"\n')
         f.write("\n")
         f.write(f'post_process_shader_path = "{post_process_shader_path(is_windows)}"\n')
+        f.write("#post_process_shader_enabled = true\n")
         f.write("\n")
         f.write("# Boot a randomizer-patched xex (e.g. SOTN_XB_RANDO output) placed in the\n")
         f.write("# game data root instead of the base image. Uncomment to enable.\n")
-        f.write('#rando_xex_path = "Rando.xex"\n')
+        f.write('#rando_xex_name = "Rando.xex"\n')
 
     copy_post_process_shader(pkg_dir)
 

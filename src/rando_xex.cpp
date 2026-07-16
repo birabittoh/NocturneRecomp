@@ -20,11 +20,11 @@
 
 #include "ppc_interpreter.h"
 
-REXCVAR_DEFINE_STRING(rando_xex_path, "", "Game",
+REXCVAR_DEFINE_STRING(rando_xex_name, "", "Game",
                       "Boot this randomizer-patched xex (a same-layout in-place "
                       "variant of the base xex, e.g. SOTN_XB_RANDO's Rando.xex, "
-                      "placed in the game data root) instead of the base image. "
-                      "Empty = disabled.");
+                      "placed in the game data root) instead of the base image. ")
+    .lifecycle(rex::cvar::Lifecycle::kRequiresRestart);
 
 namespace nocturne {
 namespace {

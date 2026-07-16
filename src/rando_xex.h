@@ -51,9 +51,8 @@
 #include <rex/system/function_dispatcher.h>
 
 // Filename of a randomizer-patched xex inside the game data root (e.g.
-// SOTN_XB_RANDO's "Rando.xex"). Empty = disabled. Defined in
-// src/rando_xex.cpp.
-REXCVAR_DECLARE(std::string, rando_xex_path);
+// SOTN_XB_RANDO's "Rando.xex"). Empty = disabled.
+REXCVAR_DECLARE(std::string, rando_xex_name);
 
 namespace nocturne {
 
@@ -76,7 +75,7 @@ inline bool MaybeApplyRandoXex(const std::filesystem::path& game_data_root,
                                std::string& module_path,
                                std::filesystem::path* out_base_xex,
                                std::filesystem::path* out_patched_xex) {
-  std::string configured = REXCVAR_GET(rando_xex_path);
+  std::string configured = REXCVAR_GET(rando_xex_name);
   if (configured.empty()) {
     return false;
   }
@@ -106,7 +105,7 @@ inline bool MaybeApplyRandoXex(const std::filesystem::path& game_data_root,
   std::error_code ec;
   auto patched_size = std::filesystem::file_size(game_data_root / configured, ec);
   if (ec) {
-    REXLOG_WARN("[rando] rando_xex_path is set but {} isn't readable -- booting the base image",
+    REXLOG_WARN("[rando] rando_xex_name is set but {} isn't readable -- booting the base image",
                 (game_data_root / configured).string());
     return false;
   }

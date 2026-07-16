@@ -80,7 +80,7 @@ class NocturnerecompApp : public rex::ReXApp {
 #endif
   }
 
-  // Redirect the boot module to a randomizer-patched xex (rando_xex_path
+  // Redirect the boot module to a randomizer-patched xex (rando_xex_name
   // cvar) before the loader maps the image -- see src/rando_xex.h for why
   // this must happen here and not as a post-launch guest-memory patch.
   void OnLoadXexImage(std::string& module_path) override {
