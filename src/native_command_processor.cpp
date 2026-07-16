@@ -3310,6 +3310,26 @@ void NativeCommandProcessor::TryResolveCopy() {
   rp_begin.framebuffer = framebuffer_;
   rp_begin.renderArea.extent = {color_target_width_, color_target_height_};
   dfn.vkCmdBeginRenderPass(command_buffer_, &rp_begin, VK_SUBPASS_CONTENTS_INLINE);
+
+  // vkBeginCommandBuffer resets ALL dynamic state to undefined -- the
+  // viewport/scissor set by EnsureFrameBegun do not survive the
+  // end-submit-reopen above. Without re-setting them here, every draw after
+  // an in-frame resolve rasterized with whatever viewport the driver
+  // happened to have around -- in practice the presenter's swapchain-sized
+  // paint viewport, which in fullscreen (e.g. 3840x2160 against this
+  // 1280x720 target) scaled the rest of the frame 3x and cropped it to the
+  // top-left corner, flickering with correct frames depending on submission
+  // interleaving (most visible while fast-forwarding). In a 1280x720 window
+  // the inherited viewport happened to match, hiding the bug.
+  VkViewport viewport{0.0f,
+                      0.0f,
+                      float(color_target_width_),
+                      float(color_target_height_),
+                      0.0f,
+                      1.0f};
+  VkRect2D scissor{{0, 0}, {color_target_width_, color_target_height_}};
+  dfn.vkCmdSetViewport(command_buffer_, 0, 1, &viewport);
+  dfn.vkCmdSetScissor(command_buffer_, 0, 1, &scissor);
 }
 
 void NativeCommandProcessor::EnsureFrameBegun() {
@@ -4282,6 +4302,7 @@ void NativeCommandProcessor::PresentFrame() {
   if (do_present) {
     frames_since_present_ = 0;
     last_physical_present_time_ = last_present_time_;
+
 
     const rex::ui::vulkan::VulkanDevice* vulkan_device = provider_->vulkan_device();
     const rex::ui::vulkan::VulkanDevice::Functions& dfn = vulkan_device->functions();
