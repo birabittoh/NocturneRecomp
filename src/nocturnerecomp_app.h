@@ -31,6 +31,7 @@
 #include "accent_color.h"
 #include "achievements_menu.h"
 #include "fast_forward.h"
+#include "frame_pacer.h"
 #include "fonts.generated.h"
 #include "icon.generated.h"
 #include "native_command_processor.h"
@@ -108,6 +109,13 @@ class NocturnerecompApp : public rex::ReXApp {
     // Formerly the fast_forward mod; moved in-app (see fast_forward.h) since
     // it's a base feature, not optional content.
     nocturne::GetFastForward().Bind(window(), input_sys, runtime());
+
+    // Steady internal-framerate pacer: drives the game's target_time clock at
+    // exactly real-time from a dedicated steady-clock thread, so the PS1
+    // simulation holds 60Hz instead of oscillating with vblank/present jitter
+    // (see src/frame_pacer.h). Fast-forward now feeds it purely via the guest
+    // time scalar.
+    nocturne::GetFramePacer().Bind(runtime());
 
     // Feed the F3 debug overlay's "Guest FPS" readout. RegisterTick fires once
     // per guest frame on GPU swap (command-processor thread); the counter is
@@ -187,6 +195,9 @@ class NocturnerecompApp : public rex::ReXApp {
   }
 
   void OnShutdown() override {
+    // Stop the pacer thread before the runtime (and its guest memory) tears
+    // down -- it dereferences runtime()->memory() every tick.
+    nocturne::GetFramePacer().Stop();
 #ifdef _WIN32
     timeEndPeriod(1);
 #endif

@@ -81,6 +81,15 @@ uint32_t ResolveVideoModeHeight() {
   return uint32_t(std::clamp(configured_height, 480, 0x0FFF));
 }
 
+// Mirrors xboxkrnl_video.cpp's GetConfiguredVideoModeRefreshRate so the
+// present pacer runs at the exact rate VdQueryVideoMode reports to the guest
+// (and that the headless vblank thread already paces off). Kept in lockstep
+// with the vblank rate on purpose: if the two disagree the guest's swap loop
+// and the vblank ISR beat against each other, adding frame-queue latency.
+double ResolveVideoModeRefreshHz() {
+  return std::clamp(REXCVAR_GET(video_mode_refresh_rate), 24.0, 240.0);
+}
+
 }  // namespace
 
 namespace {
@@ -3224,6 +3233,26 @@ void NativeCommandProcessor::TryResolveCopy() {
   rp_begin.framebuffer = framebuffer_;
   rp_begin.renderArea.extent = {color_target_width_, color_target_height_};
   dfn.vkCmdBeginRenderPass(command_buffer_, &rp_begin, VK_SUBPASS_CONTENTS_INLINE);
+
+  // vkBeginCommandBuffer resets ALL dynamic state to undefined -- the
+  // viewport/scissor set by EnsureFrameBegun do not survive the
+  // end-submit-reopen above. Without re-setting them here, every draw after
+  // an in-frame resolve rasterized with whatever viewport the driver
+  // happened to have around -- in practice the presenter's swapchain-sized
+  // paint viewport, which in fullscreen (e.g. 3840x2160 against this
+  // 1280x720 target) scaled the rest of the frame 3x and cropped it to the
+  // top-left corner, flickering with correct frames depending on submission
+  // interleaving (most visible while fast-forwarding). In a 1280x720 window
+  // the inherited viewport happened to match, hiding the bug.
+  VkViewport viewport{0.0f,
+                      0.0f,
+                      float(color_target_width_),
+                      float(color_target_height_),
+                      0.0f,
+                      1.0f};
+  VkRect2D scissor{{0, 0}, {color_target_width_, color_target_height_}};
+  dfn.vkCmdSetViewport(command_buffer_, 0, 1, &viewport);
+  dfn.vkCmdSetScissor(command_buffer_, 0, 1, &scissor);
 }
 
 void NativeCommandProcessor::EnsureFrameBegun() {
@@ -4134,14 +4163,33 @@ void NativeCommandProcessor::PresentFrame() {
   if (!(guest_time_scalar > 0.0)) {
     guest_time_scalar = 1.0;
   }
-  auto min_frame_interval = std::chrono::duration_cast<std::chrono::steady_clock::duration>(
-      std::chrono::duration<double, std::milli>(16.0 / guest_time_scalar));
+  // Pace to the *configured* refresh rate (video_mode_refresh_rate cvar),
+  // matching the headless vblank thread. A hardcoded 16ms floor was used
+  // here before, which (a) ignored the cvar and (b) targeted 62.5Hz, not 60.
+  double refresh_hz = ResolveVideoModeRefreshHz();
+  auto interval = std::chrono::duration_cast<std::chrono::steady_clock::duration>(
+      std::chrono::duration<double, std::milli>(1000.0 / refresh_hz / guest_time_scalar));
   auto now = std::chrono::steady_clock::now();
-  auto elapsed = now - last_present_time_;
-  if (elapsed < min_frame_interval) {
-    std::this_thread::sleep_for(min_frame_interval - elapsed);
+  // Drift-correcting pacer: anchor the next frame to the *intended* deadline
+  // (last_present_time_ + interval), not to the actual wake time. The old
+  // code reset last_present_time_ = now() after sleeping, so std::this_thread::
+  // sleep_for's inherent overshoot (~0.5-1.5ms/frame on Windows even with
+  // timeBeginPeriod(1)) was baked into every frame and never repaid --
+  // pulling steady-state fps to ~1000/17 ~= 58.8 (the reported ~58.x). Here
+  // that overshoot is absorbed by the following frame's slack instead, so the
+  // average lands exactly on the target rate as long as per-frame work fits.
+  if (last_present_time_.time_since_epoch().count() == 0) {
+    last_present_time_ = now;
   }
-  last_present_time_ = std::chrono::steady_clock::now();
+  auto deadline = last_present_time_ + interval;
+  if (now < deadline) {
+    std::this_thread::sleep_for(deadline - now);
+    last_present_time_ = deadline;
+  } else {
+    // Fell a whole interval behind (a real hitch, or guest_time_scalar/refresh
+    // just changed) -- resync to now rather than replaying a catch-up burst.
+    last_present_time_ = now;
+  }
 
   // Guarantees a valid recording command buffer + cleared color target even
   // if this frame had zero (or all-skipped) draws.
@@ -4159,8 +4207,12 @@ void NativeCommandProcessor::PresentFrame() {
   // sleep above collapses toward zero at extreme scale values (existing
   // transient descriptor pool / constants arena headroom was sized for 4096
   // draws/frame -- so 64 accumulated logical frames is comfortably inside that
-  // margin).
-  constexpr auto kPhysicalPresentInterval = std::chrono::milliseconds(16);
+  // margin). The interval is the *unscaled* configured refresh period (same
+  // video_mode_refresh_rate cvar as the pacer above), so at 1x it's one
+  // logical frame and physical present tracks the guest 1:1.
+  const auto kPhysicalPresentInterval =
+      std::chrono::duration_cast<std::chrono::steady_clock::duration>(
+          std::chrono::duration<double, std::milli>(1000.0 / refresh_hz));
   constexpr uint32_t kMaxFramesBetweenPresents = 64;
   ++frames_since_present_;
   bool do_present = (last_present_time_ - last_physical_present_time_ >=
@@ -4170,6 +4222,7 @@ void NativeCommandProcessor::PresentFrame() {
   if (do_present) {
     frames_since_present_ = 0;
     last_physical_present_time_ = last_present_time_;
+
 
     const rex::ui::vulkan::VulkanDevice* vulkan_device = provider_->vulkan_device();
     const rex::ui::vulkan::VulkanDevice::Functions& dfn = vulkan_device->functions();
