@@ -45,7 +45,7 @@ def main():
         env.setdefault("__VK_LAYER_NV_optimus", "NVIDIA_only")
 
     assets_path = os.path.join(root, "assets")
-    cmd = [exe_path, "--game_data_root", assets_path, "--gpu_plugin=xenos", "--license_mask=1"]
+    cmd = [exe_path, "--game_data_root", assets_path, "--license_mask=1"]
 
     # Title-update builds need the TU's data files (the replacement audio track)
     # mounted as the update: device. scripts/build.py --tu extracts them to update/;
