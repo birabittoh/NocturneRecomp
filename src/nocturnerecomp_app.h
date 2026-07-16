@@ -18,6 +18,9 @@
 #include <rex/version.h>
 #include <rex/ui/imgui_drawer.h>
 #include <rex/ui/imgui_theme.h>
+#include <rex/ui/presenter.h>
+#include <rex/ui/vulkan/provider.h>
+#include <rex/ui/window.h>
 
 #ifdef _WIN32
 #include <Windows.h>
@@ -27,11 +30,28 @@
 
 #include "accent_color.h"
 #include "achievements_menu.h"
+#include "fast_forward.h"
+#include "frame_pacer.h"
 #include "fonts.generated.h"
 #include "icon.generated.h"
+#include "native_command_processor.h"
+#include "native_immediate_drawer.h"
+#include "rando_xex.h"
+#include "repaint_pump.h"
 #include "version.generated.h"
 
 #include <rex/system/kernel_state.h>
+
+// Single on/off vsync toggle for this renderer, layered on top of the SDK's
+// vulkan_allow_present_mode_immediate cvar (vulkan_presenter.cpp): disabling
+// it drops "immediate" (tearing) out of swapchain present-mode selection,
+// leaving mailbox (tear-free, non-blocking -- see OnPreLaunchModule below
+// for why mailbox and not FIFO) as the effective vsync-on mode.
+REXCVAR_DEFINE_BOOL(vsync, true, "Video", "Enable vsync");
+
+// Defined in rexglue-sdk/src/ui/vulkan/vulkan_presenter.cpp; the vsync cvar
+// above drives this rather than duplicating present-mode selection here.
+REXCVAR_DECLARE(bool, vulkan_allow_present_mode_immediate);
 
 class NocturnerecompApp : public rex::ReXApp {
  public:
@@ -50,9 +70,33 @@ class NocturnerecompApp : public rex::ReXApp {
     // time (src/version.generated.h, see CMakeLists.txt).
     config.game_version = nocturne::kVersionString;
 
+    // Explicitly go headless (no xenos/graphics backend) rather than relying
+    // on gpu_plugin being unset -- this is the documented entry point for
+    // bringing your own renderer via OnCreateImmediateDrawer/OnPreLaunchModule.
+    config.graphics = nullptr;
+
 #ifdef _WIN32
     timeBeginPeriod(1);
 #endif
+  }
+
+  // Redirect the boot module to a randomizer-patched xex (rando_xex_path
+  // cvar) before the loader maps the image -- see src/rando_xex.h for why
+  // this must happen here and not as a post-launch guest-memory patch.
+  void OnLoadXexImage(std::string& module_path) override {
+    rando_active_ = nocturne::MaybeApplyRandoXex(game_data_root(), module_path,
+                                                 &rando_base_xex_, &rando_patched_xex_);
+  }
+
+  // The rando image's .text patches don't take effect from the image alone
+  // (recompiled code never re-reads .text) -- once the module is loaded and
+  // every function has its default dispatcher entry, diff the images and
+  // override the patched functions with interpreter thunks. See
+  // src/rando_xex.h.
+  void OnPostLoadXexImage() override {
+    if (rando_active_) {
+      nocturne::InstallRandoOverrides(runtime(), rando_base_xex_, rando_patched_xex_);
+    }
   }
 
   void OnPostSetup() override {
@@ -81,6 +125,17 @@ class NocturnerecompApp : public rex::ReXApp {
 
     auto* ks = rex::system::kernel_state();
     nocturne::GetAccentColor().Bind(ks, user_data_root());
+
+    // Formerly the fast_forward mod; moved in-app (see fast_forward.h) since
+    // it's a base feature, not optional content.
+    nocturne::GetFastForward().Bind(window(), input_sys, runtime());
+
+    // Steady internal-framerate pacer: drives the game's target_time clock at
+    // exactly real-time from a dedicated steady-clock thread, so the PS1
+    // simulation holds 60Hz instead of oscillating with vblank/present jitter
+    // (see src/frame_pacer.h). Fast-forward now feeds it purely via the guest
+    // time scalar.
+    nocturne::GetFramePacer().Bind(runtime());
 
     // Feed the F3 debug overlay's "Guest FPS" readout. RegisterTick fires once
     // per guest frame on GPU swap (command-processor thread); the counter is
@@ -128,6 +183,7 @@ class NocturnerecompApp : public rex::ReXApp {
   void OnCreateDialogs(rex::ui::ImGuiDrawer* drawer) override {
     nocturne::Achievements().AttachWatcher(drawer);
     nocturne::GetAccentColor().AttachWatcher(drawer);
+    nocturne::GetFastForward().AttachWatcher(drawer);
   }
 
   // Replace the SDK's default pixel font with a serif face that fits the
@@ -159,14 +215,202 @@ class NocturnerecompApp : public rex::ReXApp {
   }
 
   void OnShutdown() override {
+    // Stop the pacer thread before the runtime (and its guest memory) tears
+    // down -- it dereferences runtime()->memory() every tick.
+    nocturne::GetFramePacer().Stop();
 #ifdef _WIN32
     timeEndPeriod(1);
 #endif
   }
 
+  // Native renderer phase 2: called from SetupPresentation right after the
+  // (still device-less) window opens, per the detached-mode contract in
+  // rex/rex_app.h. Must return a drawer that tolerates CreateTexture() before
+  // any GPU device exists -- the real Vulkan device/swapchain aren't built
+  // until OnPreLaunchModule, below.
+  std::unique_ptr<rex::ui::ImmediateDrawer> OnCreateImmediateDrawer() override {
+    auto drawer = std::make_unique<nocturne::NativeImmediateDrawer>();
+    native_drawer_ = drawer.get();
+    return drawer;
+  }
+
+  // Stand up a real Vulkan swapchain on the game window, reusing the same
+  // rex::ui::vulkan::VulkanProvider/Presenter classes the xenos Vulkan
+  // backend uses -- infrastructure reuse, not a new abstraction. This is the
+  // "no GraphicsSystem" path: no CommandProcessor, no guest-GPU emulation,
+  // just a presentable surface for phase 3's native command processor (and,
+  // in the meantime, the SDK's own ImGui overlays) to draw into.
+  void OnPreLaunchModule() override {
+    // Applied before either presentation path (native or gpu_plugin) builds
+    // its swapchain below, since both share vulkan_presenter.cpp's present-
+    // mode selection. Only toggles "immediate" (the tearing mode) -- mailbox
+    // is left enabled either way since it's also tear-free. Forcing a hard
+    // FIFO fallback here (disabling mailbox too) was tried first and caused
+    // guest logic to run at half its normal rate: FIFO's vkQueuePresent
+    // blocks for a real vsync interval (~16ms), which stacks with
+    // NativeCommandProcessor::PresentFrame's own steady_clock-based pacing
+    // sleep (also ~16ms, needed for fast-forward's guest_time_scalar
+    // decoupling, see src/fast_forward.h) instead of replacing it, roughly
+    // doubling per-frame time.
+    // Mailbox is tear-free but non-blocking, so it doesn't double-count.
+    REXCVAR_SET(vulkan_allow_present_mode_immediate, !REXCVAR_GET(vsync));
+
+    // If a gpu_plugin cvar was set (e.g. "xenos"), ReXApp::SetupPresentation
+    // already loaded that plugin as config_.graphics and ran its own
+    // SetupPresentation -- runtime()->graphics_system() is non-null in that
+    // case. Skip standing up the native Vulkan swapchain/command-processor
+    // entirely then; doing both left the native presenter's swapchain image
+    // (which nothing ever draws into, since PM4 packets go to the plugin's
+    // real CommandProcessor instead) as the one actually presented, i.e. a
+    // solid black screen despite the game running fine through the plugin.
+    if (runtime()->graphics_system()) {
+      REXGPU_INFO("Native renderer: gpu_plugin set, deferring to plugin's own presentation");
+      return;
+    }
+
+    REXGPU_INFO("Native renderer: OnPreLaunchModule entered");
+    // This renderer applies post_process_shader_enabled/post_process_shader_path
+    // (see docs/native-rendering.md) only to the gameplay-preview texture
+    // (NativeCommandProcessor::ApplyGameplayPreviewPostProcess), not to the
+    // whole composited frame the way the xenos gpu_plugin's own Presenter
+    // does -- suppress the SDK's default whole-guest-output application
+    // before this app's own Presenter is initialized below.
+    rex::ui::Presenter::SetCustomPostProcessShaderAppliesToGuestOutput(false);
+    // VulkanProvider::CreatePresenter must run on the UI thread (see
+    // GraphicsSystem::SetupPresentation for the equivalent SDK-mode call);
+    // OnPreLaunchModule itself is not guaranteed to be the UI thread.
+    window()->app_context().CallInUIThreadSynchronous([this] {
+      // with_gpu_emulation=true so VulkanDevice enables the guest-rendering
+      // device features -- tessellationShader in particular: the title-screen
+      // smoke overlay is a tessellated quad patch (see
+      // NativeCommandProcessor::CreateTessellationHostShaders), and without
+      // the feature enabled at device creation those draws are skipped.
+      vulkan_provider_ = rex::ui::vulkan::VulkanProvider::Create(
+          /*with_gpu_emulation=*/true, /*with_presentation=*/true);
+      if (!vulkan_provider_) {
+        REXGPU_ERROR("Native renderer: failed to create the Vulkan provider");
+        return;
+      }
+      vulkan_presenter_ = vulkan_provider_->CreatePresenter();
+      if (!vulkan_presenter_) {
+        REXGPU_ERROR("Native renderer: failed to create the Vulkan presenter");
+        return;
+      }
+      REXGPU_INFO("Native renderer: Vulkan provider/presenter created, attaching to window");
+      // Attaching the presenter to the window hooks up swapchain creation,
+      // resize handling, and per-frame presentation automatically (Window's
+      // own paint loop calls presenter->PaintFromUIThread()) -- the same
+      // mechanism the xenos backend relies on, just wired manually instead of
+      // through GraphicsSystem.
+      window()->SetPresenter(vulkan_presenter_.get());
+
+      if (native_drawer_ &&
+          native_drawer_->InitializeVulkan(vulkan_provider_.get(), vulkan_presenter_.get())) {
+        // The detached-mode SetupOverlays() call constructed imgui_drawer()
+        // with a null presenter (no device existed yet), so it was never
+        // registered as a UI drawer anywhere; do that now that a real
+        // presenter exists so the debug/console/settings overlays paint.
+        if (auto* drawer = imgui_drawer()) {
+          vulkan_presenter_->AddUIDrawerFromUIThread(drawer, 0);
+        }
+
+        // Decouple host present rate from the guest's paced 60fps: with no
+        // continuous paint request, RefreshGuestOutput only pokes one host
+        // paint per guest frame, capping presentation at 60fps even though
+        // the swapchain/present mode could go faster. This drawer requests
+        // another UI-thread paint every frame it draws (which draws nothing
+        // itself), keeping the UI thread re-presenting the latest guest-
+        // output mailbox image at monitor refresh -- see repaint_pump.h.
+        repaint_pump_ = std::make_unique<nocturne::RepaintPumpDrawer>(vulkan_presenter_.get());
+        vulkan_presenter_->AddUIDrawerFromUIThread(repaint_pump_.get(), 1000);
+        REXGPU_INFO("Native renderer: Vulkan swapchain ready");
+      } else {
+        REXGPU_ERROR("Native renderer: failed to initialize the Vulkan immediate drawer");
+        return;
+      }
+
+      // Phase 3: hand decoded PM4 packets from the headless ring buffer to a
+      // game-specific interpreter, which presents through this same
+      // swapchain. Must be set before the guest starts submitting GPU
+      // commands, per SetNativeGpuCommandCallback's contract.
+      native_command_processor_ = std::make_unique<nocturne::NativeCommandProcessor>(
+          vulkan_provider_.get(), vulkan_presenter_.get());
+
+      // Mirrors ReXApp's own IGraphicsSystem::InitializeAssetReplacement call
+      // for the normal xenos path (see rex_app.cpp) -- this renderer has no
+      // IGraphicsSystem, so nothing does that wiring automatically. Texture
+      // replacement reuses the SDK's own rex::graphics::TextureReplacement.
+      // Shader replacement can't reuse the SDK's path the same way: its only
+      // implementation (PipelineCache::ApplyDxbcReplacement) swaps in raw
+      // DXBC and is D3D12-only, with no SPIR-V equivalent -- so this
+      // renderer has its own SPIR-V-only replacement path instead (see
+      // docs/native-renderer-shader-replacement.md and
+      // NativeCommandProcessor::GetOrTranslateShader). It shares the SDK's
+      // shader_dump_enabled/shader_load_enabled cvars so a single setting
+      // controls both this renderer and the normal xenos/D3D12 backends'
+      // shader dump/replace behavior.
+      native_command_processor_->InitializeTextureReplacement(
+          runtime()->ModOverlayRoots("textures"), runtime()->ModDumpRoot());
+      native_command_processor_->InitializeShaderReplacement(
+          runtime()->ModOverlayRoots("shaders"), runtime()->ModDumpRoot());
+
+      rex::system::kernel_state()->SetNativeGpuCommandCallback(
+          [this](const rex::graphics::PacketInfo& info, const uint8_t* packet_base) {
+            native_command_processor_->OnPacket(info, packet_base);
+          });
+
+      // This renderer has no GraphicsSystem, so nothing ever calls the normal
+      // GraphicsSystem::SetHostSwapCallback -> Runtime -> ModRegistry::
+      // DispatchTick chain -- which is what actually invokes the "guest
+      // frame" tick OnPostSetup registered above via RegisterTick (and any
+      // mod's own RegisterTick calls). Drive it directly from this
+      // renderer's own swap point instead, or every per-frame tick (F3's
+      // guest FPS included) silently never fires.
+      native_command_processor_->SetOnFramePresented(
+          [this] { runtime()->mod_registry()->DispatchTick(); });
+
+      // Feed the F2 shader debugger overlay from NativeCommandProcessor's own
+      // shader cache -- this renderer has no GraphicsSystem/CommandProcessor,
+      // so the overlay's default GraphicsSystem-based data source (see
+      // ReXApp::SetupOverlays) always returns an empty snapshot here.
+      // binary_replacer is intentionally left unset (falls back to the same
+      // no-op GraphicsSystem path) -- see NativeCommandProcessor::
+      // GetShaderDetails's doc comment for why (no per-modification
+      // translation storage to replace into).
+      rex::ReXApp::ShaderDebuggerOverride shader_debugger_override;
+      shader_debugger_override.snapshot_provider = [this] {
+        return native_command_processor_->GetShaderSnapshot();
+      };
+      shader_debugger_override.disable_setter = [this](uint64_t hash, bool disabled) {
+        native_command_processor_->SetShaderDisabledByHash(hash, disabled);
+      };
+      shader_debugger_override.details_provider = [this](uint64_t hash) {
+        return native_command_processor_->GetShaderDetails(hash);
+      };
+      shader_debugger_override.profiling_toggle = [this](bool enabled) {
+        native_command_processor_->SetShaderProfilingEnabled(enabled);
+      };
+      shader_debugger_override.profiling_resetter = [this] {
+        native_command_processor_->ResetShaderProfiling();
+      };
+      SetShaderDebuggerOverride(std::move(shader_debugger_override));
+    });
+  }
+
  private:
+  bool rando_active_ = false;
+  std::filesystem::path rando_base_xex_;
+  std::filesystem::path rando_patched_xex_;
   std::atomic<uint64_t> guest_frame_count_{0};
   std::chrono::steady_clock::time_point fps_poll_time_ = std::chrono::steady_clock::now();
   uint64_t fps_poll_frame_count_ = 0;
   double fps_smoothed_ = 0.0;
+
+  // Owned by ReXApp via immediate_drawer_; this is a non-owning back-pointer
+  // used to hand it the Vulkan device once OnPreLaunchModule builds one.
+  nocturne::NativeImmediateDrawer* native_drawer_ = nullptr;
+  std::unique_ptr<rex::ui::vulkan::VulkanProvider> vulkan_provider_;
+  std::unique_ptr<rex::ui::Presenter> vulkan_presenter_;
+  std::unique_ptr<nocturne::NativeCommandProcessor> native_command_processor_;
+  std::unique_ptr<nocturne::RepaintPumpDrawer> repaint_pump_;
 };

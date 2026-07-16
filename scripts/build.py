@@ -176,18 +176,17 @@ def do_package(name, project_name, is_windows):
     config_path = os.path.join(pkg_dir, f"{project_name}.toml")
     print(f"+ write {config_path}")
     with open(config_path, "w") as f:
-        f.write("ui_settings_disable_save = true\n")
-        f.write('gpu_plugin = "xenos"\n')
         f.write("license_mask = 1\n")
-        f.write("gpu_allow_invalid_fetch_constants = true\n")
         f.write("mnk_capture_mouse = false\n")
         f.write("mnk_mode = true\n")
+        f.write("user_name = \"User\"\n")
+        f.write("user_language = 1\n")
         f.write("\n")
         f.write(f'keybind_a = "Space"{"\t"*5}# Jump\n')
         f.write(f'keybind_b = "RMB"{"\t"*5}# Right Hand\n') 
         f.write(f'keybind_x = "LMB"{"\t"*5}# Left Hand\n')  
         f.write(f'keybind_y = "Shift"{"\t"*5}# Backdash/Item Crash\n')
-        f.write(f'keybind_left_trigger = "Tab"{"\t"*2}# Map\n')   
+        f.write(f'keybind_left_trigger = "M"{"\t"*3}# Map\n')   
         f.write(f'keybind_right_trigger = "R"{"\t"*3}# Soul of Wolf\n')
         f.write(f'keybind_left_shoulder = "Q"{"\t"*3}# Form of Mist\n')
         f.write(f'keybind_right_shoulder = "Control"{"\t"*1}# Soul of Bat\n')
@@ -207,8 +206,27 @@ def do_package(name, project_name, is_windows):
         f.write('texture_dump_skip_sizes = "512x256,1024x512,2048x1024,1920x1080,1280x720"\n')
         f.write("\n")
         f.write(f'post_process_shader_path = "{post_process_shader_path(is_windows)}"\n')
+        f.write("\n")
+        f.write("# Boot a randomizer-patched xex (e.g. SOTN_XB_RANDO output) placed in the\n")
+        f.write("# game data root instead of the base image. Uncomment to enable.\n")
+        f.write('#rando_xex_path = "Rando.xex"\n')
 
     copy_post_process_shader(pkg_dir)
+
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    pkg_scripts_dir = os.path.join(pkg_dir, "scripts")
+    os.makedirs(pkg_scripts_dir, exist_ok=True)
+    for script_name in ("extract-game.py", "extract_tu.py"):
+        src = os.path.join(script_dir, script_name)
+        print(f"+ cp {src} {pkg_scripts_dir}/")
+        shutil.copy2(src, pkg_scripts_dir)
+
+    root_dir = os.path.normpath(os.path.join(script_dir, ".."))
+    readme_src = os.path.join(root_dir, "README.md")
+    print(f"+ cp {readme_src} {pkg_dir}/")
+    shutil.copy2(readme_src, pkg_dir)
+
+    os.makedirs(os.path.join(pkg_dir, "game"), exist_ok=True)
 
     if is_windows:
         launcher_path = os.path.join(pkg_dir, "run.bat")
@@ -224,7 +242,10 @@ def do_package(name, project_name, is_windows):
         archive_path = f"{name}.zip"
         print(f"+ zip {archive_path}")
         with zipfile.ZipFile(archive_path, "w", zipfile.ZIP_DEFLATED) as zf:
-            for dirpath, _, filenames in os.walk(pkg_dir):
+            for dirpath, dirnames, filenames in os.walk(pkg_dir):
+                if not filenames and not dirnames:
+                    arcname = os.path.relpath(dirpath, pkg_dir) + "/"
+                    zf.writestr(arcname, "")
                 for f in sorted(filenames):
                     src = os.path.join(dirpath, f)
                     arcname = os.path.relpath(src, pkg_dir)
@@ -435,7 +456,6 @@ def main():
     shutil.copy2(build_output, exe_name)
 
     copy_runtime_libs(is_windows, sdk_dir, build_type)
-    copy_post_process_shader(root)
 
     if tu_version:
         print(

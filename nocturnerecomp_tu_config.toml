@@ -17,3 +17,34 @@
 # fatal; declaring it here makes codegen emit a callable body for that VA.
 0x8282B230 = {}
 0x82286758 = {}
+
+# Mid-asm hooks: TU-image equivalents of every [[midasm_hook]] in
+# nocturnerecomp_config.toml -- keep the two files in sync. Addresses mapped
+# with scripts/match_tu_functions.py (normalized-body function matching
+# between vanilla and TU codegen output); code shifts are regional, not a
+# single constant (+0x1D8 around 0x82525xxx, +0x200 around 0x825B6xxx+).
+# See each hook's comment in nocturnerecomp_config.toml for what it does.
+
+# vanilla 0x825252C8 (+0x1D8)
+[[midasm_hook]]
+address = 0x825254A0
+name = "HeadlessRingWaitBypass"
+return_on_true = true
+
+# vanilla 0x82524330 (+0x1D8)
+[[midasm_hook]]
+address = 0x82524508
+name = "HeadlessRingWaitBypass"
+return_on_true = true
+
+# vanilla 0x825B6E48 (+0x200), in TU sub_825B6CB0 (vanilla sub_825B6AB0)
+[[midasm_hook]]
+address = 0x825B7048
+name = "LeaderboardLogonRouteToScreen"
+registers = ["r5", "r31"]
+
+# vanilla 0x825C1B24 / jump 0x825C1B44 (+0x200), in TU sub_825C1CB8
+[[midasm_hook]]
+address = 0x825C1D24
+name = "LeaderboardActivateSpinSkip"
+jump_address_on_true = 0x825C1D44

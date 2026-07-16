@@ -7,7 +7,7 @@ else
   ASSETS="$DIR/../../../assets"
 fi
 
-set -- --game_data_root "$ASSETS" --gpu_plugin=xenos --license_mask=1 "$@"
+set -- --game_data_root "$ASSETS" --license_mask=1 "$@"
 
 if [ -d "$DIR/update" ]; then
   set -- --update_data_root "$DIR/update" "$@"
