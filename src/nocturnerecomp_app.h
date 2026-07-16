@@ -30,6 +30,7 @@
 
 #include "accent_color.h"
 #include "achievements_menu.h"
+#include "fast_forward.h"
 #include "fonts.generated.h"
 #include "icon.generated.h"
 #include "native_command_processor.h"
@@ -104,6 +105,10 @@ class NocturnerecompApp : public rex::ReXApp {
     auto* ks = rex::system::kernel_state();
     nocturne::GetAccentColor().Bind(ks, user_data_root());
 
+    // Formerly the fast_forward mod; moved in-app (see fast_forward.h) since
+    // it's a base feature, not optional content.
+    nocturne::GetFastForward().Bind(window(), input_sys, runtime());
+
     // Feed the F3 debug overlay's "Guest FPS" readout. RegisterTick fires once
     // per guest frame on GPU swap (command-processor thread); the counter is
     // polled from the UI thread each time the overlay redraws to derive an
@@ -150,6 +155,7 @@ class NocturnerecompApp : public rex::ReXApp {
   void OnCreateDialogs(rex::ui::ImGuiDrawer* drawer) override {
     nocturne::Achievements().AttachWatcher(drawer);
     nocturne::GetAccentColor().AttachWatcher(drawer);
+    nocturne::GetFastForward().AttachWatcher(drawer);
   }
 
   // Replace the SDK's default pixel font with a serif face that fits the
@@ -212,8 +218,9 @@ class NocturnerecompApp : public rex::ReXApp {
     // guest logic to run at half its normal rate: FIFO's vkQueuePresent
     // blocks for a real vsync interval (~16ms), which stacks with
     // NativeCommandProcessor::PresentFrame's own steady_clock-based pacing
-    // sleep (also ~16ms, needed for fast_forward's guest_time_scalar
-    // decoupling) instead of replacing it, roughly doubling per-frame time.
+    // sleep (also ~16ms, needed for fast-forward's guest_time_scalar
+    // decoupling, see src/fast_forward.h) instead of replacing it, roughly
+    // doubling per-frame time.
     // Mailbox is tear-free but non-blocking, so it doesn't double-count.
     REXCVAR_SET(vulkan_allow_present_mode_immediate, !REXCVAR_GET(vsync));
 

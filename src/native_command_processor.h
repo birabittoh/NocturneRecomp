@@ -628,7 +628,7 @@ class NativeCommandProcessor {
   // sane. Milestone 3b may replace this with real vsync-driven pacing.
   std::chrono::steady_clock::time_point last_present_time_{};
 
-  // Fast-forward frame-skip (see mods_src/fast_forward): last_present_time_ above paces how often this
+  // Fast-forward frame-skip (see src/fast_forward.h): last_present_time_ above paces how often this
   // function is even *called* (scaled by the guest clock's time scalar), but
   // the guest's mode loop calls PresentFrame once per logic iteration, so
   // real GPU present work was coupled 1:1 with logic throughput and capped it
