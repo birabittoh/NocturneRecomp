@@ -79,6 +79,8 @@ set(NOCTURNERECOMP_SOURCES
     src/fast_forward.cpp
     src/frame_pacer.cpp
     src/native_command_processor.cpp
+    src/ppc_interpreter.cpp
+    src/rando_xex.cpp
     ${NOCTURNE_FONTS_HEADER}
     ${NOCTURNE_ICON_HEADER}
     ${GENERATED_SOURCES}

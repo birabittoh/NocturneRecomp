@@ -36,6 +36,7 @@
 #include "icon.generated.h"
 #include "native_command_processor.h"
 #include "native_immediate_drawer.h"
+#include "rando_xex.h"
 #include "repaint_pump.h"
 #include "version.generated.h"
 
@@ -77,6 +78,25 @@ class NocturnerecompApp : public rex::ReXApp {
 #ifdef _WIN32
     timeBeginPeriod(1);
 #endif
+  }
+
+  // Redirect the boot module to a randomizer-patched xex (rando_xex_path
+  // cvar) before the loader maps the image -- see src/rando_xex.h for why
+  // this must happen here and not as a post-launch guest-memory patch.
+  void OnLoadXexImage(std::string& module_path) override {
+    rando_active_ = nocturne::MaybeApplyRandoXex(game_data_root(), module_path,
+                                                 &rando_base_xex_, &rando_patched_xex_);
+  }
+
+  // The rando image's .text patches don't take effect from the image alone
+  // (recompiled code never re-reads .text) -- once the module is loaded and
+  // every function has its default dispatcher entry, diff the images and
+  // override the patched functions with interpreter thunks. See
+  // src/rando_xex.h.
+  void OnPostLoadXexImage() override {
+    if (rando_active_) {
+      nocturne::InstallRandoOverrides(runtime(), rando_base_xex_, rando_patched_xex_);
+    }
   }
 
   void OnPostSetup() override {
@@ -378,6 +398,9 @@ class NocturnerecompApp : public rex::ReXApp {
   }
 
  private:
+  bool rando_active_ = false;
+  std::filesystem::path rando_base_xex_;
+  std::filesystem::path rando_patched_xex_;
   std::atomic<uint64_t> guest_frame_count_{0};
   std::chrono::steady_clock::time_point fps_poll_time_ = std::chrono::steady_clock::now();
   uint64_t fps_poll_frame_count_ = 0;
