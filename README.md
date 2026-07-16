@@ -7,7 +7,7 @@ This project converts the Xbox 360 PowerPC `default.xex` into native x86_64
 code at build time, then wraps it with a small host runtime (logging,
 overlays, hooks) so the game runs natively and can be modded like a PC port.
 
-**You must own the game.** This project does **not** ship any NocturneRecomp code, data, or assets. You provide your own legally dumped ISO.
+**You must own the game.** This project does **not** ship any copyrighted code, data, or assets. You provide your own legally dumped game.
 
 # Get the game on [Goopie](https://goopie.xyz)!
 
@@ -67,7 +67,7 @@ python scripts/run.py
 ```
 
 This runs the freshly built executable with the correct CLI arguments
-(`--game_data_root=assets`, `--gpu_plugin=xenos`, `--license_mask=1`).
+(`--game_data_root=assets`, `--license_mask=1`).
 
 Any extra arguments are forwarded to the executable, e.g.:
 
@@ -160,8 +160,3 @@ void MyHook(PPCRegister& r3) {
 
 The host-side source in `src/`, build scripts, and CI config are available
 under the MIT License.
-
-The recompiled game code produced at build time contains symbols and logic
-from NocturneRecomp and is **not** redistributable. Do not share
-`default.xex`, the `generated/` directory, or any built binary that links
-against them.
