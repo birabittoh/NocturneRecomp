@@ -28,10 +28,9 @@ memmove = 0x825E37D0
 memset  = 0x825E2740
 
 # sub_825252C8 is the guest's generic "wait for the GPU to catch up" ring/pool
-# primitive (see docs/native-renderer-headless-boot.md). It polls a
-# GPU-driven counter that only a real GraphicsSystem ever advances. When
-# headless there's no GPU to wait for, so bypass the wait entirely instead
-# of trying to emulate every counter it might poll.
+# primitive. It polls a GPU-driven counter that only a real GraphicsSystem
+# ever advances. When headless there's no GPU to wait for, so bypass the wait
+entirely instead of trying to emulate every counter it might poll.
 [[midasm_hook]]
 address = 0x825252C8
 name = "HeadlessRingWaitBypass"

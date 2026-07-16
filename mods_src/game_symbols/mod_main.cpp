@@ -140,10 +140,8 @@ constexpr uint32_t kRoomsAddrVanilla = 0x83164CD0u;
 // object (the `a1` passed to the game's fwmain mode loop / fixed-timestep
 // tick, sub_8258B8A0 / sub_8258B3B8). On the pointed-to object: +2236 =
 // game_time, +2232 = target_time (the fixed-timestep catch-up loop's own
-// clock, units "300ths of a second" -- one 60Hz frame = 5 units). See
-// docs/native-renderer-pacing-investigation.md, "full frame-pacing chain
-// reverse-engineered", for the full derivation -- verified against
-// assets/default.xex (imagebase 0x82000000) and live-probed.
+// clock, units "300ths of a second" -- one 60Hz frame = 5 units). Verified
+// against assets/default.xex (imagebase 0x82000000) and live-probed.
 //
 // Consumers must not trust this blindly: dereference it, then sanity-check
 // the pointed-to struct (see src/fast_forward.cpp's plausibility guard)

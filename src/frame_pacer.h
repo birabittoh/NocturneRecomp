@@ -15,7 +15,7 @@
 // rock-steady 60Hz regardless of vblank/present jitter -- using the game's
 // own catch-up logic (target is a ceiling: when we hold it low the game runs
 // zero Updates and self-creeps it up; when a host hitch leaves game behind it
-// runs catch-up Updates). See docs/native-renderer-pacing-investigation.md.
+// runs catch-up Updates).
 #pragma once
 
 #include <atomic>

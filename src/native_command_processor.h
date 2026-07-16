@@ -28,9 +28,8 @@
 namespace nocturne {
 
 // Native renderer phase 3, milestone 3a: the SOTN-specific consumer of the
-// decoded PM4 stream forwarded by KernelState::SetNativeGpuCommandCallback
-// (see docs/native-renderer-headless-boot.md, "Phase 1 revisited" for how
-// that decode is produced). This milestone only proves the callback ->
+// decoded PM4 stream forwarded by KernelState::SetNativeGpuCommandCallback.
+// This milestone only proves the callback ->
 // interpreter -> present loop: it tracks register writes into a RegisterFile
 // (state milestone 3b will need) and, on a swap packet, clears the Phase 2
 // swapchain's guest-output image to a distinctive color via
@@ -194,8 +193,7 @@ class NativeCommandProcessor {
   // pixel shader reads (see TryDraw) -- required, not defaulted, because
   // leaving it 0 (this renderer's original bug) silently drops all
   // vertex-to-pixel interpolated data, including vertex color, producing
-  // solid-black output for any shader relying on it. See
-  // docs/native-renderer-headless-boot.md.
+  // solid-black output for any shader relying on it.
   struct TranslatedShader {
     rex::graphics::Shader* shader = nullptr;  // Owned by analyzed_shaders_.
     VkShaderModule module = VK_NULL_HANDLE;
@@ -265,7 +263,7 @@ class NativeCommandProcessor {
   // globally. Found necessary when a real draw's pixel shader needed two
   // simultaneous texture units (a base image + a glow/overlay layer) and the
   // old single fixed 1-image+1-sampler layout left the second one completely
-  // unbound. See docs/native-renderer-headless-boot.md.
+  // unbound.
   static constexpr uint32_t kMaxTexturesPerStage = 8;
   VkDescriptorSetLayout GetOrCreateTextureSetLayout(uint32_t texture_count, uint32_t sampler_count);
   std::unordered_map<uint64_t, VkDescriptorSetLayout> texture_set_layout_cache_;
@@ -367,8 +365,7 @@ class NativeCommandProcessor {
 
   void UpdateSharedMemory(uint32_t guest_address_dwords, uint32_t size_dwords);
 
-  // EDRAM resolve-to-texture (see docs/native-renderer-headless-boot.md, step
-  // 17): when the guest sets RB_MODECONTROL.edram_mode to kCopy before what
+  // EDRAM resolve-to-texture: when the guest sets RB_MODECONTROL.edram_mode to kCopy before what
   // would otherwise be a normal draw, that "draw" is actually a resolve
   // trigger -- real hardware copies the current render target (or a
   // rectangle of it, given by the resolve's own 3 vf0 vertices) into a
@@ -577,8 +574,7 @@ class NativeCommandProcessor {
   uint32_t debug_frames_dumped_ = 0;
   void DebugDumpColorTarget();
 
-  // A garbage-decoded draw's shader ucode (see native-renderer-headless-boot.md,
-  // Phase 3 "Next" item 1) hashes differently on every resubmit, so it never
+  // A garbage-decoded draw's shader ucode hashes differently on every resubmit, so it never
   // hits shader_cache_ and instead pays SpirvShaderTranslator's ~20s cost
   // every single time it recurs -- stalling the frame loop for minutes. Real
   // intro content only ever needs a couple of distinct shaders, so once the
@@ -609,8 +605,7 @@ class NativeCommandProcessor {
   // draw (up to 5/draw x hundreds of draws/frame ~= thousands of
   // vkAllocateMemory calls/frame). That per-draw allocation cost is the
   // dominant reason inline PM4 processing balloons into multi-second stalls
-  // that freeze the guest thread (the "skip ahead" -- see
-  // docs/native-renderer-pacing-investigation.md). The offset is reset once
+  // that freeze the guest thread (the "skip ahead"). The offset is reset once
   // per frame in EnsureFrameBegun, right after the fence wait guarantees the
   // GPU has finished reading last frame's region, and the used range is
   // flushed once per frame in PresentFrame before submit.
@@ -627,15 +622,13 @@ class NativeCommandProcessor {
   // signal the game's frame-pacing logic reads (see OnPacket).
   uint32_t swap_counter_ = 0;
 
-  // HeadlessRingWaitBypass (docs/native-renderer-headless-boot.md) removes
-  // all real GPU backpressure from the guest's frame loop, so without this it
+  // HeadlessRingWaitBypass removes all real GPU backpressure from the guest's frame loop, so without this it
   // free-runs at thousands of "frames" per second -- pace it to something
   // resembling real hardware so per-frame debug logging and CPU usage stay
   // sane. Milestone 3b may replace this with real vsync-driven pacing.
   std::chrono::steady_clock::time_point last_present_time_{};
 
-  // Fast-forward frame-skip (see docs/native-renderer-pacing-investigation.md
-  // and src/fast_forward.h): last_present_time_ above paces how often this
+  // Fast-forward frame-skip (see src/fast_forward.h): last_present_time_ above paces how often this
   // function is even *called* (scaled by the guest clock's time scalar), but
   // the guest's mode loop calls PresentFrame once per logic iteration, so
   // real GPU present work was coupled 1:1 with logic throughput and capped it

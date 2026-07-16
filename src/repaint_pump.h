@@ -24,8 +24,8 @@ REXCVAR_DEFINE_INT32(max_host_fps, 120, "Video", "Cap host present rate (0 = unc
 namespace nocturne {
 
 // Native renderer: decouples host present rate from the guest's paced 60fps
-// (see docs/native-renderer-pacing-investigation.md for why the guest side is
-// paced via PresentFrame's 16ms sleep and must stay that way). This drawer
+// (the guest side is paced via PresentFrame's 16ms sleep and must stay that
+// way). This drawer
 // draws nothing -- its only job is to re-arm the UI thread's paint loop every
 // frame via Presenter::RequestUIPaintFromUIThread(), so PaintFromUIThread
 // keeps re-presenting the latest guest-output mailbox image at monitor

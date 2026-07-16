@@ -120,6 +120,3 @@ RenderDoc MCP tools (`open_capture`, `find_draws`, `get_draw_call_state`,
 `get_cbuffer_contents`, `read_texture_pixels`) are the primary tool for
 "pipeline looks right on paper but produces wrong output" bugs — see lesson
 #7 for the capture recipe.
-
-For full narrative detail, exact code snippets, and session-by-session
-reasoning behind each fix above, see `native-renderer-headless-boot.md`.

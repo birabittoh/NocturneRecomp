@@ -107,11 +107,9 @@ uint64_t HashUcode(const std::vector<uint32_t>& ucode) {
   return hash;
 }
 
-// Decodes one 16-byte BC3/DXT5 block (already in host byte order -- see the
+// Decodes one 16-byte BC3/DXT5 block (already in host byte order, see the
 // caller's byteswap handling) into a 4x4 RGBA8 patch, row-major, 4 bytes/texel.
-// No CPU decoder for this exists anywhere in the SDK (it only decodes DXT on
-// the GPU via compute shaders, see docs/native-renderer-headless-boot.md's
-// "Next" item 2) -- standard BC3 layout, written from the format spec.
+// No CPU decoder for this exists anywhere in the SDK. Standard BC3 layout, written from the format spec.
 void DecompressDXT5Block(const uint8_t block[16], uint8_t out_rgba[4 * 4 * 4]) {
   uint8_t alpha0 = block[0];
   uint8_t alpha1 = block[1];
@@ -967,14 +965,12 @@ void NativeCommandProcessor::OnPacket(const rex::graphics::PacketInfo& info,
       // range was written by something other than a normal draw (CPU, DMA,
       // any GPU path this renderer doesn't model -- MakeCoherent in
       // rexglue-sdk's command_processor.cpp treats it the same regardless of
-      // source) and any texture/vertex cache needs to invalidate it" signal
-      // -- see docs/native-renderer-headless-boot.md step 18/19. Confirmed
-      // via a real capture to be exactly what precedes the gameplay-preview
+      // source) and any texture/vertex cache needs to invalidate it" signal.
+      // Confirmed via a real capture to be exactly what precedes the gameplay-preview
       // texture's upload (a COHER_BASE_HOST write to its exact fetch
       // address, immediately before the game re-touches it), which neither
-      // the memexport (step 15-16) nor EDRAM-resolve (step 17) hypotheses
-      // actually were -- this is the real, general mechanism, and
-      // supersedes both of those narrower invalidation paths.
+      // the memexport nor EDRAM-resolve hypotheses actually were. This supersedes
+      // both of those narrower invalidation paths.
       if (action.register_write.index == rex::graphics::XE_GPU_REG_COHER_STATUS_HOST) {
         InvalidateTextureCacheRange(
             registers_[rex::graphics::XE_GPU_REG_COHER_BASE_HOST],
@@ -999,7 +995,7 @@ void NativeCommandProcessor::OnPacket(const rex::graphics::PacketInfo& info,
     // fences, command-buffer consumption). Never servicing them left every
     // fence frozen, so the game's frame-pacing logic saw a GPU that made no
     // progress and periodically fast-forwarded to compensate (the ~6s
-    // "skip ahead" burst -- see docs/native-renderer-pacing-investigation.md).
+    // "skip ahead" burst).
     // Since the native path consumes commands synchronously, "the GPU is done
     // with everything decoded so far" is truthful at the moment this packet is
     // decoded, so write the fence immediately.
@@ -1049,8 +1045,7 @@ void NativeCommandProcessor::OnShaderLoad(const rex::graphics::PacketInfo& info,
   };
 
   // Fetch-constant/register decode is known-unreliable for some draws in
-  // this stream (docs/native-renderer-headless-boot.md, milestone 3b step
-  // 1); a garbage-decoded size here was observed making SpirvShaderTranslator
+  // this stream; a garbage-decoded size here was observed making SpirvShaderTranslator
   // spend ~20s translating one bogus shader, stalling the frame loop. The
   // real intro shaders translated at ~2300 dwords; reject anything wildly
   // past that as corrupt rather than paying to translate it.
@@ -1363,8 +1358,7 @@ NativeCommandProcessor::TranslatedShader* NativeCommandProcessor::GetOrTranslate
       shader_cache_limit_logged_ = true;
       REXGPU_ERROR(
           "NativeCommandProcessor: shader cache exceeded {} distinct entries; skipping further "
-          "translations (likely a garbage-decoded shader rehashing every resubmit -- see "
-          "docs/native-renderer-headless-boot.md Phase 3 'Next' item 1)",
+          "translations (likely a garbage-decoded shader rehashing every resubmit)",
           kMaxShaderCacheEntries);
     }
     return nullptr;
@@ -1393,7 +1387,7 @@ NativeCommandProcessor::TranslatedShader* NativeCommandProcessor::GetOrTranslate
   // Input variable at all in its SPIR-V interface) to be why textureless
   // solid-color draws (e.g. the intro's black quads) rendered as flat black:
   // the pixel shader's r0 (meant to hold the interpolated vertex color) was
-  // simply never wired up. See docs/native-renderer-headless-boot.md.
+  // simply never wired up.
   if (type == rex::graphics::xenos::ShaderType::kVertex) {
     modification.vertex.interpolator_mask = interpolator_mask;
     // Selects the TES spacing execution mode (equal vs fractional-even) for
@@ -2421,7 +2415,6 @@ NativeCommandProcessor::UploadedTexture* NativeCommandProcessor::GetOrUploadText
     // GetTiledOffset2D's tile-periodic addressing partially aliases back to
     // correct-looking output for some row ranges and not others, rather than
     // a uniform diagonal shear a plain linear-addressing bug would produce).
-    // See docs/native-renderer-headless-boot.md.
     uint32_t block_w = (width + 3) / 4;
     uint32_t block_h = (height + 3) / 4;
     constexpr uint32_t kBytesPerBlock = 16;
@@ -2606,17 +2599,6 @@ NativeCommandProcessor::UploadedTexture* NativeCommandProcessor::GetOrUploadText
   }
 
   auto [inserted, _] = texture_cache_.emplace(key, texture);
-  // TEMPORARY diagnostic (see docs/native-renderer-headless-boot.md step 18):
-  // logs every real upload's guest address/size, not just the first one, to
-  // correlate against TryResolveCopy's own dest_base/size logging and find
-  // out whether resolve writes and texture reads are actually hitting the
-  // same guest range. Remove once step 18 is resolved.
-  static uint32_t debug_upload_logged = 0;
-  if (debug_upload_logged < 100) {
-    ++debug_upload_logged;
-    REXGPU_DEBUG("NativeCommandProcessor: texture uploaded {}x{} base={:#x} size={:#x}", width,
-               height, texture.base_address_bytes, texture.size_bytes);
-  }
   return &inserted->second;
 }
 
@@ -2829,8 +2811,7 @@ NativeCommandProcessor::PipelineEntry NativeCommandProcessor::GetOrCreatePipelin
   uint32_t pixel_sampler_count =
       uint32_t(pixel_spirv_shader->GetSamplerBindingsAfterTranslation().size());
   // Safety cap, same rationale as kMaxShaderCacheEntries/kMaxTextureCacheEntries
-  // -- a garbage-decoded shader (docs/native-renderer-headless-boot.md Phase
-  // 3 "Next" item 3) could plausibly analyze to an implausible texture count;
+  // -- a garbage-decoded shader could plausibly analyze to an implausible texture count;
   // bound the resulting descriptor set/pool/layout growth instead of trusting
   // guest-derived counts unconditionally.
   if (vertex_texture_count > kMaxTexturesPerStage || vertex_sampler_count > kMaxTexturesPerStage ||
@@ -2935,8 +2916,7 @@ NativeCommandProcessor::PipelineEntry NativeCommandProcessor::GetOrCreatePipelin
   // "black squares" visible over the intro: draws meant to blend
   // translucently (e.g. fades) were instead unconditionally overwriting the
   // framebuffer with their raw shader output regardless of alpha, since
-  // nothing ever read the guest's actual blend registers. See
-  // docs/native-renderer-headless-boot.md.
+  // nothing ever read the guest's actual blend registers.
   rex::graphics::reg::RB_BLENDCONTROL rb_blendcontrol0;
   rb_blendcontrol0.value = blend_control;
   VkBlendFactor src_color = ToVkBlendFactor(rb_blendcontrol0.color_srcblend);
@@ -3028,49 +3008,6 @@ void NativeCommandProcessor::UpdateSharedMemory(uint32_t guest_address_dwords,
   rex::ui::vulkan::util::FlushMappedMemoryRange(provider_->vulkan_device(), shared_memory_memory_,
                                                 shared_memory_memory_type_, byte_offset,
                                                 kSharedMemorySize, byte_size);
-
-  // TEMPORARY diagnostic (smoke-vertex-bug investigation): flag any vertex
-  // fetch range that comes back entirely zero, regardless of the vfetch_logged
-  // cap in TryDraw -- lets a delay-injection experiment (see TryDraw) detect
-  // the bug reproducing in a live (non-RenderDoc) run without needing the
-  // first-10-draws window.
-  static uint32_t zero_range_logged = 0;
-  if (zero_range_logged < 50) {
-    bool all_zero = true;
-    for (uint64_t i = 0; i < byte_size; ++i) {
-      if ((shared_memory_mapped_ + byte_offset)[i] != 0) {
-        all_zero = false;
-        break;
-      }
-    }
-    if (all_zero) {
-      ++zero_range_logged;
-      // Scan guest physical memory outward from this address for the nearest
-      // non-zero dword. If the "real" smoke quad data lives just nearby, this
-      // is a mislocated-address (renderer) bug; if the whole arena is zero for
-      // a wide window, the guest genuinely never wrote it (guest-side skip).
-      const uint8_t* base = reinterpret_cast<const uint8_t*>(shared_memory_mapped_ + byte_offset);
-      const uint64_t kScan = 256 * 1024;  // +/- 256 KB
-      int64_t nearest = 0;
-      uint32_t nearest_val = 0;
-      for (uint64_t d = 4; d <= kScan; d += 4) {
-        if (byte_offset + byte_size - 1 + d < kSharedMemorySize) {
-          uint32_t fwd;
-          std::memcpy(&fwd, base + byte_size + (d - 4), 4);
-          if (fwd != 0) { nearest = int64_t(d); nearest_val = fwd; break; }
-        }
-        if (byte_offset >= d) {
-          uint32_t bwd;
-          std::memcpy(&bwd, base - d, 4);
-          if (bwd != 0) { nearest = -int64_t(d); nearest_val = bwd; break; }
-        }
-      }
-      REXGPU_INFO(
-          "NativeCommandProcessor: UpdateSharedMemory range is ALL ZERO -- address_dwords={:08X} "
-          "size_dwords={} nearest_nonzero_byte_delta={} nearest_val={:08X}",
-          guest_address_dwords, size_dwords, nearest, nearest_val);
-    }
-  }
 }
 
 void NativeCommandProcessor::TryResolveCopy() {
@@ -3265,20 +3202,6 @@ void NativeCommandProcessor::TryResolveCopy() {
       }
     }
     dfn.vkUnmapMemory(device, readback_memory);
-
-    // TEMPORARY diagnostic (see docs/native-renderer-headless-boot.md step
-    // 18): logs every resolve, not just the first, including the source
-    // rectangle -- needed to tell a legitimate small preview-sized resolve
-    // apart from a full-screen one sharing the same dest_base. Remove once
-    // step 18 is resolved.
-    static uint32_t debug_resolve_logged = 0;
-    if (debug_resolve_logged < 100) {
-      ++debug_resolve_logged;
-      REXGPU_DEBUG(
-          "NativeCommandProcessor: EDRAM resolve copy ({},{})-({},{}) {}x{} -> dest_base={:#x} "
-          "pitch={}",
-          x0, y0, x1, y1, width, height, dest_base, pitch_texels);
-    }
   }
 
   dfn.vkDestroyBuffer(device, readback_buffer, nullptr);
@@ -3434,8 +3357,7 @@ void NativeCommandProcessor::TryDraw(rex::graphics::xenos::PrimitiveType prim_ty
   }
 
   // Fetch-constant/register decode is known-unreliable for some draws in this
-  // stream (see docs/native-renderer-headless-boot.md, milestone 3b step 1) --
-  // a garbage-decoded num_indices was observed making the quad-list index
+  // stream -- a garbage-decoded num_indices was observed making the quad-list index
   // buffer below balloon to hundreds of MB and stall the process. No real
   // draw in this game's UI/intro content needs anywhere near this many
   // vertices, so treat an implausibly large count as corrupt and skip it.
@@ -4274,8 +4196,7 @@ void NativeCommandProcessor::PresentFrame() {
   EnsureFrameBegun();
 
   // Fast-forward frame-skip: the guest's mode loop calls PresentFrame once
-  // per logic iteration (docs/native-renderer-pacing-investigation.md), so
-  // without this gate, real GPU present work below would run every single
+  // per logic iteration, so without this gate, real GPU present work below would run every single
   // call and cap guest FPS at whatever the Vulkan submit/present/fence-wait
   // round trip costs (~95fps measured) regardless of how high
   // guest_time_scalar is set. Gate physical presentation to a fixed,
@@ -4285,8 +4206,7 @@ void NativeCommandProcessor::PresentFrame() {
   // safety valve bounding worst-case accumulated-draws growth if the scaled
   // sleep above collapses toward zero at extreme scale values (existing
   // transient descriptor pool / constants arena headroom was sized for 4096
-  // draws/frame -- see bug #6 in native-renderer-pacing-investigation.md's
-  // history -- so 64 accumulated logical frames is comfortably inside that
+  // draws/frame -- so 64 accumulated logical frames is comfortably inside that
   // margin). The interval is the *unscaled* configured refresh period (same
   // video_mode_refresh_rate cvar as the pacer above), so at 1x it's one
   // logical frame and physical present tracks the guest 1:1.
