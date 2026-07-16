@@ -136,6 +136,38 @@ constexpr uint32_t kPlayerStatsAddrTU = 0x8317493Cu;
 // Vanilla only so far -- not yet found in the TU build.
 constexpr uint32_t kRoomsAddrVanilla = 0x83164CD0u;
 
+// Guest global holding a POINTER to the Application/framework singleton
+// object (the `a1` passed to the game's fwmain mode loop / fixed-timestep
+// tick, sub_8258B8A0 / sub_8258B3B8). On the pointed-to object: +2236 =
+// game_time, +2232 = target_time (the fixed-timestep catch-up loop's own
+// clock, units "300ths of a second" -- one 60Hz frame = 5 units). Verified
+// against assets/default.xex (imagebase 0x82000000) and live-probed.
+//
+// Consumers must not trust this blindly: dereference it, then sanity-check
+// the pointed-to struct (see src/fast_forward.cpp's plausibility guard)
+// before reading/writing game_time/target_time through it, in case this
+// ever runs against a build where the address doesn't hold what's expected.
+constexpr uint32_t kAppSingletonPtrAddrVanilla = 0x82E4F808u;
+
+// TU address: the TU relocates the image's .data statics by -0x240 (same
+// delta as kAccentAddrVanilla/TU and kPlayerStatsAddrVanilla/TU above).
+// Derived from TU codegen output, not guessed from the delta: the TU build
+// of the Live-logon screen's Update (TU sub_825B6CB0, vanilla sub_825B6AB0)
+// loads this global as lis 0x82E50000 + offset -2616 = 0x82E4F5C8, where
+// vanilla uses offset -2040 = 0x82E4F808. See scripts/match_tu_functions.py
+// for the vanilla->TU function-matching workflow.
+constexpr uint32_t kAppSingletonPtrAddrTU = 0x82E4F5C8u;
+
+// Guest address of the driver function behind XSessionWriteStats (XGI
+// 0xB0025), the game's leaderboard-score write path -- see
+// docs/leaderboard-write-path-xsessionwritestats.md (or the equivalent
+// memory note) for how this was found. Registered here (rather than a
+// data address) so mods_src/function_override_demo can look it up by name
+// and pass it to rex::runtime::FunctionDispatcher::OverrideFunction --
+// see docs/making-mods.md's "Overriding a recompiled function" section.
+// Vanilla only so far -- not yet confirmed in the TU build.
+constexpr uint32_t kLeaderboardWriteStatsFnAddrVanilla = 0x8257CD48u;
+
 class GameSymbolsMod : public rex::system::IModPlugin {
  public:
   explicit GameSymbolsMod(rex::Runtime* runtime) : runtime_(runtime) {}
@@ -155,6 +187,11 @@ class GameSymbolsMod : public rex::system::IModPlugin {
       runtime_->mod_registry()->RegisterAddress("player.stats", kPlayerStatsAddrVanilla,
                                                 kPlayerStatsAddrTU);
       runtime_->mod_registry()->RegisterAddress("player.rooms", kRoomsAddrVanilla);
+      runtime_->mod_registry()->RegisterAddress("app.singleton_ptr",
+                                                kAppSingletonPtrAddrVanilla,
+                                                kAppSingletonPtrAddrTU);
+      runtime_->mod_registry()->RegisterAddress("leaderboard.write_stats_fn",
+                                                kLeaderboardWriteStatsFnAddrVanilla);
     }
   }
 
