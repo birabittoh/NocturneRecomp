@@ -679,21 +679,32 @@ bool NativeCommandProcessor::InitializePipelineResources() {
   }
 
   // Shared memory buffer: guest physical memory, mirrored 1:1 by byte
-  // offset. Persistently mapped; UpdateSharedMemory flushes the written
-  // range explicitly after each memcpy (util::MemoryPurpose::kUpload is only
-  // guaranteed host-*visible*, not host-*coherent* -- see the FlushMapped
-  // comment near the top of this file).
+  // offset. Device-local (VRAM), so it costs no committed process RAM;
+  // UpdateSharedMemory stages dirty ranges through shared_memory_staging_*
+  // and copies them in with vkCmdCopyBuffer (see FlushPendingSharedMemoryCopies).
   {
     if (!rex::ui::vulkan::util::CreateDedicatedAllocationBuffer(
-            vulkan_device, kSharedMemorySize, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
-            rex::ui::vulkan::util::MemoryPurpose::kUpload, shared_memory_buffer_,
-            shared_memory_memory_, &shared_memory_memory_type_)) {
+            vulkan_device, kSharedMemorySize,
+            VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+            rex::ui::vulkan::util::MemoryPurpose::kDeviceLocal, shared_memory_buffer_,
+            shared_memory_memory_)) {
       REXGPU_ERROR("NativeCommandProcessor: failed to create the shared memory buffer");
       return false;
     }
-    if (dfn.vkMapMemory(device, shared_memory_memory_, 0, kSharedMemorySize, 0,
-                        reinterpret_cast<void**>(&shared_memory_mapped_)) != VK_SUCCESS) {
-      REXGPU_ERROR("NativeCommandProcessor: failed to map the shared memory buffer");
+
+    // Staging ring the dirty ranges are memcpy'd into before being copied to
+    // the device-local buffer above. Persistently mapped, kUpload, reset per
+    // frame -- same pattern as the constants/index arenas.
+    if (!rex::ui::vulkan::util::CreateDedicatedAllocationBuffer(
+            vulkan_device, kSharedMemoryStagingSize, VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
+            rex::ui::vulkan::util::MemoryPurpose::kUpload, shared_memory_staging_buffer_,
+            shared_memory_staging_memory_)) {
+      REXGPU_ERROR("NativeCommandProcessor: failed to create the shared memory staging buffer");
+      return false;
+    }
+    if (dfn.vkMapMemory(device, shared_memory_staging_memory_, 0, kSharedMemoryStagingSize, 0,
+                        reinterpret_cast<void**>(&shared_memory_staging_mapped_)) != VK_SUCCESS) {
+      REXGPU_ERROR("NativeCommandProcessor: failed to map the shared memory staging buffer");
       return false;
     }
 
@@ -923,11 +934,15 @@ void NativeCommandProcessor::DestroyPipelineResources() {
   if (color_target_image_ != VK_NULL_HANDLE) dfn.vkDestroyImage(device, color_target_image_, nullptr);
   if (color_target_memory_ != VK_NULL_HANDLE) dfn.vkFreeMemory(device, color_target_memory_, nullptr);
 
-  if (shared_memory_mapped_) dfn.vkUnmapMemory(device, shared_memory_memory_);
   if (shared_memory_buffer_ != VK_NULL_HANDLE)
     dfn.vkDestroyBuffer(device, shared_memory_buffer_, nullptr);
   if (shared_memory_memory_ != VK_NULL_HANDLE)
     dfn.vkFreeMemory(device, shared_memory_memory_, nullptr);
+  if (shared_memory_staging_mapped_) dfn.vkUnmapMemory(device, shared_memory_staging_memory_);
+  if (shared_memory_staging_buffer_ != VK_NULL_HANDLE)
+    dfn.vkDestroyBuffer(device, shared_memory_staging_buffer_, nullptr);
+  if (shared_memory_staging_memory_ != VK_NULL_HANDLE)
+    dfn.vkFreeMemory(device, shared_memory_staging_memory_, nullptr);
 
   if (constants_arena_mapped_) dfn.vkUnmapMemory(device, constants_arena_memory_);
   if (constants_arena_buffer_ != VK_NULL_HANDLE)
@@ -3040,10 +3055,95 @@ void NativeCommandProcessor::UpdateSharedMemory(uint32_t guest_address_dwords,
   }
   const void* guest_ptr = rex::system::kernel_state()->memory()->TranslatePhysical<const void*>(
       uint32_t(byte_offset));
-  std::memcpy(shared_memory_mapped_ + byte_offset, guest_ptr, byte_size);
-  rex::ui::vulkan::util::FlushMappedMemoryRange(provider_->vulkan_device(), shared_memory_memory_,
-                                                shared_memory_memory_type_, byte_offset,
-                                                kSharedMemorySize, byte_size);
+
+  const rex::ui::vulkan::VulkanDevice* vulkan_device = provider_->vulkan_device();
+
+  // Overflow: the range doesn't fit in the remaining staging ring this frame.
+  // Fall back to a synchronous one-shot copy through a scratch staging buffer.
+  // Loud + rare: the game's per-draw vertex-fetch ranges are small, so a 16 MB
+  // ring is not normally exhausted within a single frame.
+  if (shared_memory_staging_offset_ + byte_size > kSharedMemoryStagingSize) {
+    static uint32_t overflow_logged = 0;
+    if (overflow_logged < 20) {
+      ++overflow_logged;
+      REXGPU_INFO(
+          "NativeCommandProcessor: shared memory staging ring overflow (offset={} size={}), "
+          "falling back to a synchronous copy",
+          shared_memory_staging_offset_, byte_size);
+    }
+    const rex::ui::vulkan::VulkanDevice::Functions& dfn = vulkan_device->functions();
+    VkDevice device = vulkan_device->device();
+    VkBuffer scratch_buffer;
+    VkDeviceMemory scratch_memory;
+    if (!rex::ui::vulkan::util::CreateDedicatedAllocationBuffer(
+            vulkan_device, byte_size, VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
+            rex::ui::vulkan::util::MemoryPurpose::kUpload, scratch_buffer, scratch_memory)) {
+      REXGPU_ERROR("NativeCommandProcessor: failed to allocate a shared memory scratch buffer");
+      return;
+    }
+    void* mapped = nullptr;
+    dfn.vkMapMemory(device, scratch_memory, 0, byte_size, 0, &mapped);
+    std::memcpy(mapped, guest_ptr, byte_size);
+    FlushMapped(vulkan_device, scratch_memory);
+    dfn.vkUnmapMemory(device, scratch_memory);
+    VkCommandBuffer cmd = BeginOneShotCommands();
+    if (cmd != VK_NULL_HANDLE) {
+      VkBufferCopy region{0, byte_offset, byte_size};
+      dfn.vkCmdCopyBuffer(cmd, scratch_buffer, shared_memory_buffer_, 1, &region);
+      EndOneShotCommandsAndWait();
+    }
+    dfn.vkDestroyBuffer(device, scratch_buffer, nullptr);
+    dfn.vkFreeMemory(device, scratch_memory, nullptr);
+    return;
+  }
+
+  std::memcpy(shared_memory_staging_mapped_ + shared_memory_staging_offset_, guest_ptr, byte_size);
+  pending_shared_copies_.push_back(
+      VkBufferCopy{shared_memory_staging_offset_, byte_offset, byte_size});
+  shared_memory_staging_offset_ += byte_size;
+}
+
+void NativeCommandProcessor::FlushPendingSharedMemoryCopies() {
+  if (pending_shared_copies_.empty()) {
+    return;
+  }
+
+  const rex::ui::vulkan::VulkanDevice* vulkan_device = provider_->vulkan_device();
+  const rex::ui::vulkan::VulkanDevice::Functions& dfn = vulkan_device->functions();
+
+  // vkCmdCopyBuffer must be recorded outside a render pass. End the current
+  // pass (color_target_image_'s finalLayout is TRANSFER_SRC_OPTIMAL), record
+  // the copies + a transfer->shader-read barrier, then reopen with
+  // render_pass_continue_ (loadOp=LOAD) so already-accumulated draws survive.
+  // No vkEndCommandBuffer/submit here, so bound pipeline/descriptors and
+  // dynamic state persist -- unlike TryResolveCopy, this needs no re-set.
+  dfn.vkCmdEndRenderPass(command_buffer_);
+
+  dfn.vkCmdCopyBuffer(command_buffer_, shared_memory_staging_buffer_, shared_memory_buffer_,
+                      uint32_t(pending_shared_copies_.size()), pending_shared_copies_.data());
+  pending_shared_copies_.clear();
+
+  VkBufferMemoryBarrier barrier{};
+  barrier.sType = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER;
+  barrier.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+  barrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+  barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+  barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+  barrier.buffer = shared_memory_buffer_;
+  barrier.offset = 0;
+  barrier.size = VK_WHOLE_SIZE;
+  dfn.vkCmdPipelineBarrier(
+      command_buffer_, VK_PIPELINE_STAGE_TRANSFER_BIT,
+      VK_PIPELINE_STAGE_VERTEX_SHADER_BIT | VK_PIPELINE_STAGE_TESSELLATION_EVALUATION_SHADER_BIT |
+          VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
+      0, 0, nullptr, 1, &barrier, 0, nullptr);
+
+  VkRenderPassBeginInfo rp_begin{};
+  rp_begin.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
+  rp_begin.renderPass = render_pass_continue_;
+  rp_begin.framebuffer = framebuffer_;
+  rp_begin.renderArea.extent = {color_target_width_, color_target_height_};
+  dfn.vkCmdBeginRenderPass(command_buffer_, &rp_begin, VK_SUBPASS_CONTENTS_INLINE);
 }
 
 void NativeCommandProcessor::TryResolveCopy() {
@@ -3192,6 +3292,9 @@ void NativeCommandProcessor::TryResolveCopy() {
   }
   if (index_arena_offset_ > 0) {
     FlushMapped(vulkan_device, index_arena_memory_);
+  }
+  if (shared_memory_staging_offset_ > 0) {
+    FlushMapped(vulkan_device, shared_memory_staging_memory_);
   }
 
   VkBufferImageCopy buffer_image_copy{};
@@ -3356,6 +3459,8 @@ void NativeCommandProcessor::EnsureFrameBegun() {
   // constants, so it's now safe to reuse the arena from the top.
   constants_arena_offset_ = 0;
   index_arena_offset_ = 0;
+  shared_memory_staging_offset_ = 0;
+  pending_shared_copies_.clear();
 
   VkCommandBufferBeginInfo begin_info{};
   begin_info.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
@@ -4022,6 +4127,12 @@ void NativeCommandProcessor::TryDraw(rex::graphics::xenos::PrimitiveType prim_ty
     return;
   }
 
+  // Upload the vertex-fetch ranges memcpy'd into the staging ring above into
+  // the device-local shared-memory buffer before this draw reads them. Ends and
+  // reopens the render pass, so it must precede the binds below (which stay
+  // valid across the reopen since no command buffer reset happens).
+  FlushPendingSharedMemoryCopies();
+
   VkDescriptorSet sets[4] = {shared_memory_set_, constants_set, vertex_texture_set,
                             pixel_texture_set};
   dfn.vkCmdBindPipeline(command_buffer_, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline_entry.pipeline);
@@ -4275,6 +4386,9 @@ void NativeCommandProcessor::PresentFrame() {
     }
     if (index_arena_offset_ > 0) {
       FlushMapped(vulkan_device, index_arena_memory_);
+    }
+    if (shared_memory_staging_offset_ > 0) {
+      FlushMapped(vulkan_device, shared_memory_staging_memory_);
     }
 
     // Render pass's finalLayout is already TRANSFER_SRC_OPTIMAL, so

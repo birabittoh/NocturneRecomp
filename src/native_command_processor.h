@@ -365,6 +365,12 @@ class NativeCommandProcessor {
 
   void UpdateSharedMemory(uint32_t guest_address_dwords, uint32_t size_dwords);
 
+  // Replays pending_shared_copies_ into the device-local shared_memory_buffer_.
+  // Must run outside the render pass, so it ends the current pass, records the
+  // copies + a transfer->shader-read barrier, and reopens with
+  // render_pass_continue_ (loadOp=LOAD). No-op if there's nothing queued.
+  void FlushPendingSharedMemoryCopies();
+
   // EDRAM resolve-to-texture: when the guest sets RB_MODECONTROL.edram_mode to kCopy before what
   // would otherwise be a normal draw, that "draw" is actually a resolve
   // trigger -- real hardware copies the current render target (or a
@@ -521,13 +527,34 @@ class NativeCommandProcessor {
   // Guest physical memory mirrored 1:1 by byte offset, so translated
   // shaders' own address computation (guest fetch-constant base + stride)
   // lands on the right bytes without any host-side remapping. Only the
-  // byte ranges draws actually reference get memcpy'd in, not the whole
+  // byte ranges draws actually reference get uploaded, not the whole
   // buffer (see UpdateSharedMemory).
+  //
+  // Device-local (VRAM), NOT host-visible/mapped: a 512 MB host-visible
+  // mapping is 512 MB of committed process RAM up front, the single
+  // biggest chunk of this renderer's footprint. Dirty ranges are staged
+  // through shared_memory_staging_* and copied in with vkCmdCopyBuffer
+  // instead (see UpdateSharedMemory / FlushPendingSharedMemoryCopies).
   static constexpr VkDeviceSize kSharedMemorySize = 0x20000000;  // 512 MB
   VkBuffer shared_memory_buffer_ = VK_NULL_HANDLE;
   VkDeviceMemory shared_memory_memory_ = VK_NULL_HANDLE;
-  uint32_t shared_memory_memory_type_ = 0;
-  uint8_t* shared_memory_mapped_ = nullptr;
+
+  // Staging ring for shared-memory uploads: a small persistently-mapped
+  // kUpload buffer (same arena pattern as constants_arena_*). UpdateSharedMemory
+  // memcpy's each dirty guest range into it and queues a VkBufferCopy in
+  // pending_shared_copies_; FlushPendingSharedMemoryCopies replays those into
+  // the device-local shared_memory_buffer_ (outside the render pass) right
+  // before each draw that needs them. Offset resets per frame in
+  // EnsureFrameBegun (after the fence wait) and is flushed before every submit
+  // (PresentFrame and TryResolveCopy). On overflow UpdateSharedMemory falls
+  // back to a synchronous one-shot copy (loud + rare -- the game's per-draw
+  // vertex-fetch ranges are small).
+  static constexpr VkDeviceSize kSharedMemoryStagingSize = 16ull * 1024 * 1024;
+  VkBuffer shared_memory_staging_buffer_ = VK_NULL_HANDLE;
+  VkDeviceMemory shared_memory_staging_memory_ = VK_NULL_HANDLE;
+  uint8_t* shared_memory_staging_mapped_ = nullptr;
+  VkDeviceSize shared_memory_staging_offset_ = 0;
+  std::vector<VkBufferCopy> pending_shared_copies_;
 
   // Matches the guest's actual configured video mode (video_mode_width/
   // height, or window_width/height, or a --resolution preset -- see
