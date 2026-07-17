@@ -440,6 +440,9 @@ NativeCommandProcessor::~NativeCommandProcessor() {
   if (submit_fence_ != VK_NULL_HANDLE) {
     dfn.vkDestroyFence(device, submit_fence_, nullptr);
   }
+  if (oneshot_fence_ != VK_NULL_HANDLE) {
+    dfn.vkDestroyFence(device, oneshot_fence_, nullptr);
+  }
   if (command_pool_ != VK_NULL_HANDLE) {
     // Also frees command_buffer_, allocated from this pool.
     dfn.vkDestroyCommandPool(device, command_pool_, nullptr);
@@ -724,6 +727,25 @@ bool NativeCommandProcessor::InitializePipelineResources() {
     }
   }
 
+  // Index arena (see header): persistently-mapped index buffer the quad/
+  // rect-list draws suballocate from, replacing per-draw dedicated
+  // allocations whose alloc/free churn leaked NVIDIA driver-internal host
+  // memory.
+  {
+    if (!rex::ui::vulkan::util::CreateDedicatedAllocationBuffer(
+            vulkan_device, kIndexArenaSize, VK_BUFFER_USAGE_INDEX_BUFFER_BIT,
+            rex::ui::vulkan::util::MemoryPurpose::kUpload, index_arena_buffer_,
+            index_arena_memory_)) {
+      REXGPU_ERROR("NativeCommandProcessor: failed to create the index arena buffer");
+      return false;
+    }
+    if (dfn.vkMapMemory(device, index_arena_memory_, 0, kIndexArenaSize, 0,
+                        reinterpret_cast<void**>(&index_arena_mapped_)) != VK_SUCCESS) {
+      REXGPU_ERROR("NativeCommandProcessor: failed to map the index arena buffer");
+      return false;
+    }
+  }
+
   // Offscreen color target draws accumulate into across a frame.
   {
     VkImageCreateInfo image_info{};
@@ -912,6 +934,15 @@ void NativeCommandProcessor::DestroyPipelineResources() {
     dfn.vkDestroyBuffer(device, constants_arena_buffer_, nullptr);
   if (constants_arena_memory_ != VK_NULL_HANDLE)
     dfn.vkFreeMemory(device, constants_arena_memory_, nullptr);
+  if (index_arena_mapped_) dfn.vkUnmapMemory(device, index_arena_memory_);
+  if (index_arena_buffer_ != VK_NULL_HANDLE)
+    dfn.vkDestroyBuffer(device, index_arena_buffer_, nullptr);
+  if (index_arena_memory_ != VK_NULL_HANDLE)
+    dfn.vkFreeMemory(device, index_arena_memory_, nullptr);
+  if (resolve_readback_buffer_ != VK_NULL_HANDLE)
+    dfn.vkDestroyBuffer(device, resolve_readback_buffer_, nullptr);
+  if (resolve_readback_memory_ != VK_NULL_HANDLE)
+    dfn.vkFreeMemory(device, resolve_readback_memory_, nullptr);
 
   DestroyPostProcessPipeline();
 
@@ -1445,6 +1476,72 @@ NativeCommandProcessor::TranslatedShader* NativeCommandProcessor::GetOrTranslate
   return &inserted->second;
 }
 
+VkCommandBuffer NativeCommandProcessor::BeginOneShotCommands() {
+  const rex::ui::vulkan::VulkanDevice* vulkan_device = provider_->vulkan_device();
+  const rex::ui::vulkan::VulkanDevice::Functions& dfn = vulkan_device->functions();
+  VkDevice device = vulkan_device->device();
+
+  if (oneshot_command_buffer_ == VK_NULL_HANDLE) {
+    VkCommandBufferAllocateInfo alloc_info{};
+    alloc_info.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
+    alloc_info.commandPool = command_pool_;
+    alloc_info.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+    alloc_info.commandBufferCount = 1;
+    if (dfn.vkAllocateCommandBuffers(device, &alloc_info, &oneshot_command_buffer_) !=
+        VK_SUCCESS) {
+      REXGPU_ERROR("NativeCommandProcessor: failed to allocate the one-shot command buffer");
+      oneshot_command_buffer_ = VK_NULL_HANDLE;
+      return VK_NULL_HANDLE;
+    }
+  }
+  if (oneshot_fence_ == VK_NULL_HANDLE) {
+    VkFenceCreateInfo fence_info{};
+    fence_info.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO;
+    if (dfn.vkCreateFence(device, &fence_info, nullptr, &oneshot_fence_) != VK_SUCCESS) {
+      REXGPU_ERROR("NativeCommandProcessor: failed to create the one-shot fence");
+      oneshot_fence_ = VK_NULL_HANDLE;
+      return VK_NULL_HANDLE;
+    }
+  }
+
+  VkCommandBufferBeginInfo begin_info{};
+  begin_info.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+  begin_info.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+  if (dfn.vkBeginCommandBuffer(oneshot_command_buffer_, &begin_info) != VK_SUCCESS) {
+    REXGPU_ERROR("NativeCommandProcessor: failed to begin the one-shot command buffer");
+    return VK_NULL_HANDLE;
+  }
+  return oneshot_command_buffer_;
+}
+
+bool NativeCommandProcessor::EndOneShotCommandsAndWait() {
+  const rex::ui::vulkan::VulkanDevice* vulkan_device = provider_->vulkan_device();
+  const rex::ui::vulkan::VulkanDevice::Functions& dfn = vulkan_device->functions();
+  VkDevice device = vulkan_device->device();
+
+  dfn.vkEndCommandBuffer(oneshot_command_buffer_);
+
+  VkSubmitInfo submit_info{};
+  submit_info.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+  submit_info.commandBufferCount = 1;
+  submit_info.pCommandBuffers = &oneshot_command_buffer_;
+  bool ok;
+  {
+    rex::ui::vulkan::VulkanDevice::Queue::Acquisition queue =
+        vulkan_device->AcquireQueue(vulkan_device->queue_family_graphics_compute(), 0);
+    ok = dfn.vkQueueSubmit(queue.queue(), 1, &submit_info, oneshot_fence_) == VK_SUCCESS;
+  }
+  if (ok) {
+    constexpr uint64_t kFenceTimeoutNs = 5'000'000'000ull;
+    ok = dfn.vkWaitForFences(device, 1, &oneshot_fence_, VK_TRUE, kFenceTimeoutNs) == VK_SUCCESS;
+    if (!ok) {
+      REXGPU_ERROR("NativeCommandProcessor: timed out waiting for the one-shot fence");
+    }
+    dfn.vkResetFences(device, 1, &oneshot_fence_);
+  }
+  return ok;
+}
+
 bool NativeCommandProcessor::UploadTexelsAndTransition(VkImage image, uint32_t width,
                                                         uint32_t height, const void* rgba_data) {
   const rex::ui::vulkan::VulkanDevice* vulkan_device = provider_->vulkan_device();
@@ -1466,19 +1563,12 @@ bool NativeCommandProcessor::UploadTexelsAndTransition(VkImage image, uint32_t w
   FlushMapped(vulkan_device, staging_memory);
   dfn.vkUnmapMemory(device, staging_memory);
 
-  VkCommandBuffer upload_cmd;
-  VkCommandBufferAllocateInfo alloc_info{};
-  alloc_info.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
-  alloc_info.commandPool = command_pool_;
-  alloc_info.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
-  alloc_info.commandBufferCount = 1;
-  bool ok = dfn.vkAllocateCommandBuffers(device, &alloc_info, &upload_cmd) == VK_SUCCESS;
+  // Reuses the persistent one-shot command buffer -- allocating a fresh one
+  // per call leaked driver host memory unboundedly; see the
+  // oneshot_command_buffer_ doc comment in the header.
+  VkCommandBuffer upload_cmd = BeginOneShotCommands();
+  bool ok = upload_cmd != VK_NULL_HANDLE;
   if (ok) {
-    VkCommandBufferBeginInfo begin_info{};
-    begin_info.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
-    begin_info.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
-    dfn.vkBeginCommandBuffer(upload_cmd, &begin_info);
-
     VkImageSubresourceRange subresource_range = rex::ui::vulkan::util::InitializeSubresourceRange();
 
     VkImageMemoryBarrier to_transfer_dst{};
@@ -1514,31 +1604,7 @@ bool NativeCommandProcessor::UploadTexelsAndTransition(VkImage image, uint32_t w
                              VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_VERTEX_SHADER_BIT,
                              0, 0, nullptr, 0, nullptr, 1, &to_shader_read);
 
-    dfn.vkEndCommandBuffer(upload_cmd);
-
-    VkFenceCreateInfo fence_info{};
-    fence_info.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO;
-    VkFence upload_fence = VK_NULL_HANDLE;
-    ok = dfn.vkCreateFence(device, &fence_info, nullptr, &upload_fence) == VK_SUCCESS;
-    if (ok) {
-      VkSubmitInfo submit_info{};
-      submit_info.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
-      submit_info.commandBufferCount = 1;
-      submit_info.pCommandBuffers = &upload_cmd;
-      rex::ui::vulkan::VulkanDevice::Queue::Acquisition queue =
-          vulkan_device->AcquireQueue(vulkan_device->queue_family_graphics_compute(), 0);
-      ok = dfn.vkQueueSubmit(queue.queue(), 1, &submit_info, upload_fence) == VK_SUCCESS;
-      if (ok) {
-        constexpr uint64_t kFenceTimeoutNs = 5'000'000'000ull;
-        ok = dfn.vkWaitForFences(device, 1, &upload_fence, VK_TRUE, kFenceTimeoutNs) == VK_SUCCESS;
-      }
-      dfn.vkDestroyFence(device, upload_fence, nullptr);
-    }
-    // vkFreeCommandBuffers isn't in this SDK's exposed Vulkan function table
-    // (same gap as vkCmdBlitImage/vkCmdCopyImage noted elsewhere in this
-    // file) -- leaked instead of freed, but capped by kMaxTextureCacheEntries
-    // uploads for the process lifetime, so negligible. command_pool_'s own
-    // destruction (DestroyPipelineResources) reclaims everything anyway.
+    ok = EndOneShotCommandsAndWait();
   }
 
   dfn.vkDestroyBuffer(device, staging_buffer, nullptr);
@@ -2165,19 +2231,11 @@ bool NativeCommandProcessor::ApplyGameplayPreviewPostProcess(VkImageView source_
   constants.source_size_inv[0] = 1.0f / float(width);
   constants.source_size_inv[1] = 1.0f / float(height);
 
-  VkCommandBufferAllocateInfo cmd_alloc_info{};
-  cmd_alloc_info.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
-  cmd_alloc_info.commandPool = command_pool_;
-  cmd_alloc_info.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
-  cmd_alloc_info.commandBufferCount = 1;
-  VkCommandBuffer cmd = VK_NULL_HANDLE;
-  bool ok = dfn.vkAllocateCommandBuffers(device, &cmd_alloc_info, &cmd) == VK_SUCCESS;
+  // Reuses the persistent one-shot command buffer (see the
+  // oneshot_command_buffer_ doc comment in the header).
+  VkCommandBuffer cmd = BeginOneShotCommands();
+  bool ok = cmd != VK_NULL_HANDLE;
   if (ok) {
-    VkCommandBufferBeginInfo begin_info{};
-    begin_info.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
-    begin_info.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
-    dfn.vkBeginCommandBuffer(cmd, &begin_info);
-
     VkClearValue clear_value{};
     VkRenderPassBeginInfo render_pass_begin{};
     render_pass_begin.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
@@ -2194,29 +2252,7 @@ bool NativeCommandProcessor::ApplyGameplayPreviewPostProcess(VkImageView source_
                            sizeof(constants), &constants);
     dfn.vkCmdDraw(cmd, 3, 1, 0, 0);
     dfn.vkCmdEndRenderPass(cmd);
-    dfn.vkEndCommandBuffer(cmd);
-
-    VkFenceCreateInfo fence_info{};
-    fence_info.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO;
-    VkFence fence = VK_NULL_HANDLE;
-    ok = dfn.vkCreateFence(device, &fence_info, nullptr, &fence) == VK_SUCCESS;
-    if (ok) {
-      VkSubmitInfo submit_info{};
-      submit_info.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
-      submit_info.commandBufferCount = 1;
-      submit_info.pCommandBuffers = &cmd;
-      rex::ui::vulkan::VulkanDevice::Queue::Acquisition queue =
-          vulkan_device->AcquireQueue(vulkan_device->queue_family_graphics_compute(), 0);
-      ok = dfn.vkQueueSubmit(queue.queue(), 1, &submit_info, fence) == VK_SUCCESS;
-      if (ok) {
-        constexpr uint64_t kFenceTimeoutNs = 5'000'000'000ull;
-        ok = dfn.vkWaitForFences(device, 1, &fence, VK_TRUE, kFenceTimeoutNs) == VK_SUCCESS;
-      }
-      dfn.vkDestroyFence(device, fence, nullptr);
-    }
-    // vkFreeCommandBuffers isn't in this SDK's exposed Vulkan function table
-    // (see UploadTexelsAndTransition) -- leaked instead of freed, bounded by
-    // how often this specific texture actually re-uploads.
+    ok = EndOneShotCommandsAndWait();
   }
 
   dfn.vkDestroyFramebuffer(device, framebuffer, nullptr);
@@ -3130,13 +3166,32 @@ void NativeCommandProcessor::TryResolveCopy() {
 
   dfn.vkCmdEndRenderPass(command_buffer_);
 
-  VkBuffer readback_buffer = VK_NULL_HANDLE;
-  VkDeviceMemory readback_memory = VK_NULL_HANDLE;
-  if (!rex::ui::vulkan::util::CreateDedicatedAllocationBuffer(
-          vulkan_device, color_target_staging_size_, VK_BUFFER_USAGE_TRANSFER_DST_BIT,
-          rex::ui::vulkan::util::MemoryPurpose::kReadback, readback_buffer, readback_memory)) {
-    REXGPU_ERROR("NativeCommandProcessor: resolve copy failed to allocate a readback buffer");
-    return;
+  // Persistent readback buffer (see header): this runs every frame at some
+  // screens, so a dedicated 3.5 MiB allocate/free per call was pure churn.
+  // Constant size, so create once and reuse; the submit_fence_ wait below
+  // serializes reuse across calls.
+  if (resolve_readback_buffer_ == VK_NULL_HANDLE) {
+    if (!rex::ui::vulkan::util::CreateDedicatedAllocationBuffer(
+            vulkan_device, color_target_staging_size_, VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+            rex::ui::vulkan::util::MemoryPurpose::kReadback, resolve_readback_buffer_,
+            resolve_readback_memory_)) {
+      REXGPU_ERROR("NativeCommandProcessor: resolve copy failed to allocate a readback buffer");
+      resolve_readback_buffer_ = VK_NULL_HANDLE;
+      resolve_readback_memory_ = VK_NULL_HANDLE;
+      return;
+    }
+  }
+  VkBuffer readback_buffer = resolve_readback_buffer_;
+  VkDeviceMemory readback_memory = resolve_readback_memory_;
+
+  // This submit executes all draws recorded so far this frame, which read
+  // the (non-coherent) constants/index arenas -- flush them now, same as
+  // PresentFrame does before its own submit.
+  if (constants_arena_offset_ > 0) {
+    FlushMapped(vulkan_device, constants_arena_memory_);
+  }
+  if (index_arena_offset_ > 0) {
+    FlushMapped(vulkan_device, index_arena_memory_);
   }
 
   VkBufferImageCopy buffer_image_copy{};
@@ -3203,9 +3258,8 @@ void NativeCommandProcessor::TryResolveCopy() {
     }
     dfn.vkUnmapMemory(device, readback_memory);
   }
-
-  dfn.vkDestroyBuffer(device, readback_buffer, nullptr);
-  dfn.vkFreeMemory(device, readback_memory, nullptr);
+  // readback_buffer/memory are the persistent resolve_readback_* members --
+  // destroyed in DestroyPipelineResources, not here.
 
   // Invalidate any cached texture upload whose decode source overlaps what
   // was just written -- same staleness problem the COHER_STATUS_HOST
@@ -3301,6 +3355,7 @@ void NativeCommandProcessor::EnsureFrameBegun() {
   // The fence wait above guarantees the GPU has finished reading last frame's
   // constants, so it's now safe to reuse the arena from the top.
   constants_arena_offset_ = 0;
+  index_arena_offset_ = 0;
 
   VkCommandBufferBeginInfo begin_info{};
   begin_info.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
@@ -3973,11 +4028,21 @@ void NativeCommandProcessor::TryDraw(rex::graphics::xenos::PrimitiveType prim_ty
   dfn.vkCmdBindDescriptorSets(command_buffer_, VK_PIPELINE_BIND_POINT_GRAPHICS,
                               pipeline_entry.layout, 0, 4, sets, 0, nullptr);
   // Shared by both synthesized-index-buffer paths below: uploads `indices`
-  // as a fresh transient VK_INDEX_TYPE_UINT32 buffer and issues the indexed
-  // draw. Fresh per draw for the same reason the constant buffers are (see
-  // the comment above upload_constant_buffer).
+  // into the persistently-mapped index arena (see the index_arena_* members'
+  // doc) and issues the indexed draw at that offset. Falls back to a
+  // dedicated transient buffer only if the arena is exhausted this frame.
   auto draw_with_synthesized_indices = [&](const std::vector<uint32_t>& indices) {
     VkDeviceSize index_buffer_size = indices.size() * sizeof(uint32_t);
+    if (index_arena_mapped_ && index_arena_offset_ + index_buffer_size <= kIndexArenaSize) {
+      // Offsets stay 4-byte aligned (VK_INDEX_TYPE_UINT32) because every
+      // suballocation is a whole number of uint32s.
+      std::memcpy(index_arena_mapped_ + index_arena_offset_, indices.data(), index_buffer_size);
+      dfn.vkCmdBindIndexBuffer(command_buffer_, index_arena_buffer_, index_arena_offset_,
+                               VK_INDEX_TYPE_UINT32);
+      index_arena_offset_ += index_buffer_size;
+      dfn.vkCmdDrawIndexed(command_buffer_, uint32_t(indices.size()), 1, 0, 0, 0);
+      return;
+    }
     VkBuffer index_buffer;
     VkDeviceMemory index_memory;
     if (!rex::ui::vulkan::util::CreateDedicatedAllocationBuffer(
@@ -4082,40 +4147,13 @@ void NativeCommandProcessor::DebugDumpColorTarget() {
     return;
   }
 
-  VkCommandBuffer cmd;
-  VkCommandBufferAllocateInfo alloc_info{};
-  alloc_info.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
-  alloc_info.commandPool = command_pool_;
-  alloc_info.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
-  alloc_info.commandBufferCount = 1;
-  if (dfn.vkAllocateCommandBuffers(device, &alloc_info, &cmd) == VK_SUCCESS) {
-    VkCommandBufferBeginInfo begin_info{};
-    begin_info.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
-    begin_info.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
-    dfn.vkBeginCommandBuffer(cmd, &begin_info);
+  // Reuses the persistent one-shot command buffer (see the
+  // oneshot_command_buffer_ doc comment in the header).
+  VkCommandBuffer cmd = BeginOneShotCommands();
+  if (cmd != VK_NULL_HANDLE) {
     VkBufferCopy copy{0, 0, color_target_staging_size_};
     dfn.vkCmdCopyBuffer(cmd, color_target_staging_buffer_, readback_buffer, 1, &copy);
-    dfn.vkEndCommandBuffer(cmd);
-
-    VkFenceCreateInfo fence_info{};
-    fence_info.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO;
-    VkFence fence = VK_NULL_HANDLE;
-    if (dfn.vkCreateFence(device, &fence_info, nullptr, &fence) == VK_SUCCESS) {
-      VkSubmitInfo submit_info{};
-      submit_info.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
-      submit_info.commandBufferCount = 1;
-      submit_info.pCommandBuffers = &cmd;
-      rex::ui::vulkan::VulkanDevice::Queue::Acquisition queue =
-          vulkan_device->AcquireQueue(vulkan_device->queue_family_graphics_compute(), 0);
-      if (dfn.vkQueueSubmit(queue.queue(), 1, &submit_info, fence) == VK_SUCCESS) {
-        constexpr uint64_t kFenceTimeoutNs = 5'000'000'000ull;
-        dfn.vkWaitForFences(device, 1, &fence, VK_TRUE, kFenceTimeoutNs);
-      }
-      dfn.vkDestroyFence(device, fence, nullptr);
-    }
-    // Leaked, same rationale as UploadTexelsAndTransition -- vkFreeCommandBuffers
-    // isn't in this SDK's exposed Vulkan function table, and this is temporary
-    // debug code capped at 3 dumps for the process lifetime.
+    EndOneShotCommandsAndWait();
   }
 
   void* mapped = nullptr;
@@ -4234,6 +4272,9 @@ void NativeCommandProcessor::PresentFrame() {
     // before the command buffer that reads the arena is submitted below.
     if (constants_arena_offset_ > 0) {
       FlushMapped(vulkan_device, constants_arena_memory_);
+    }
+    if (index_arena_offset_ > 0) {
+      FlushMapped(vulkan_device, index_arena_memory_);
     }
 
     // Render pass's finalLayout is already TRANSFER_SRC_OPTIMAL, so

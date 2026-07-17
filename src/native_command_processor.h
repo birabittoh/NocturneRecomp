@@ -616,6 +616,50 @@ class NativeCommandProcessor {
   VkDeviceSize constants_arena_offset_ = 0;
   VkDeviceSize constants_arena_alignment_ = 256;
 
+  // Index arena: same idea as the constants arena, for the synthesized index
+  // buffers of quad/rect-list draws, replacing per-draw dedicated
+  // vkCreateBuffer + vkAllocateMemory (freed every frame in
+  // FreeTransientBuffers -- balanced, but ~6 dedicated alloc/free cycles per
+  // frame of avoidable driver churn). Offset resets once per frame in
+  // EnsureFrameBegun after the fence wait; flushed before every submit
+  // (PresentFrame and TryResolveCopy's mid-frame submit). If a frame ever
+  // overflows the arena, the draw falls back to the old dedicated
+  // TransientBuffer path.
+  static constexpr VkDeviceSize kIndexArenaSize = 16ull * 1024 * 1024;
+  VkBuffer index_arena_buffer_ = VK_NULL_HANDLE;
+  VkDeviceMemory index_arena_memory_ = VK_NULL_HANDLE;
+  uint8_t* index_arena_mapped_ = nullptr;
+  VkDeviceSize index_arena_offset_ = 0;
+
+  // One-shot command buffer + fence for synchronous upload/readback work
+  // (UploadTexelsAndTransition, ApplyGameplayPreviewPostProcess,
+  // DebugDumpColorTarget), allocated once and reused. These sites used to
+  // allocate a fresh command buffer per call and leak it
+  // (vkFreeCommandBuffers isn't in the SDK's function table), assuming the
+  // texture cache bounded the call count -- but TryResolveCopy invalidates
+  // the gameplay-preview texture every frame, so the "bounded" leak ran once
+  // per frame, and NVIDIA's driver never recycles abandoned command buffers
+  // until the pool is reset: ~28 KB of driver-internal host memory per call,
+  // ~100 MiB/min of Private Data -- the root cause of the idle memory leak
+  // (confirmed via NtAllocateVirtualMemory stacks: nvoglv64 <-
+  // vkAllocateCommandBuffers <- UploadTexelsAndTransition).
+  // vkBeginCommandBuffer implicitly resets the
+  // reused buffer (command_pool_ has RESET_COMMAND_BUFFER_BIT).
+  // BeginOneShotCommands returns VK_NULL_HANDLE on failure;
+  // EndOneShotCommandsAndWait ends, submits, and synchronously waits (the
+  // wait is also what makes reuse across calls safe).
+  VkCommandBuffer BeginOneShotCommands();
+  bool EndOneShotCommandsAndWait();
+  VkCommandBuffer oneshot_command_buffer_ = VK_NULL_HANDLE;
+  VkFence oneshot_fence_ = VK_NULL_HANDLE;
+
+  // Persistent readback buffer for TryResolveCopy (constant size --
+  // color_target_staging_size_), lazily created on first resolve and reused,
+  // replacing a 3.5 MiB dedicated allocate/free every frame that fed the same
+  // NVIDIA driver-arena growth as the per-draw index buffers above.
+  VkBuffer resolve_readback_buffer_ = VK_NULL_HANDLE;
+  VkDeviceMemory resolve_readback_memory_ = VK_NULL_HANDLE;
+
   // GPU swap counter, mirroring xenos CommandProcessor::counter_: increments
   // once per swap packet; EVENT_WRITE_SHD fences whose initiator selects the
   // counter (bit 31) write this value to guest memory as the GPU-progress
