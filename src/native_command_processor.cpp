@@ -3467,10 +3467,13 @@ void NativeCommandProcessor::EnsureFrameBegun() {
   begin_info.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
   dfn.vkBeginCommandBuffer(command_buffer_, &begin_info);
 
-  // Same blue as milestone 3a's clear -- the visible result when a frame
-  // has zero (or all-skipped) draws.
+  // Black clear: the visible result when a frame has zero (or all-skipped)
+  // draws. Previously a dark blue debug tint (used to distinguish a live but
+  // idle renderer from a hang); no longer needed now that the renderer is
+  // complete and this became visible as an unintended background on Linux
+  // where opaque draws don't fully cover it every frame.
   VkClearValue clear_value{};
-  clear_value.color = {{0.05f, 0.05f, 0.35f, 1.0f}};
+  clear_value.color = {{0.0f, 0.0f, 0.0f, 1.0f}};
   VkRenderPassBeginInfo rp_begin{};
   rp_begin.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
   rp_begin.renderPass = render_pass_;
