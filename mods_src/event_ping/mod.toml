@@ -1,7 +1,0 @@
-manifest_version = 2
-name = "Event Ping"
-version = "1.0.0"
-author = "BiRabittoh"
-description = "Library mod with no UI: ticks once a second and publishes \"sample.ping\" on the shared mod event bus. Pairs with event_pong."
-code = "event_ping"
-platform = "windows-x64,linux-x64"

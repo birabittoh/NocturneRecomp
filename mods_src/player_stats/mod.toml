@@ -1,7 +1,0 @@
-manifest_version = 2
-name = "Player Stats"
-version = "1.0.0"
-description = "Overlay (F5) showing the live character-screen stats (HP/Heart/MP, STR/CON/INT/LCK, level, exp, gold, kills, rooms, playtime)."
-code = "player_stats"
-requires = "game_symbols >= 1.0.2"
-platform = "windows-x64,linux-x64"

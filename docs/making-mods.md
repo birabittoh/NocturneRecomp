@@ -12,6 +12,14 @@ and a single mod can mix both:
 Mods are enabled in priority order by the `enabled_mods` key in
 `nocturnerecomp.toml`; earlier entries win on conflicting files.
 
+Mod **source** and build tooling live in a separate repo,
+[birabittoh/NocturneRecomp-Mods](https://github.com/birabittoh/NocturneRecomp-Mods)
+(`src/<name>/` there), not here -- this repo only ever contains the
+built/shipped `mods/<name>/` folders a player enables. Grab prebuilt mods
+from that repo's releases (one zip per mod, with binaries for all three
+platforms), or clone it to develop a new one; this doc otherwise describes
+the mod-plugin ABI and `mod.toml` format that repo's mods target.
+
 ## Asset-only mods
 
 An asset mod is just a folder under `mods/<name>/` with any of these
@@ -34,7 +42,7 @@ replace, for example `mods/<mod>/game/DATA/sound/bgmusic.wma` replaces
 hash (dump one with `texture_dump_enabled = true` in `nocturnerecomp.toml` to
 find the hash for a texture you want to replace).
 
-See the `mods_src_` directory for some working examples.
+See the `NocturneRecomp-Mods` repo's `src/` directory for some working examples.
 
 ## Code mods
 
@@ -53,14 +61,16 @@ yourself: look it up by name from the SDK's shared mod registry instead. See
 [Library mods and the shared registry](#library-mods-and-the-shared-registry)
 below.
 
-### 1. Scaffold the mod under `mods_src/`
+### 1. Scaffold the mod under `NocturneRecomp-Mods`'s `src/`
 
-Mod **source** lives in `mods_src/<name>/`, separate from the built/shipped
-`mods/<name>/` folder. Copy an existing mod as a template: `mods_src/sample_overlay/`
-is the minimal one:
+Clone [birabittoh/NocturneRecomp-Mods](https://github.com/birabittoh/NocturneRecomp-Mods);
+mod **source** lives in `src/<name>/` there, separate from the built/shipped
+`mods/<name>/` folder (which only exists locally after a build, or here in
+this repo once you've copied a built mod over). Copy an existing mod as a
+template: `src/sample_overlay/` is the minimal one:
 
 ```
-mods_src/sample_overlay/
+src/sample_overlay/
   CMakeLists.txt
   mod_main.cpp
   mod.toml
@@ -80,7 +90,7 @@ rexmod_add_plugin(sample_overlay
 )
 ```
 
-`rexmod_add_plugin` (from `mods_src/common/mod_cmake/rexmod.cmake`) builds a
+`rexmod_add_plugin` (from `src/common/mod_cmake/rexmod.cmake`) builds a
 shared library, sets C++23, and links `rex::runtime`, the same shared SDK
 runtime the game exe links, so your mod shares its ImGui drawer, keybind
 registry, and kernel state rather than getting its own copy.
@@ -99,12 +109,13 @@ platform = ""
 `code` must match the CMake target name (and therefore the built DLL's stem).
 Everything else is display metadata shown in the F1 mod manager overlay.
 
-`platform` is *written by* `make_mods.py`, not read by it; leave it empty in
-a fresh mod.toml. After a successful build it's (re)set to a comma-separated
-list of whichever platform(s) `mods/<name>/code/` currently ships a binary
-for (`"windows-x64,linux-x64"` after the default both-platform build,
-`"windows-x64"` after a `--target windows`-only one, and so on). It's purely
-a record of what's actually on disk, not something you set by hand.
+`platform` is *written by* `NocturneRecomp-Mods`'s `scripts/make_mods.py`,
+not read by it; leave it empty in a fresh mod.toml. After a successful build
+it's (re)set to a comma-separated list of whichever platform(s)
+`mods/<name>/code/` currently ships a binary for (e.g. `"windows-x64"` after
+a `--target windows-x64`-only build, `"windows-x64,linux-x64,linux-arm64"`
+once all three have been built into the same tree). It's purely a record of
+what's actually on disk, not something you set by hand.
 
 ### 2. Implement the plugin ABI
 
@@ -155,51 +166,51 @@ running at process exit; use `OnShutdown()` instead.
 
 ### Example mods to copy from
 
-- **`mods_src/sample_overlay/`**: smallest possible template: one keybind
+- **`src/sample_overlay/`**: smallest possible template: one keybind
   (F9), one ImGui window. Start here for a new mod.
-- **`mods_src/memory_peek/`**: reads guest memory via
+- **`src/memory_peek/`**: reads guest memory via
   `runtime->memory()->TranslateVirtual()` for a user-entered address (F10).
   A good reference for anything that inspects live guest state generically
   (no hardcoded addresses).
-- **`mods_src/music_player/`**: a full-featured example: owns a persistent
+- **`src/music_player/`**: a full-featured example: owns a persistent
   singleton (`GetAudioPlayer()`), binds in `OnCreateDialogs`, and uses
   `OnModuleLaunched()` to scan the filesystem once KernelState exists.
-- **`mods_src/game_symbols/`**: a *library mod* with no UI of its own;
+- **`src/game_symbols/`**: a *library mod* with no UI of its own;
   publishes reverse-engineered guest addresses into the shared mod registry
   for other mods to depend on. See
   [Library mods and the shared registry](#library-mods-and-the-shared-registry).
-- **`mods_src/ui_color/`**: consumes `game_symbols`'s published address
+- **`src/ui_color/`**: consumes `game_symbols`'s published address
   (`requires = "game_symbols >= 1.0.0"` in its `mod.toml`) instead of
   hardcoding or re-deriving it.
-- **`mods_src/function_override_demo/`**: wraps a recompiled guest
+- **`src/function_override_demo/`**: wraps a recompiled guest
   *function*'s behavior at runtime, rather than poking a data field like
   `ui_color`. See
   [Overriding a recompiled function](#overriding-a-recompiled-function).
-- **`mods_src/event_ping/`** and **`mods_src/event_pong/`**: a
+- **`src/event_ping/`** and **`src/event_pong/`**: a
   producer/consumer pair over the shared registry's event bus rather than
   addresses. `event_ping` has no UI: it uses `RegisterTick` to publish a
   `"sample.ping"` event once a second. `event_pong` (F11) declares
   `requires = "event_ping"`, subscribes to that event, and shows the last
   ping in an overlay -- it also republishes a couple of counters to
-  `mods_src/blackboard` with no `requires` on it at all, showing that
+  `src/blackboard` with no `requires` on it at all, showing that
   Publish/Subscribe coupling can be looser than the `RegisterAddress`
   pattern.
-- **`mods_src/blackboard/`**: a shared key/value store (F12) any mod can
+- **`src/blackboard/`**: a shared key/value store (F12) any mod can
   write to purely by publishing `"blackboard.set"`/`"blackboard.delete"`/
   `"blackboard.clear"` events (bytes = `"key=value"` or `"key"`) -- no header
   or linked symbol needed, so even a binary-only third-party mod can
   participate.
-- **`mods_src/bus_inspector/`** (F5): subscribes to the events above and
+- **`src/bus_inspector/`** (F5): subscribes to the events above and
   logs every one it sees. Since it piles a second/third subscriber onto
   event names `event_pong` and `blackboard` already subscribe to, it
   demonstrates that `Subscribe` supports fan-out to multiple listeners
   rather than last-one-wins.
-- **`mods_src/xex_patch_potion/`** and **`mods_src/xex_patch_red_rust/`**:
+- **`src/xex_patch_potion/`** and **`src/xex_patch_red_rust/`**:
   two independent, no-UI mods that each patch a different item
   name/description baked into `default.xex`'s static data directly in
   guest memory at startup, and coexist with no conflict. See
   [Patching static game text/data](#patching-static-game-textdata) below,
-  and `mods_src/common/include/rexmod/text_patch.h` for the shared helper
+  and `src/common/include/rexmod/text_patch.h` for the shared helper
   both of them call instead of duplicating the read-only-page-unlock/
   zero-fill logic.
 
@@ -209,40 +220,23 @@ running at process exit; use `OnShutdown()` instead.
 python scripts/make_mods.py
 ```
 
-This configures and builds every `mods_src/<name>/` project and assembles the
-result into `mods/<name>/` (copying the built binary to `code/<name>.dll` /
-`code/lib<name>.so`, plus `mod.toml` and `icon.png`).
+run from `NocturneRecomp-Mods`, not this repo. It configures and builds
+every `src/<name>/` project and assembles the result into
+`mods/<name>/code/<platform>/` (`<name>.dll` / `lib<name>.so`, plus
+`mod.toml` and `icon.png` at the mod root). See that repo's README and the
+script's own `--help`/docstring for flags (`--mod`, `--target
+{windows-x64,linux-x64,linux-arm64}`, `--package`, `--sdk-dir`) and
+cross-build details. Once built, copy `mods/<name>/` into this repo's
+`mods/` as-is: `LoadModPlugin` checks `code/<platform>/<stem>...` (matching
+the running host) before falling back to a flat `code/<stem>...`, so a mod
+folder carrying every platform side by side (as a multi-platform
+distribution from that repo's releases does) loads correctly with no
+flattening step needed. A locally-built, single-platform mod's flat
+`code/<stem>...` still works too.
 
-By default it builds **both** platforms, regardless of which OS you run it
-on, so `mods/<name>/code/` ends up with both a `.dll` and a `.so`:
-
-- Whichever platform matches your host builds directly with the local
-  `clang++`, against a `sdk/win-amd64`- or `sdk/linux-amd64`-style SDK dir
-  (falling back to a flat `sdk/` if that's what you already have, for example from
-  `../rexglue-sdk/scripts/deploy-sdk.py`, which always deploys flat).
-- The other platform is cross-built in Docker: a plain Linux container for
-  the `.so`, or (from a non-Windows host) a Linux container cross-compiling
-  the `.dll` via `clang-cl` + [`xwin`](https://github.com/Jake-Shadle/xwin)
-  against Microsoft's redistributable CRT/SDK, matching the MSVC ABI the
-  real Windows SDK build uses. Both SDKs are fetched on demand inside their
-  container via `download-sdk.py --pinned`, so the first cross-build of each
-  platform is slower (image build + SDK download); later runs are cached.
-
-Useful flags:
-
-- `--mod <name>`: build just one mod (repeatable).
-- `--target {windows,linux}`: only build for this platform (repeatable);
-  default is both.
-- `--package`: also zip each built mod to `mods/<name>.zip` for distribution.
-- `--sdk-dir <path>`: SDK root (default: `sdk`); each platform's SDK is
-  expected at `<path>/win-amd64` or `<path>/linux-amd64`.
-
-Building either platform via Docker requires `docker` on `PATH`; if it's
-missing, the script errors out rather than silently skipping that platform.
-
-Asset-only mods aren't touched by this
-script; it only ever writes `mods/<name>/` for names it finds under
-`mods_src/`.
+Prebuilt mods (all three platforms, already zipped one-per-mod) are
+attached to that repo's [releases](https://github.com/birabittoh/NocturneRecomp-Mods/releases)
+if you just want to install one rather than build it yourself.
 
 ### 4. Enable it
 
@@ -327,19 +321,19 @@ if (auto addr = runtime->mod_registry()->FindAddress("ui.accent_color")) {
 ```
 
 A **library mod** is a mod that only does this: no UI, no `code` consumers of
-its own, just registration calls in `OnCreateDialogs`. `mods_src/game_symbols/`
+its own, just registration calls in `OnCreateDialogs`. `src/game_symbols/`
 is exactly that: it registers `"ui.accent_color"` (the same struct
-`accent_color.cpp` reads) for other mods to depend on. `mods_src/ui_color/`
+`accent_color.cpp` reads) for other mods to depend on. `src/ui_color/`
 consumes it:
 
 ```toml
-# mods_src/ui_color/mod.toml
+# src/ui_color/mod.toml
 code = "ui_color"
 requires = "game_symbols >= 1.0.0"
 ```
 
 ```cpp
-// mods_src/ui_color/mod_main.cpp, OnModuleLaunched (lazy lookup, not eager
+// src/ui_color/mod_main.cpp, OnModuleLaunched (lazy lookup, not eager
 // in OnCreateDialogs -- see "Ordering" below)
 if (auto addr = runtime_->mod_registry()->FindAddress("ui.accent_color")) {
   addr_ = *addr;
@@ -370,8 +364,8 @@ called it. So a `Subscribe` callback must never touch ImGui directly --
 instead copy the payload (including the `bytes` span, which is only valid
 for the duration of that one `Publish` call) into a mutex-guarded member,
 and render from that snapshot in `OnDraw`, which does run on the UI thread.
-See `mods_src/event_pong/`, `mods_src/blackboard/`, and
-`mods_src/bus_inspector/` for the pattern.
+See `src/event_pong/`, `src/blackboard/`, and
+`src/bus_inspector/` for the pattern.
 
 **Keybind collisions**: `rex::ui::RegisterBind` has no built-in conflict
 check. If two mods bind the same key, `ProcessKeyEvent` walks binds in
@@ -392,7 +386,7 @@ though the exe was already built and linked before the mod loaded.
 // 1. Look up the target's guest address the same way as a data address --
 //    via the shared registry, so the lookup is vanilla/TU-safe. A library
 //    mod publishes function addresses with RegisterAddress exactly like
-//    data addresses (see mods_src/game_symbols's "leaderboard.write_stats_fn").
+//    data addresses (see src/game_symbols's "leaderboard.write_stats_fn").
 auto addr = runtime->mod_registry()->FindAddress("leaderboard.write_stats_fn");
 
 // 2. Replacement signature matches REX_HOOK_RAW: full ctx/base access.
@@ -410,7 +404,7 @@ runtime->function_dispatcher()->OverrideFunction(*addr, &MyReplacement, &origina
 runtime->function_dispatcher()->RestoreFunction(*addr, original);
 ```
 
-`mods_src/function_override_demo/` is a complete worked example: it
+`src/function_override_demo/` is a complete worked example: it
 overrides the game's leaderboard write-stats driver, logs the call, and
 calls through to the original so leaderboard writes still happen normally.
 
@@ -456,8 +450,8 @@ or needs a structural change a same-length string swap can't do.
 
 **Patch guest memory from a code mod instead**: any number of mods can
 each own a different address with no conflict, the same way
-`mods_src/ui_color` pokes the accent-color struct. Use
-`mods_src/common/include/rexmod/text_patch.h`'s `ApplyTextPatch`
+`src/ui_color` pokes the accent-color struct. Use
+`src/common/include/rexmod/text_patch.h`'s `ApplyTextPatch`
 (description fields, plain ASCII) or `ApplyNameFieldPatch` (name fields,
 which use a "big first letter" font encoding -- see
 `extracted/README.md`) from `OnModuleLaunched()`. Requirements:

@@ -1,6 +1,0 @@
-manifest_version = 2
-name = "XEX Patch PoC: Red Rust"
-version = "1.0.0"
-description = "Proof of concept: patches the English Red Rust weapon name in guest memory at startup. Companion to mods_src/xex_patch_potion -- both can be enabled together with no conflict."
-code = "xex_patch_red_rust"
-platform = "windows-x64,linux-x64"

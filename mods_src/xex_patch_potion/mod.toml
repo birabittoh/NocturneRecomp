@@ -1,6 +1,0 @@
-manifest_version = 2
-name = "XEX Patch PoC: Potion"
-version = "1.0.0"
-description = "Proof of concept: patches the English Potion item name in guest memory at startup, to show multiple mods can each own a different default.xex string with no file-replacement conflict. See mods_src/xex_patch_red_rust for the companion patch."
-code = "xex_patch_potion"
-platform = "windows-x64,linux-x64"

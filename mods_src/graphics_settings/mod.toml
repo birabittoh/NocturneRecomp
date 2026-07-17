@@ -1,7 +1,0 @@
-manifest_version = 2
-name = "Graphics Settings"
-version = "1.0.3"
-description = "Overlay (F6) for the game's graphics settings."
-code = "graphics_settings"
-requires = "game_symbols >= 1.0.1"
-platform = "windows-x64,linux-x64"
