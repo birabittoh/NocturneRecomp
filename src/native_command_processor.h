@@ -593,14 +593,6 @@ class NativeCommandProcessor {
   VkBuffer color_target_staging_buffer_ = VK_NULL_HANDLE;
   VkDeviceMemory color_target_staging_memory_ = VK_NULL_HANDLE;
 
-  // Temporary debug aid: dumps the first few presented frames' color target
-  // to a raw RGBA file under logs/, so pixel content can be inspected
-  // without a display (e.g. from a headless CI-like run). Not gated behind
-  // a cvar -- intended to be removed once on-screen output is confirmed
-  // working, not a permanent feature.
-  uint32_t debug_frames_dumped_ = 0;
-  void DebugDumpColorTarget();
-
   // A garbage-decoded draw's shader ucode hashes differently on every resubmit, so it never
   // hits shader_cache_ and instead pays SpirvShaderTranslator's ~20s cost
   // every single time it recurs -- stalling the frame loop for minutes. Real
@@ -659,8 +651,7 @@ class NativeCommandProcessor {
   VkDeviceSize index_arena_offset_ = 0;
 
   // One-shot command buffer + fence for synchronous upload/readback work
-  // (UploadTexelsAndTransition, ApplyGameplayPreviewPostProcess,
-  // DebugDumpColorTarget), allocated once and reused. These sites used to
+  // (UploadTexelsAndTransition, ApplyGameplayPreviewPostProcess), allocated once and reused. These sites used to
   // allocate a fresh command buffer per call and leak it
   // (vkFreeCommandBuffers isn't in the SDK's function table), assuming the
   // texture cache bounded the call count -- but TryResolveCopy invalidates

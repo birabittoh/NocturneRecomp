@@ -4247,58 +4247,6 @@ void NativeCommandProcessor::TryDraw(rex::graphics::xenos::PrimitiveType prim_ty
   }
 }
 
-void NativeCommandProcessor::DebugDumpColorTarget() {
-  const rex::ui::vulkan::VulkanDevice* vulkan_device = provider_->vulkan_device();
-  const rex::ui::vulkan::VulkanDevice::Functions& dfn = vulkan_device->functions();
-  VkDevice device = vulkan_device->device();
-
-  VkBuffer readback_buffer;
-  VkDeviceMemory readback_memory;
-  if (!rex::ui::vulkan::util::CreateDedicatedAllocationBuffer(
-          vulkan_device, color_target_staging_size_, VK_BUFFER_USAGE_TRANSFER_DST_BIT,
-          rex::ui::vulkan::util::MemoryPurpose::kReadback, readback_buffer, readback_memory)) {
-    REXGPU_ERROR("NativeCommandProcessor: debug dump failed to allocate a readback buffer");
-    return;
-  }
-
-  // Reuses the persistent one-shot command buffer (see the
-  // oneshot_command_buffer_ doc comment in the header).
-  VkCommandBuffer cmd = BeginOneShotCommands();
-  if (cmd != VK_NULL_HANDLE) {
-    VkBufferCopy copy{0, 0, color_target_staging_size_};
-    dfn.vkCmdCopyBuffer(cmd, color_target_staging_buffer_, readback_buffer, 1, &copy);
-    EndOneShotCommandsAndWait();
-  }
-
-  void* mapped = nullptr;
-  if (dfn.vkMapMemory(device, readback_memory, 0, color_target_staging_size_, 0, &mapped) ==
-      VK_SUCCESS) {
-    // CPU reading GPU-written memory needs an invalidate, not a flush (the
-    // opposite direction from FlushMapped's writes) -- otherwise the CPU may
-    // read a stale cached copy on non-coherent memory types.
-    VkMappedMemoryRange range{};
-    range.sType = VK_STRUCTURE_TYPE_MAPPED_MEMORY_RANGE;
-    range.memory = readback_memory;
-    range.offset = 0;
-    range.size = VK_WHOLE_SIZE;
-    dfn.vkInvalidateMappedMemoryRanges(device, 1, &range);
-    char path[256];
-    std::snprintf(path, sizeof(path), "logs/debug_color_target_%u_%ux%u_a2b10g10r10.raw",
-                 debug_frames_dumped_, color_target_width_, color_target_height_);
-    FILE* f = std::fopen(path, "wb");
-    if (f) {
-      std::fwrite(mapped, 1, color_target_staging_size_, f);
-      std::fclose(f);
-      REXGPU_INFO("NativeCommandProcessor: debug-dumped color target to {}", path);
-    }
-    dfn.vkUnmapMemory(device, readback_memory);
-  }
-  ++debug_frames_dumped_;
-
-  dfn.vkDestroyBuffer(device, readback_buffer, nullptr);
-  dfn.vkFreeMemory(device, readback_memory, nullptr);
-}
-
 void NativeCommandProcessor::PresentFrame() {
   if (command_buffer_ == VK_NULL_HANDLE) {
     return;
@@ -4522,10 +4470,6 @@ void NativeCommandProcessor::PresentFrame() {
           logged_first_present = true;
           REXGPU_INFO("NativeCommandProcessor: first frame presented (had_draws={})",
                       frame_has_draws_);
-        }
-
-        if (frame_has_draws_ && debug_frames_dumped_ < 3) {
-          DebugDumpColorTarget();
         }
 
         return true;
