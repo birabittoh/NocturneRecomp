@@ -14,6 +14,7 @@ import sys
 ROOT = os.path.normpath(os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
 XEX_PATH = os.path.join(ROOT, "assets", "default.xex")
 OUT_PATH = os.path.join(ROOT, "src", "icon.generated.h")
+OUT_ICO_PATH = os.path.join(ROOT, "src", "icon.generated.ico")
 
 XEX_HEADER_RESOURCE_INFO = 0x000002FF
 XEX_HEADER_FILE_FORMAT_INFO = 0x000003FF
@@ -296,8 +297,38 @@ def extract_icon_png(xex_path):
     return _extract_xdbf_icon(xdbf)
 
 
+def write_ico(png_data, out_path):
+    """Wraps the PNG in a minimal single-image .ico container so it can be
+    embedded as the Windows executable's icon via a resource script. Windows
+    Vista+ accepts a raw PNG payload inside an ICONDIRENTRY (no BMP/DIB
+    re-encoding needed) as long as the entry's width/height match the image.
+    """
+    width, height = struct.unpack_from(">II", png_data, 16)
+
+    def dim_byte(v):
+        return 0 if v >= 256 else v
+
+    icondir = struct.pack("<HHH", 0, 1, 1)
+    entry = struct.pack(
+        "<BBBBHHII",
+        dim_byte(width),
+        dim_byte(height),
+        0,  # color count (0 = not a palette image)
+        0,  # reserved
+        1,  # color planes
+        32,  # bits per pixel
+        len(png_data),
+        len(icondir) + 16,  # image data offset (right after the one entry)
+    )
+    with open(out_path, "wb") as f:
+        f.write(icondir)
+        f.write(entry)
+        f.write(png_data)
+
+
 def main():
     icon_data = extract_icon_png(XEX_PATH)
+    write_ico(icon_data, OUT_ICO_PATH)
 
     lines = [
         "#pragma once",

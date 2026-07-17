@@ -21,8 +21,13 @@ src/main.cpp.bak
 # Embedded fonts header, rebuilt from src/fonts/*.ttf by scripts/gen-fonts.py
 /src/fonts.generated.h
 
-# Embedded icon header, rebuilt from assets/icon.png by scripts/gen-icon.py
+# Embedded icon header/ico, rebuilt from assets/default.xex by scripts/gen-icon.py
 /src/icon.generated.h
+/src/icon.generated.ico
+
+# Windows exe-icon resource script, rewritten by CMake with an absolute path
+# to src/icon.generated.ico (see CMakeLists.txt)
+/src/nocturnerecomp.generated.rc
 
 # Project version header, rewritten from the nearest git tag on every CMake
 # configure (see CMakeLists.txt)

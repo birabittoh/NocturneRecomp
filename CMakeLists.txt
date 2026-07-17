@@ -60,15 +60,36 @@ add_custom_command(
 # src/icon.generated.h is a gitignored build artifact regenerated whenever the
 # XEX or the generator script changes.
 set(NOCTURNE_ICON_HEADER ${CMAKE_SOURCE_DIR}/src/icon.generated.h)
+set(NOCTURNE_ICON_ICO ${CMAKE_SOURCE_DIR}/src/icon.generated.ico)
 add_custom_command(
-    OUTPUT ${NOCTURNE_ICON_HEADER}
+    OUTPUT ${NOCTURNE_ICON_HEADER} ${NOCTURNE_ICON_ICO}
     COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/scripts/gen-icon.py
     DEPENDS
         ${CMAKE_SOURCE_DIR}/scripts/gen-icon.py
         ${CMAKE_SOURCE_DIR}/assets/default.xex
-    COMMENT "Generating src/icon.generated.h"
+    COMMENT "Generating src/icon.generated.h and src/icon.generated.ico"
     VERBATIM
 )
+
+# On Windows, also embed the same icon as the .exe's own resource (Explorer,
+# taskbar before the window opens, Alt-Tab), separate from the in-window icon
+# applied at runtime via Window::SetIcon (see nocturnerecomp_app.h). The .rc
+# needs an absolute path to the .ico since it's not necessarily emitted next
+# to it in an out-of-source build.
+if(WIN32)
+    set(NOCTURNE_ICON_ICO_PATH ${NOCTURNE_ICON_ICO})
+    set(NOCTURNE_ICON_RC ${CMAKE_SOURCE_DIR}/src/nocturnerecomp.generated.rc)
+    configure_file(
+        ${CMAKE_SOURCE_DIR}/src/nocturnerecomp.rc.in
+        ${NOCTURNE_ICON_RC}
+        @ONLY
+    )
+    # rc.exe needs icon.generated.ico to exist by the time it compiles this
+    # .rc; configure_file only stamped the path into it above, it doesn't
+    # establish a build-order dependency on the custom command that (re)writes
+    # the .ico itself.
+    set_source_files_properties(${NOCTURNE_ICON_RC} PROPERTIES OBJECT_DEPENDS ${NOCTURNE_ICON_ICO})
+endif()
 
 # Sources
 set(NOCTURNERECOMP_SOURCES
@@ -87,7 +108,7 @@ set(NOCTURNERECOMP_SOURCES
 )
 
 if(WIN32)
-    add_executable(nocturnerecomp WIN32 ${NOCTURNERECOMP_SOURCES})
+    add_executable(nocturnerecomp WIN32 ${NOCTURNERECOMP_SOURCES} ${NOCTURNE_ICON_RC})
 else()
     add_executable(nocturnerecomp ${NOCTURNERECOMP_SOURCES})
     set_target_properties(nocturnerecomp PROPERTIES
