@@ -27,10 +27,24 @@
 #pragma once
 
 #include <cstdint>
+#include <utility>
+#include <vector>
 
 #include <rex/ppc/context.h>
 
 namespace nocturne {
+
+// Registers guest address ranges outside a function's own [start, end) that
+// interpretation may flow into and out of with plain gotos: randomizer code
+// caves that hook a function via "b cave ... b back-into-function-body"
+// trampolines. Branch-backs land mid-function, so they can't be dispatched
+// as calls -- instead, a non-link branch whose target lies in one of these
+// ranges (or back inside the function bounds) just continues interpreting
+// at the target. PpcScanFunction follows such branches too, so the
+// unsupported-instruction check covers the cave code a patched function
+// flows through. Call once (not thread-safe) before installing thunks;
+// ranges must be disjoint.
+void PpcSetInterpretableRanges(std::vector<std::pair<uint32_t, uint32_t>> ranges);
 
 // Walks statically reachable instructions of [start, end) (guest addresses,
 // instructions read from guest memory at `base`) and returns true if the

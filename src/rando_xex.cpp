@@ -12,9 +12,13 @@
 #include <cstdint>
 #include <cstring>
 #include <fstream>
+#include <mutex>
 #include <set>
+#include <unordered_map>
 #include <utility>
 #include <vector>
+
+#include <rex/system/xex_module.h>
 
 #include "generated/nocturnerecomp_init.h"
 
@@ -41,6 +45,22 @@ struct FuncBounds {
 };
 FuncBounds g_thunk_bounds[kMaxInterpThunks];
 
+// Randomizer "code caves": regions the patch writes into previously-zero
+// space outside the recompiled code range (new functions the base image
+// never had, reached via patched branches/pointers). No recompiled function
+// exists for them, so calls land in the dispatcher's fallback resolver
+// (RandoCaveResolver below), which lazily binds an interpreter thunk per
+// entry point.
+struct CaveRegion {
+  uint32_t start;
+  uint32_t end;
+};
+std::vector<CaveRegion> g_cave_regions;         // sorted by start
+std::mutex g_cave_mutex;                        // guards the two members below
+std::unordered_map<uint32_t, PPCFunc*> g_cave_thunks;  // entry point -> bound thunk
+size_t g_next_slot = 0;  // next free g_thunk_bounds slot (boot-time install + caves)
+uint8_t* g_membase = nullptr;
+
 template <size_t I>
 void InterpThunk(PPCContext& ctx, uint8_t* base) {
   PpcInterpret(ctx, base, g_thunk_bounds[I].start, g_thunk_bounds[I].end);
@@ -52,6 +72,10 @@ constexpr std::array<PPCFunc*, sizeof...(Is)> MakeThunks(std::index_sequence<Is.
 }
 constexpr auto g_thunks = MakeThunks(std::make_index_sequence<kMaxInterpThunks>{});
 
+inline uint32_t ReadBE32(const uint8_t* p) {
+  return (uint32_t(p[0]) << 24) | (uint32_t(p[1]) << 16) | (uint32_t(p[2]) << 8) | p[3];
+}
+
 bool ReadFileBytes(const std::filesystem::path& path, std::vector<uint8_t>& out) {
   std::ifstream f(path, std::ios::binary);
   if (!f) {
@@ -61,8 +85,43 @@ bool ReadFileBytes(const std::filesystem::path& path, std::vector<uint8_t>& out)
   return f.good() || f.eof();
 }
 
-inline uint32_t ReadBE32(const uint8_t* p) {
-  return (uint32_t(p[0]) << 24) | (uint32_t(p[1]) << 16) | (uint32_t(p[2]) << 8) | p[3];
+PPCFunc* RandoCaveResolver(uint32_t target) {
+  // Containing cave region, if any (regions are sorted and disjoint).
+  auto it = std::upper_bound(
+      g_cave_regions.begin(), g_cave_regions.end(), target,
+      [](uint32_t addr, const CaveRegion& r) { return addr < r.start; });
+  if (it == g_cave_regions.begin()) {
+    return nullptr;
+  }
+  const CaveRegion& region = *(it - 1);
+  if (target >= region.end || (target & 3)) {
+    return nullptr;
+  }
+
+  std::lock_guard<std::mutex> lock(g_cave_mutex);
+  auto cached = g_cave_thunks.find(target);
+  if (cached != g_cave_thunks.end()) {
+    return cached->second;
+  }
+
+  uint32_t bad_pc = 0, bad_insn = 0;
+  if (!PpcScanFunction(g_membase, target, region.end, &bad_pc, &bad_insn)) {
+    REXLOG_WARN("[rando] cave function {:08X} uses instruction {:08X} at {:08X} the "
+                "interpreter doesn't support -- call will trap",
+                target, bad_insn, bad_pc);
+    return nullptr;
+  }
+  if (g_next_slot >= kMaxInterpThunks) {
+    REXLOG_WARN("[rando] out of interpreter thunk slots for cave function {:08X}", target);
+    return nullptr;
+  }
+  size_t slot = g_next_slot++;
+  g_thunk_bounds[slot] = {target, region.end};
+  PPCFunc* fn = g_thunks[slot];
+  g_cave_thunks.emplace(target, fn);
+  REXLOG_INFO("[rando] interpreting cave function {:08X} (cave {:08X}-{:08X})", target,
+              region.start, region.end);
+  return fn;
 }
 
 }  // namespace
@@ -75,32 +134,39 @@ void InstallRandoOverrides(rex::Runtime* runtime, const std::filesystem::path& b
     REXLOG_WARN("[rando] runtime not ready -- randomizer code changes are inactive");
     return;
   }
+  g_membase = memory->virtual_membase();
 
-  std::vector<uint8_t> base_img, patched_img;
-  if (!ReadFileBytes(base_xex, base_img) || !ReadFileBytes(patched_xex, patched_img)) {
+  std::vector<uint8_t> base_raw, patched_raw;
+  if (!ReadFileBytes(base_xex, base_raw) || !ReadFileBytes(patched_xex, patched_raw)) {
     REXLOG_WARN("[rando] failed to read {} / {} for the .text diff -- randomizer code "
                 "changes are inactive",
                 base_xex.string(), patched_xex.string());
     return;
   }
-  if (base_img.size() != patched_img.size() || base_img.size() < 0x10) {
-    REXLOG_WARN("[rando] {} and {} differ in size -- randomizer code changes are inactive",
+
+  // Diff the *flat basefile images* (decrypted + decompressed, laid out as
+  // mapped at image_base), never the raw files: the base xex is typically
+  // AES-encrypted while randomizer output is plaintext, so a raw byte diff
+  // "differs" everywhere (23k+ false patched functions), and with basic
+  // compression file offsets don't even line up with guest addresses.
+  std::vector<uint8_t> base_img, patched_img;
+  if (!rex::runtime::XexModule::ExtractBaseImage(base_raw.data(), base_raw.size(), base_img) ||
+      !rex::runtime::XexModule::ExtractBaseImage(patched_raw.data(), patched_raw.size(),
+                                                 patched_img)) {
+    REXLOG_WARN("[rando] failed to extract the basefile image from {} or {} (unsupported "
+                "compression/encryption?) -- randomizer code changes are inactive",
                 base_xex.string(), patched_xex.string());
     return;
   }
-
-  // XEX2 header: u32 exe_offset at 0x8 = file offset of the embedded PE.
-  // Both images are decrypted/uncompressed same-layout basefiles, so the PE
-  // maps flat at image_base: guest = image_base + (file_offset - pe_offset).
-  // (Getting this wrong -- treating raw pointers as file-relative -- is
-  // exactly the 0x4000-off-target bug documented in rando_xex.h.)
-  uint32_t pe_off = ReadBE32(base_img.data() + 8);
-  if (pe_off != ReadBE32(patched_img.data() + 8)) {
-    REXLOG_WARN("[rando] PE offsets differ between base and patched xex -- randomizer "
-                "code changes are inactive");
+  if (base_img.size() != patched_img.size()) {
+    REXLOG_WARN("[rando] extracted images differ in size ({} vs {} bytes) -- not a "
+                "same-layout variant; randomizer code changes are inactive",
+                base_img.size(), patched_img.size());
     return;
   }
-  uint64_t code_file_start = uint64_t(pe_off) + (REX_CODE_BASE - REX_IMAGE_BASE);
+
+  // The flat image maps at image_base: guest = image_base + image_offset.
+  uint64_t code_file_start = REX_CODE_BASE - REX_IMAGE_BASE;
   uint64_t code_file_end = code_file_start + REX_CODE_SIZE;
   if (code_file_end > base_img.size()) {
     code_file_end = base_img.size();
@@ -125,7 +191,7 @@ void InstallRandoOverrides(rex::Runtime* runtime, const std::filesystem::path& b
     if (std::memcmp(base_img.data() + off, patched_img.data() + off, 4) == 0) {
       continue;
     }
-    uint32_t guest = REX_IMAGE_BASE + static_cast<uint32_t>(off - pe_off);
+    uint32_t guest = REX_IMAGE_BASE + static_cast<uint32_t>(off);
     auto it = std::upper_bound(starts.begin(), starts.end(), guest);
     if (it == starts.begin()) {
       ++stray_diffs;
@@ -137,6 +203,52 @@ void InstallRandoOverrides(rex::Runtime* runtime, const std::filesystem::path& b
     REXLOG_WARN("[rando] {} patched dword(s) in the code range precede the first known "
                 "function -- ignored", stray_diffs);
   }
+
+  // Find code caves: contiguous patched dwords outside the code range whose
+  // base-image bytes are all zero (new code written into padding/zero space
+  // -- nonzero base means randomized *data*, which the booted image already
+  // covers). Runs separated by short zero gaps (alignment padding between
+  // cave functions) merge into one region.
+  {
+    constexpr uint64_t kCaveMergeGap = 32;
+    for (uint64_t off = 0; off + 4 <= base_img.size(); off += 4) {
+      if (off >= code_file_start && off < code_file_end) {
+        continue;
+      }
+      if (std::memcmp(base_img.data() + off, patched_img.data() + off, 4) == 0 ||
+          ReadBE32(base_img.data() + off) != 0) {
+        continue;
+      }
+      uint32_t guest = REX_IMAGE_BASE + static_cast<uint32_t>(off);
+      if (!g_cave_regions.empty() && guest - g_cave_regions.back().end <= kCaveMergeGap) {
+        g_cave_regions.back().end = guest + 4;
+      } else {
+        g_cave_regions.push_back({guest, guest + 4});
+      }
+    }
+    // Drop single-dword "regions": those are pointers patched into zero
+    // data, not code.
+    g_cave_regions.erase(std::remove_if(g_cave_regions.begin(), g_cave_regions.end(),
+                                        [](const CaveRegion& r) { return r.end - r.start <= 4; }),
+                         g_cave_regions.end());
+    for (const CaveRegion& r : g_cave_regions) {
+      REXLOG_INFO("[rando] code cave {:08X}-{:08X} ({} bytes) -- entry points bind to the "
+                  "interpreter on first call",
+                  r.start, r.end, r.end - r.start);
+    }
+    if (!g_cave_regions.empty()) {
+      // Let both the scan (below) and interpretation flow through caves as
+      // gotos (hook trampolines branch out and back mid-function), and catch
+      // direct calls to cave entry points via the dispatcher fallback.
+      std::vector<std::pair<uint32_t, uint32_t>> ranges;
+      for (const CaveRegion& r : g_cave_regions) {
+        ranges.emplace_back(r.start, r.end);
+      }
+      PpcSetInterpretableRanges(std::move(ranges));
+      dispatcher->SetFallbackResolver(&RandoCaveResolver);
+    }
+  }
+
   if (changed.empty()) {
     REXLOG_INFO("[rando] no .text differences between {} and {} -- data-only patch, "
                 "no function overrides needed",
@@ -146,7 +258,8 @@ void InstallRandoOverrides(rex::Runtime* runtime, const std::filesystem::path& b
 
   uint8_t* membase = memory->virtual_membase();
   uint32_t code_end = REX_CODE_BASE + REX_CODE_SIZE;
-  size_t installed = 0, skipped = 0, slot = 0;
+  size_t installed = 0, skipped = 0;
+  size_t& slot = g_next_slot;  // shared with RandoCaveResolver's lazy bindings
   for (uint32_t idx : changed) {
     uint32_t start = starts[idx];
     uint32_t end = idx + 1 < starts.size() ? starts[idx + 1] : code_end;

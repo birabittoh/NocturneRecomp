@@ -7,15 +7,26 @@
 
 #include "generated/nocturnerecomp_init.h"
 
+#include <algorithm>
 #include <cmath>
 #include <cstdlib>
 #include <cstring>
+#include <unordered_set>
 #include <vector>
 
 #include <rex/logging.h>
 
 namespace nocturne {
 namespace {
+
+// Extra goto-able ranges (randomizer code caves); see PpcSetInterpretableRanges.
+std::vector<std::pair<uint32_t, uint32_t>> g_extra_ranges;  // sorted, disjoint
+
+bool InExtraRange(uint32_t addr) {
+  auto it = std::upper_bound(g_extra_ranges.begin(), g_extra_ranges.end(), addr,
+                             [](uint32_t a, const auto& r) { return a < r.first; });
+  return it != g_extra_ranges.begin() && addr < (it - 1)->second;
+}
 
 struct RegFile {
   PPCRegister* g[32];
@@ -97,6 +108,7 @@ inline uint64_t Dup32(uint32_t v) { return uint64_t(v) | (uint64_t(v) << 32); }
 }
 
 void CallGuest(PPCContext& ctx, uint8_t* base, uint32_t target, uint32_t pc) {
+  ctx.last_indirect_target = target;  // keep the invalid-function trap's log accurate
   PPCFunc* fn = rex::runtime::ResolveIndirectFunction(target);
   if (!fn) {
     REXLOG_CRITICAL("[ppc-interp] no host function registered for call target {:08X} (from {:08X})",
@@ -199,7 +211,7 @@ StepKind Classify(uint32_t insn) {
         default:
           switch (XO10(insn)) {
             case 0: case 12: case 14: case 15: case 40: case 72: case 136:
-            case 264: case 583: case 711: case 846:
+            case 264: case 583: case 711: case 814: case 815: case 846:
               return StepKind::kNormal;
             default: return StepKind::kUnsupported;
           }
@@ -211,6 +223,11 @@ StepKind Classify(uint32_t insn) {
 
 }  // namespace
 
+void PpcSetInterpretableRanges(std::vector<std::pair<uint32_t, uint32_t>> ranges) {
+  std::sort(ranges.begin(), ranges.end());
+  g_extra_ranges = std::move(ranges);
+}
+
 bool PpcScanFunction(uint8_t* base, uint32_t start, uint32_t end, uint32_t* bad_pc,
                      uint32_t* bad_insn) {
   if (end <= start) {
@@ -218,16 +235,27 @@ bool PpcScanFunction(uint8_t* base, uint32_t start, uint32_t end, uint32_t* bad_
   }
   size_t count = (end - start) / 4;
   std::vector<uint8_t> visited(count, 0);
+  std::unordered_set<uint32_t> extra_visited;  // pcs inside extra (cave) ranges
+  // Marks pc visited; returns false if it already was.
+  auto mark = [&](uint32_t pc) -> bool {
+    if (pc >= start && pc < end) {
+      size_t idx = (pc - start) / 4;
+      if (visited[idx]) return false;
+      visited[idx] = 1;
+      return true;
+    }
+    return extra_visited.insert(pc).second;
+  };
   std::vector<uint32_t> work{start};
 
   while (!work.empty()) {
     uint32_t pc = work.back();
     work.pop_back();
     for (;;) {
-      if (pc < start || pc >= end) break;  // left the function: dispatched at runtime
-      size_t idx = (pc - start) / 4;
-      if (visited[idx]) break;
-      visited[idx] = 1;
+      if ((pc < start || pc >= end) && !InExtraRange(pc)) {
+        break;  // left interpretable code: dispatched at runtime
+      }
+      if (!mark(pc)) break;
 
       uint32_t insn = REX_LOAD_U32(pc);
       StepKind kind = Classify(insn);
@@ -248,7 +276,9 @@ bool PpcScanFunction(uint8_t* base, uint32_t start, uint32_t end, uint32_t* bad_
           target = pc + bd;
           conditional = ((RT(insn) & 0x14) != 0x14);  // BO field: 1z1zz = always
         }
-        if (target >= start && target < end && !visited[(target - start) / 4]) {
+        // Non-link branch targets are gotos when interpretable (in bounds or
+        // in a cave range) -- scan them. bl targets dispatch at runtime.
+        if (!LKBit(insn) && ((target >= start && target < end) || InExtraRange(target))) {
           work.push_back(target);
         }
         if (!conditional && !LKBit(insn)) break;  // unconditional b: no fall-through
@@ -342,8 +372,8 @@ void PpcInterpret(PPCContext& ctx, uint8_t* base, uint32_t start, uint32_t end) 
           if (LKBit(insn)) {
             ctx.lr = next;
             CallGuest(ctx, base, target, pc);
-          } else if (target >= start && target < end) {
-            next = target;
+          } else if ((target >= start && target < end) || InExtraRange(target)) {
+            next = target;  // in-function or cave-trampoline goto
           } else {
             CallGuest(ctx, base, target, pc);  // conditional tail branch out
             return;
@@ -357,8 +387,8 @@ void PpcInterpret(PPCContext& ctx, uint8_t* base, uint32_t start, uint32_t end) 
         if (LKBit(insn)) {
           ctx.lr = next;
           CallGuest(ctx, base, target, pc);
-        } else if (target >= start && target < end) {
-          next = target;
+        } else if ((target >= start && target < end) || InExtraRange(target)) {
+          next = target;  // in-function or cave-trampoline goto
         } else {
           CallGuest(ctx, base, target, pc);  // tail call (incl. epilogue helpers)
           return;
@@ -378,7 +408,7 @@ void PpcInterpret(PPCContext& ctx, uint8_t* base, uint32_t start, uint32_t end) 
               if (LKBit(insn)) {
                 ctx.lr = next;
                 CallGuest(ctx, base, target, pc);
-              } else if (target >= start && target < end) {
+              } else if ((target >= start && target < end) || InExtraRange(target)) {
                 next = target;  // jump-table dispatch within the function
               } else {
                 CallGuest(ctx, base, target, pc);
@@ -1087,6 +1117,16 @@ void PpcInterpret(PPCContext& ctx, uint8_t* base, uint32_t start, uint32_t end) 
               case 711:  // mtfsf
                 ctx.fpscr.storeFromGuest(rf.f[RB(insn)]->u32);
                 break;
+              case 814:  // fctid
+                rf.f[RT(insn)]->s64 = std::isnan(b)               ? int64_t(0x8000000000000000ULL)
+                                      : (b > double(INT64_MAX))   ? INT64_MAX
+                                      : simde_mm_cvtsd_si64(simde_mm_load_sd(&b));
+                break;
+              case 815:  // fctidz
+                rf.f[RT(insn)]->s64 = std::isnan(b)               ? int64_t(0x8000000000000000ULL)
+                                      : (b > double(INT64_MAX))   ? INT64_MAX
+                                      : simde_mm_cvttsd_si64(simde_mm_load_sd(&b));
+                break;
               case 846:  // fcfid
                 ctx.fpscr.enableFlushMode();
                 rf.f[RT(insn)]->f64 = double(rf.f[RB(insn)]->s64);
@@ -1102,7 +1142,7 @@ void PpcInterpret(PPCContext& ctx, uint8_t* base, uint32_t start, uint32_t end) 
     }
 
     pc = next;
-    if (pc < start || pc >= end) {
+    if ((pc < start || pc >= end) && !InExtraRange(pc)) {
       REXLOG_CRITICAL("[ppc-interp] fell off function bounds at {:08X} (function {:08X}-{:08X})",
                       pc, start, end);
       std::abort();
