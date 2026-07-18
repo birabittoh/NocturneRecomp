@@ -36,7 +36,7 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           name: "NocturneRecomp ${{ github.ref_name }}"
-          body: "# Get the game on [Goopie](https://goopie.xyz/#/)!\n\n"
+          body: "# Get the game on [Goopie](https://goopie.xyz/#/library/nocturnerecomp)!\n\n"
           files: release-assets/*
           generate_release_notes: true
           fail_on_unmatched_files: true

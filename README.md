@@ -11,7 +11,7 @@ overlays, hooks) so the game runs natively and can be modded like a PC port.
 
 Feel free to visit NocturneRecomp's [official Discord server](https://discord.gg/DJe2pXMH7S) if you need any help.
 
-# Get the game on [Goopie](https://goopie.xyz)!
+# Get the game on [Goopie](https://goopie.xyz/#/library/nocturnerecomp)!
 
 ## Using a prebuilt release
 
