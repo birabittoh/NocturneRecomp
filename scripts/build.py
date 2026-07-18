@@ -214,6 +214,7 @@ def do_package(name, project_name, is_windows):
         f.write("\n")
         f.write(f'post_process_shader_path = "{post_process_shader_path(is_windows)}"\n')
         f.write("post_process_shader_enabled = false\n")
+        f.write("frame_pacer_enabled = false\n")
         f.write("\n")
         f.write('rando_xex_name = "Rando.xex"\n')
 

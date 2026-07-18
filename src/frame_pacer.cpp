@@ -14,6 +14,10 @@
 #include <rex/system/xmemory.h>
 #include <rex/thread.h>
 
+REXCVAR_DEFINE_BOOL(frame_pacer_enabled, false, "Game",
+                     "Drive the sim clock from a steady real-time pacer thread instead of the "
+                     "guest's own vblank-driven clock (experimental)");
+
 namespace nocturne {
 
 namespace {
@@ -104,6 +108,11 @@ void FramePacer::ThreadMain() {
     auto now = std::chrono::steady_clock::now();
     double dt = std::chrono::duration<double>(now - last_time).count();
     last_time = now;
+
+    if (!REXCVAR_GET(frame_pacer_enabled)) {
+      locked = false;
+      continue;
+    }
 
     auto* memory = runtime_ ? runtime_->memory() : nullptr;
     auto* mod_registry = runtime_ ? runtime_->mod_registry() : nullptr;

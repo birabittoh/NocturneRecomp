@@ -22,6 +22,10 @@
 #include <cstdint>
 #include <thread>
 
+#include <rex/cvar.h>
+
+REXCVAR_DECLARE(bool, frame_pacer_enabled);
+
 namespace rex {
 class Runtime;
 }  // namespace rex
@@ -35,7 +39,8 @@ class FramePacer {
 
   // Starts the pacer thread. Safe to call once runtime() is live (OnPostSetup);
   // the thread self-guards until the game has launched and app.singleton_ptr
-  // resolves, so it can start before the guest is up.
+  // resolves, so it can start before the guest is up. The thread itself
+  // no-ops each tick unless frame_pacer_enabled is set
   void Bind(rex::Runtime* runtime);
 
   // Stops and joins the thread (OnShutdown, before the runtime is torn down).

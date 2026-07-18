@@ -134,7 +134,7 @@ class NocturnerecompApp : public rex::ReXApp {
     // exactly real-time from a dedicated steady-clock thread, so the PS1
     // simulation holds 60Hz instead of oscillating with vblank/present jitter
     // (see src/frame_pacer.h). Fast-forward now feeds it purely via the guest
-    // time scalar.
+    // time scalar. Gated via the frame_pacer_enabled cvar.
     nocturne::GetFramePacer().Bind(runtime());
 
     // Feed the F3 debug overlay's "Guest FPS" readout. RegisterTick fires once
