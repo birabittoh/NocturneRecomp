@@ -144,16 +144,6 @@ def post_process_shader_path(is_windows):
     return f".{sep}{SHADER_DIR}{sep}{SHADER_NAME}"
 
 
-def write_launcher(template_name, dest_path, exe):
-    script_dir = os.path.dirname(os.path.abspath(__file__))
-    template_path = os.path.join(script_dir, "launch_templates", template_name)
-    with open(template_path, "r", newline="") as f:
-        content = f.read().replace("{{EXE}}", exe)
-    newline = "\r\n" if template_name.endswith(".bat") else "\n"
-    with open(dest_path, "w", newline=newline) as f:
-        f.write(content)
-
-
 def do_package(name, project_name, is_windows):
     import zipfile
     import tarfile
@@ -169,26 +159,30 @@ def do_package(name, project_name, is_windows):
             print(f"+ cp {src} {pkg_dir}/")
             shutil.copy2(src, pkg_dir)
 
-    # Static options mirror scripts/run.py's fixed CLI flags. game_data_root is
-    # deliberately not set here: the config file overrides CLI args (see the
-    # CVar precedence rules), which would defeat the launcher script's detection
-    # of the assets/update/mods directories below.
     config_path = os.path.join(pkg_dir, f"{project_name}.toml")
     print(f"+ write {config_path}")
     with open(config_path, "w") as f:
-        f.write("gpu_allow_invalid_fetch_constants = true\n")
-        f.write("gpu_plugin = \"xenos\"\n")
-        f.write("license_mask = 1\n")
-        f.write("mnk_capture_mouse = false\n")
-        f.write("mnk_mode = true\n")
+        f.write("# Preferences\n")
         f.write("user_name = \"User\"\n")
         f.write("user_language = 1\n")
+        f.write("\n")
+        f.write("# Graphics settings\n")
+        f.write("gpu_plugin = \"xenos\" # \"\" -> Native renderer; \"xenos\" -> Xenia renderer\n")
+        f.write("gpu_backend = \"any\" # either \"d3d12\", \"vulkan\" or \"any\"\n")
         f.write("fullscreen = false\n")
         f.write("resolution = \"720p\"\n")
         f.write("vulkan_device = -1\n")
-
-
+        f.write(f'post_process_shader_path = "{post_process_shader_path(is_windows)}"\n')
+        f.write("post_process_shader_enabled = false\n")
+        f.write("frame_pacer_enabled = false\n")
         f.write("\n")
+        f.write("# Dump settings\n")
+        f.write("shader_dump_enabled = false\n")
+        f.write("texture_dump_enabled = false\n")
+        f.write('texture_dump_format = "png"\n')
+        f.write('texture_dump_skip_sizes = "512x256,1024x512,2048x1024,1920x1080,1280x720"\n')
+        f.write("\n")
+        f.write("# Keyboard controls\n")
         f.write(f'keybind_a = "Space"{"\t"*5}# Jump\n')
         f.write(f'keybind_b = "RMB"{"\t"*5}# Right Hand\n') 
         f.write(f'keybind_x = "LMB"{"\t"*5}# Left Hand\n')  
@@ -204,19 +198,23 @@ def do_package(name, project_name, is_windows):
         f.write('keybind_dpad_down = "S"\n')
         f.write('keybind_dpad_right = "D"\n')
         f.write("\n")
+        f.write("# Controller remappings\n")
         f.write('remap_start = "back"\n')
         f.write('remap_back = "start"\n')
+        f.write('remap_left_trigger = "left_trigger"\n')
         f.write("\n")
-        f.write("shader_dump_enabled = false\n")
-        f.write("texture_dump_enabled = false\n")
-        f.write('texture_dump_format = "png"\n')
-        f.write('texture_dump_skip_sizes = "512x256,1024x512,2048x1024,1920x1080,1280x720"\n')
-        f.write("\n")
-        f.write(f'post_process_shader_path = "{post_process_shader_path(is_windows)}"\n')
-        f.write("post_process_shader_enabled = false\n")
-        f.write("frame_pacer_enabled = false\n")
-        f.write("\n")
+        f.write("# Randomizer\n")
         f.write('rando_xex_name = "Rando.xex"\n')
+        f.write("\n")
+        f.write("\n")
+        f.write("# Danger zone\n")
+        f.write("gpu_allow_invalid_fetch_constants = true\n")
+        f.write("game_data_root = \"assets\"\n")
+        f.write("update_data_root = \"update\"\n")
+        f.write("mods_data_root = \"mods\"\n")
+        f.write("license_mask = 1\n")
+        f.write("mnk_mode = true\n")
+        f.write("mnk_capture_mouse = false\n")
 
     copy_post_process_shader(pkg_dir)
 
@@ -234,16 +232,6 @@ def do_package(name, project_name, is_windows):
     shutil.copy2(readme_src, pkg_dir)
 
     os.makedirs(os.path.join(pkg_dir, "game"), exist_ok=True)
-
-    if is_windows:
-        launcher_path = os.path.join(pkg_dir, "run.bat")
-        print(f"+ write {launcher_path}")
-        write_launcher("run.bat", launcher_path, exe)
-    else:
-        launcher_path = os.path.join(pkg_dir, "run.sh")
-        print(f"+ write {launcher_path}")
-        write_launcher("run.sh", launcher_path, exe)
-        os.chmod(launcher_path, 0o755)
 
     if is_windows:
         archive_path = f"{name}.zip"
