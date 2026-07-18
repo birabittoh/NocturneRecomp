@@ -192,15 +192,18 @@ class NocturnerecompApp : public rex::ReXApp {
   // mod at runtime, leaves it without backing GPU texture data and crashes
   // the first time it's used to render.
   //
-  // Also registers ImGui's embedded fixed-width font (ProggyClean) right
-  // after, purely so mods needing column-aligned text (hex dumps, tables)
-  // have a monospace option: look it up via ImGui::GetIO().Fonts->Fonts[1].
+  // Also registers ImGui's embedded fixed-width font (ProggyClean) first,
+  // purely so mods needing column-aligned text (hex dumps, tables) have a
+  // monospace option: look it up via ImGui::GetIO().Fonts->Fonts[0]. It must
+  // be added before PT Serif: the SDK sets io.FontDefault to whichever font
+  // is added last, and PT Serif is meant to be the UI's default font.
   void OnConfigureFonts(ImFontAtlas* atlas) override {
+    atlas->AddFontDefault();
+
     ImFontConfig cfg;
     cfg.FontDataOwnedByAtlas = false;
     atlas->AddFontFromMemoryTTF(const_cast<unsigned char*>(nocturne::kPTSerifRegularTTF),
                                 static_cast<int>(nocturne::kPTSerifRegularTTFSize), 16.0f, &cfg);
-    atlas->AddFontDefault();
   }
 
   // The overlay's whole color palette is mathematically derived (see
