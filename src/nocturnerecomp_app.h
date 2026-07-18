@@ -265,6 +265,10 @@ class NocturnerecompApp : public rex::ReXApp {
     // solid black screen despite the game running fine through the plugin.
     if (runtime()->graphics_system()) {
       REXGPU_INFO("Native renderer: gpu_plugin set, deferring to plugin's own presentation");
+      if (auto* presenter = runtime()->graphics_system()->presenter()) {
+        repaint_pump_ = std::make_unique<nocturne::RepaintPumpDrawer>(presenter);
+        presenter->AddUIDrawerFromUIThread(repaint_pump_.get(), 1000);
+      }
       return;
     }
 
