@@ -367,12 +367,75 @@ and render from that snapshot in `OnDraw`, which does run on the UI thread.
 See `src/event_pong/`, `src/blackboard/`, and
 `src/bus_inspector/` for the pattern.
 
-**Keybind collisions**: `rex::ui::RegisterBind` has no built-in conflict
-check. If two mods bind the same key, `ProcessKeyEvent` walks binds in
-registration order and only the first match fires and consumes the event --
-the later one is silently shadowed, not an error. Give every mod's bind both
-a unique name (it doubles as the backing CVar name) and, by convention, a
-unique default key.
+**Keybind collisions**: `rex::ui::RegisterBind` auto-resolves collisions
+rather than silently shadowing one bind. If two mods both default to the
+same key, the later-loaded one (lower `enabled_mods` priority) is moved to
+the next free key from a small pool (F5-F12, then F13-F24 as overflow),
+logged at WARN, and shown with a "moved" badge in the F1 mod manager. If the
+pool is exhausted the bind is left on its requested key but flagged as an
+unresolved conflict rather than silently colliding. A key the user has
+explicitly set (via config or the F1 overlay's click-to-rebind control) is
+never auto-moved. Give every mod's bind both a unique name (it doubles as
+the backing CVar name) and, by convention, a unique default key -- the
+auto-reassignment is a safety net, not a reason to stop picking distinct
+defaults.
+
+The F1 mod manager overlay also lists, per mod, the cvars it defines or
+overrides (old -> new value) and flags cvars that two mods have set to
+different values, so a silent `SetFlagByName` clash is at least visible --
+this is detection only; the underlying cvar is still last-write-wins.
+
+**Overlay visibility, the gamepad overlay menu, and window titles**:
+`RegisterBind` takes two optional trailing parameters: `is_visible` -- a
+`std::function<bool()>` returning whether the thing this bind toggles is
+currently shown -- and `window_title`, the exact string your overlay passes to
+`ImGui::Begin` (including any `##id` suffix):
+
+```cpp
+rex::ui::RegisterBind(
+    "bind_sample_overlay", "F9", "Toggle sample overlay",
+    [this] { visible_ = !visible_; },
+    [this] { return visible_; },
+    "Sample##overlay");
+```
+
+Passing `is_visible` costs nothing extra and makes your overlay show up, with
+its live shown/hidden state, in two places: the F1 mod manager's per-mod
+keybind list, and the gamepad-triggered overlay menu (default **Y**, with an
+**Insert** keyboard fallback for controller-less testing; both are ordinary
+rebindable binds) that lists every overlay -- vanilla and mod -- with
+`is_visible` set, grouped by owner, selectable to toggle without touching a
+keyboard.
+
+Passing `window_title` as well makes your overlay fully gamepad-navigable
+inside the SDK's two input modes (**Gameplay**, where the pad drives the game
+as normal, and **UI**, where it drives the overlays -- toggled by the guide
+button, with a **Home** keyboard fallback since guide is frequently
+intercepted by Steam/the OS before it reaches the game). In UI mode, one
+overlay is "active": left stick/D-pad and A drive ImGui's built-in gamepad nav
+inside it, B closes it, Y opens/activates the overlay menu, X cycles the
+active overlay among all currently-shown ones, right stick moves its window,
+and left-trigger + right stick resizes it. Without `window_title` your overlay
+can still be *toggled* from the overlay menu, it just can't be focused, moved,
+or resized by the gamepad controller (`rex::ui::GamepadUiController`, see
+`gamepad_ui.h`) the way the six base-app overlays are. A bind whose effective
+key is a gamepad button name (set via the settings overlay, the mod manager's
+rebind control, or by editing `nocturnerecomp.toml` directly) is dispatched on
+press while in Gameplay mode only -- in UI mode the gamepad controller owns
+the pad for navigation instead, so gamepad-keyed binds don't fire there.
+
+**This requires rebuilding every mod, not just ones adopting `is_visible`/
+`window_title`.** `RegisterBind` is a regular (mangled, not `extern "C"`)
+exported symbol in `rexruntime(rd).dll`; adding a parameter -- even an
+optional one with a default value -- changes that mangled name. Old code
+compiles against the new header unchanged (the default fills in the missing
+argument), but an **already-built** mod DLL that was never recompiled still
+imports the old symbol signature, which no longer exists in the new DLL's
+export table, and fails to load (not a graceful skip -- an OS-level
+missing-entry-point failure). Rebuild every mod (`make_mods.py`, or the direct
+`cmake --build` invocation if you're bypassing it for a config match -- see
+"Both builds, one DLL" below) any time you update the SDK, whether or not
+you're using anything new it added.
 
 ## Overriding a recompiled function
 
