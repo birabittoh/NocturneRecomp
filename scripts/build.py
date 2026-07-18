@@ -221,7 +221,7 @@ def do_package(name, project_name, is_windows):
     script_dir = os.path.dirname(os.path.abspath(__file__))
     pkg_scripts_dir = os.path.join(pkg_dir, "scripts")
     os.makedirs(pkg_scripts_dir, exist_ok=True)
-    for script_name in ("extract-game.py", "extract_tu.py"):
+    for script_name in ("extract_game.py", "extract_tu.py"):
         src = os.path.join(script_dir, script_name)
         print(f"+ cp {src} {pkg_scripts_dir}/")
         shutil.copy2(src, pkg_scripts_dir)

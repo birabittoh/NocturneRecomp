@@ -9,9 +9,30 @@ overlays, hooks) so the game runs natively and can be modded like a PC port.
 
 **You must own the game.** This project does **not** ship any copyrighted code, data, or assets. You provide your own legally dumped game.
 
+Feel free to visit NocturneRecomp's [official Discord server](https://discord.gg/DJe2pXMH7S) if you need any help.
+
 # Get the game on [Goopie](https://goopie.xyz)!
 
-## Building from scratch
+## Using a prebuilt release
+
+Using Goopie is preferable, as it makes it trivial to manage the game's assets, versions, mods, achievements, leaderboards, etc.
+
+If you still want to go the hard way, do this:
+
+1. Install Python if you don't have it already
+2. Extract the release you just downloaded
+3. Create a `game` directory next to the game executable
+4. Copy `9F2DAA064D494AA82B43B65362C59E9B89A88F8F58` inside the `game` directory
+5. Run `python scripts/extract_game.py` from the release directory
+6. Optional: if you also downloaded a title update (TU) package and build, copy it inside `game` and extract it with:
+
+   ```bash
+   python scripts/extract_tu.py --base assets/default.xex game/TU_1C42227_000010G000000.00000000000G4
+   ```
+
+Finally, run the game executable to play the game.
+
+## Building from scratch (development)
 
 ### 0. Install dependencies
 
@@ -43,7 +64,7 @@ python scripts/download-sdk.py
 Place your legally dumped XBLA package (the `LIVE`/STFS file) into `game/`, then extract it into `assets/`:
 
 ```bash
-python scripts/extract-game.py
+python scripts/extract_game.py
 ```
 
 `assets/default.xex` must exist before running codegen.
