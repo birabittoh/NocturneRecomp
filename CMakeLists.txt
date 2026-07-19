@@ -102,6 +102,7 @@ set(NOCTURNERECOMP_SOURCES
     src/native_command_processor.cpp
     src/ppc_interpreter.cpp
     src/rando_xex.cpp
+    src/room_presence.cpp
     ${NOCTURNE_FONTS_HEADER}
     ${NOCTURNE_ICON_HEADER}
     ${GENERATED_SOURCES}

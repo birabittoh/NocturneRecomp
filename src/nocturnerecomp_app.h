@@ -12,6 +12,7 @@
 #include <imgui.h>
 
 #include <rex/cvar.h>
+#include <rex/discord_rpc.h>
 #include <rex/input/input_system.h>
 #include <rex/rex_app.h>
 #include <rex/runtime.h>
@@ -38,6 +39,7 @@
 #include "native_immediate_drawer.h"
 #include "rando_xex.h"
 #include "repaint_pump.h"
+#include "room_presence.h"
 #include "version.generated.h"
 
 #include <rex/system/kernel_state.h>
@@ -125,6 +127,10 @@ class NocturnerecompApp : public rex::ReXApp {
 
     auto* ks = rex::system::kernel_state();
     nocturne::GetAccentColor().Bind(ks, user_data_root());
+
+    // Discord Rich Presence: shows the castle room the player is currently
+    // in, updated once per guest frame. See src/room_presence.h/.cpp.
+    nocturne::GetRoomPresence().Bind(ks, runtime());
 
     // Formerly the fast_forward mod; moved in-app (see fast_forward.h) since
     // it's a base feature, not optional content.
@@ -221,6 +227,7 @@ class NocturnerecompApp : public rex::ReXApp {
     // Stop the pacer thread before the runtime (and its guest memory) tears
     // down -- it dereferences runtime()->memory() every tick.
     nocturne::GetFramePacer().Stop();
+    rex::discord_rpc::Stop();
 #ifdef _WIN32
     timeEndPeriod(1);
 #endif
