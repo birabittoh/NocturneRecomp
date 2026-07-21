@@ -99,6 +99,7 @@ set(NOCTURNERECOMP_SOURCES
     src/achievements_menu.cpp
     src/fast_forward.cpp
     src/frame_pacer.cpp
+    src/headless_gpu_bridge.cpp
     src/native_command_processor.cpp
     src/ppc_interpreter.cpp
     src/rando_xex.cpp
@@ -129,6 +130,13 @@ rexglue_setup_target(nocturnerecomp)
 # statically-linked runtime), so it needs linking explicitly here.
 find_library(NOCTURNE_XXHASH_LIB NAMES xxhash PATHS ${CMAKE_SOURCE_DIR}/sdk/lib REQUIRED)
 target_link_libraries(nocturnerecomp PRIVATE ${NOCTURNE_XXHASH_LIB})
+
+# native_command_processor.cpp translates Xenos microcode to SPIR-V by hand
+# (SpirvShaderTranslator, no CommandProcessor/PipelineCache dependency), so it
+# needs the SDK's rexgpu-shader-translation library -- the same translation
+# code the rexgpu-xenos plugin uses, but linkable directly without loading
+# that runtime plugin. See docs/native-rendering.md.
+target_link_libraries(nocturnerecomp PRIVATE rex::gpu-shader-translation)
 
 # Title-update builds: the achievements bridge hooks the game's XAM thunks by
 # their hardcoded vanilla guest addresses (sub_825D8028 etc.). The title update

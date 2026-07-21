@@ -12,24 +12,34 @@ each step verified against a real capture or live run, not just code review.
 - **Headless boot** (`config.graphics = nullptr` in `OnPreSetup`, see
   `src/nocturnerecomp_app.h`): the documented "bring your own renderer" path.
   No `GraphicsSystem`/xenos plugin loaded at all.
-- **PM4 decode**: `rex::graphics::PacketDisassembler`
-  (`rexglue-sdk/src/graphics/packet_disassembler.cpp`) turns ring-buffer/
-  indirect-buffer PM4 packets into `PacketAction`s (mostly `RegisterWrite`).
-  Duplicated into the always-linked `rexruntime` (alongside `RegisterFile`)
-  since it normally only lives in the plugin-only `rexgpu-xenos` build.
-  `KernelState::HeadlessWriteRegister` (`rexglue-sdk/src/system/kernel_state.cpp`)
-  drives this on every `CP_RB_WPTR` write, follows `PM4_INDIRECT_BUFFER`
-  targets (the *real* per-frame command stream lives inside these, not the
-  top-level ring), and forwards every decoded packet to a registered
-  `native_gpu_command_callback_`.
-- **Game-specific interpreter**: `nocturne::NativeCommandProcessor`
-  (`src/native_command_processor.{h,cpp}`), registered via
-  `KernelState::SetNativeGpuCommandCallback`. Consumes `PacketAction`s into a
-  local `RegisterFile`, translates real Xenos microcode (captured from
-  `PM4_IM_LOAD`/`_IMMEDIATE`) via `SpirvShaderTranslator`, builds Vulkan
-  pipelines/descriptor sets by hand (no `CommandProcessor`/`PipelineCache`
-  dependency — deliberately reimplements just enough of the real Vulkan
-  backend's layout), and presents through a real swapchain.
+- **Generic SDK boundary**: `rex::system::KernelState::HeadlessGpuHooks`
+  (`rexglue-sdk/include/rex/system/kernel_state.h`) is the whole surface the
+  SDK exposes for a headless GPU stand-in: `VdInitializeRingBuffer_entry`/
+  `VdEnableRingBufferRPtrWriteBack_entry` (`rexglue-sdk/src/kernel/xboxkrnl/
+  xboxkrnl_video.cpp`) notify `on_ring_buffer_init`/`on_rptr_writeback_enabled`,
+  and the SDK installs an MMIO trap over the GPU register range
+  (0x7FC80000-0x7FCFFFFF) that forwards raw reads/writes to
+  `on_mmio_read`/`on_mmio_write` — no register semantics are interpreted in
+  the SDK itself. `SetGraphicsInterruptCallback`/
+  `DispatchGraphicsInterruptCallback` (also generic, Xbox-360-wide, not
+  specific to this renderer) drive the vblank pump.
+- **PM4 decode + game-specific interpreter**: `nocturne::HeadlessGpuBridge`
+  (`src/headless_gpu_bridge.{h,cpp}`), registered via
+  `KernelState::SetHeadlessGpuHooks` in `OnPreLaunchModule()`, implements the
+  actual headless GPU emulation: mirrors `CP_RB_WPTR` into the read-pointer
+  write-back address, walks/decodes newly-submitted PM4 packets via the
+  now-public `rex::graphics::PacketDisassembler` (part of the SDK's
+  `rex::gpu-shader-translation` library, linked directly rather than loading
+  the `rexgpu-xenos` plugin), follows `PM4_INDIRECT_BUFFER` targets, mirrors
+  SCRATCH_UMSK/ADDR/REG0-7 into guest memory, and dispatches (or defers) the
+  swap-completion interrupt. It forwards every decoded packet to
+  `nocturne::NativeCommandProcessor` (`src/native_command_processor.{h,cpp}`),
+  which consumes them into a local `RegisterFile`, translates real Xenos
+  microcode (captured from `PM4_IM_LOAD`/`_IMMEDIATE`) via
+  `SpirvShaderTranslator`, builds Vulkan pipelines/descriptor sets by hand (no
+  `CommandProcessor`/`PipelineCache` dependency — deliberately reimplements
+  just enough of the real Vulkan backend's layout), and presents through a
+  real swapchain.
 - **Presentation**: `NativeImmediateDrawer` (`src/native_immediate_drawer.h`)
   + a `VulkanProvider`/`Presenter` built manually in `OnPreLaunchModule()`
   (same mechanism `GraphicsSystem::SetupPresentation` uses for xenos, wired

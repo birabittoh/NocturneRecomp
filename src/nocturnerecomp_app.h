@@ -34,6 +34,7 @@
 #include "fast_forward.h"
 #include "frame_pacer.h"
 #include "fonts.generated.h"
+#include "headless_gpu_bridge.h"
 #include "icon.generated.h"
 #include "native_command_processor.h"
 #include "native_immediate_drawer.h"
@@ -346,7 +347,8 @@ class NocturnerecompApp : public rex::ReXApp {
       // Phase 3: hand decoded PM4 packets from the headless ring buffer to a
       // game-specific interpreter, which presents through this same
       // swapchain. Must be set before the guest starts submitting GPU
-      // commands, per SetNativeGpuCommandCallback's contract.
+      // commands, per HeadlessGpuBridge/KernelState::HeadlessGpuHooks'
+      // contract.
       native_command_processor_ = std::make_unique<nocturne::NativeCommandProcessor>(
           vulkan_provider_.get(), vulkan_presenter_.get());
 
@@ -368,10 +370,11 @@ class NocturnerecompApp : public rex::ReXApp {
       native_command_processor_->InitializeShaderReplacement(
           runtime()->ModOverlayRoots("shaders"), runtime()->ModDumpRoot());
 
-      rex::system::kernel_state()->SetNativeGpuCommandCallback(
+      headless_gpu_bridge_ = std::make_unique<nocturne::HeadlessGpuBridge>(
           [this](const rex::graphics::PacketInfo& info, const uint8_t* packet_base) {
             native_command_processor_->OnPacket(info, packet_base);
           });
+      rex::system::kernel_state()->SetHeadlessGpuHooks(headless_gpu_bridge_->BuildHooks());
 
       // This renderer has no GraphicsSystem, so nothing ever calls the normal
       // GraphicsSystem::SetHostSwapCallback -> Runtime -> ModRegistry::
@@ -426,5 +429,6 @@ class NocturnerecompApp : public rex::ReXApp {
   std::unique_ptr<rex::ui::vulkan::VulkanProvider> vulkan_provider_;
   std::unique_ptr<rex::ui::Presenter> vulkan_presenter_;
   std::unique_ptr<nocturne::NativeCommandProcessor> native_command_processor_;
+  std::unique_ptr<nocturne::HeadlessGpuBridge> headless_gpu_bridge_;
   std::unique_ptr<nocturne::RepaintPumpDrawer> repaint_pump_;
 };
