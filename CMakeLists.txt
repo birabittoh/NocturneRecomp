@@ -104,6 +104,7 @@ set(NOCTURNERECOMP_SOURCES
     src/ppc_interpreter.cpp
     src/rando_xex.cpp
     src/room_presence.cpp
+    src/xbox_live.cpp
     ${NOCTURNE_FONTS_HEADER}
     ${NOCTURNE_ICON_HEADER}
     ${GENERATED_SOURCES}
