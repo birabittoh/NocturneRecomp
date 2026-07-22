@@ -170,7 +170,7 @@ def do_package(name, project_name, is_windows):
         f.write("gpu_plugin = \"xenos\" # \"\" -> Native renderer; \"xenos\" -> Xenia renderer\n")
         f.write("gpu_backend = \"any\" # either \"d3d12\", \"vulkan\" or \"any\"\n")
         f.write("fullscreen = false\n")
-        f.write("resolution = \"720p\" # either \"720p\" or \"1080p\"n")
+        f.write("resolution = \"720p\" # either \"720p\" or \"1080p\"\n")
         f.write("vulkan_device = -1\n")
         f.write(f'post_process_shader_path = "{post_process_shader_path(is_windows)}"\n')
         f.write("post_process_shader_enabled = false\n")
