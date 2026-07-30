@@ -121,6 +121,7 @@ class NocturnerecompApp : public rex::ReXApp {
     rex::system::GameDataSelectorSettings settings;
     settings.default_xex_sha256 = "26a58b074c5dd6185b77a8111a0012866d11cba674b4b0810d79dbf07ad68aa6";
     settings.is_xbla = true;
+    settings.config_path = config_path();
 
 #ifdef NOCTURNE_TU
     settings.title_update_sha256 = "226420345845a2077ee362ad68e8d444afce549a5eeb7f8c43aebae232fb4b8c";
