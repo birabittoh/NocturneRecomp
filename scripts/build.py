@@ -139,11 +139,6 @@ def copy_post_process_shader(dest_root):
     shutil.copy2(src, dest)
 
 
-def post_process_shader_path(is_windows):
-    sep = "\\\\" if is_windows else "/"
-    return f".{sep}{SHADER_DIR}{sep}{SHADER_NAME}"
-
-
 def do_package(name, project_name, is_windows):
     import zipfile
     import tarfile
@@ -158,65 +153,6 @@ def do_package(name, project_name, is_windows):
         if os.path.isfile(src):
             print(f"+ cp {src} {pkg_dir}/")
             shutil.copy2(src, pkg_dir)
-
-    config_path = os.path.join(pkg_dir, f"{project_name}.toml")
-    print(f"+ write {config_path}")
-    with open(config_path, "w") as f:
-        f.write("# Preferences\n")
-        f.write("user_name = \"User\"\n")
-        f.write("user_language = 1\n")
-        f.write("\n")
-        f.write("# Graphics settings\n")
-        f.write("gpu_plugin = \"xenos\" # \"\" -> Native renderer; \"xenos\" -> Xenia renderer\n")
-        f.write("gpu_backend = \"any\" # either \"d3d12\", \"vulkan\" or \"any\"\n")
-        f.write("fullscreen = false\n")
-        f.write("resolution = \"720p\" # either \"720p\" or \"1080p\"\n")
-        f.write("vulkan_device = -1\n")
-        f.write(f'post_process_shader_path = "{post_process_shader_path(is_windows)}"\n')
-        f.write("post_process_shader_enabled = false\n")
-        f.write("frame_pacer_enabled = false\n")
-        f.write("\n")
-        f.write("# Dump settings\n")
-        f.write("shader_dump_enabled = false\n")
-        f.write("texture_dump_enabled = false\n")
-        f.write('texture_dump_format = "png"\n')
-        f.write('texture_dump_skip_sizes = "512x256,1024x512,2048x1024,1920x1080,1280x720"\n')
-        f.write("\n")
-        f.write("# Keyboard controls\n")
-        f.write(f'keybind_a = "Space"{"\t"*5}# Jump\n')
-        f.write(f'keybind_b = "RMB"{"\t"*5}# Right Hand\n') 
-        f.write(f'keybind_x = "LMB"{"\t"*5}# Left Hand\n')  
-        f.write(f'keybind_y = "Shift"{"\t"*5}# Backdash/Item Crash\n')
-        f.write(f'keybind_left_trigger = "M"{"\t"*3}# Map\n')   
-        f.write(f'keybind_right_trigger = "R"{"\t"*3}# Soul of Wolf\n')
-        f.write(f'keybind_left_shoulder = "Q"{"\t"*3}# Form of Mist\n')
-        f.write(f'keybind_right_shoulder = "Control"{"\t"*1}# Soul of Bat\n')
-        f.write(f'keybind_back = "E"{"\t"*5}# Inventory\n')
-        f.write(f'keybind_start = "Escape"{"\t"*3}# Start\n')
-        f.write('keybind_dpad_up = "W"\n')
-        f.write('keybind_dpad_left = "A"\n')
-        f.write('keybind_dpad_down = "S"\n')
-        f.write('keybind_dpad_right = "D"\n')
-        f.write('bind_fast_forward = "Tab"\n')
-        f.write('bind_fast_forward_gamepad = "LThumb"\n')
-        f.write("\n")
-        f.write("# Controller remappings\n")
-        f.write('remap_start = "back"\n')
-        f.write('remap_back = "start"\n')
-        f.write('remap_left_trigger = "left_trigger"\n')
-        f.write("\n")
-        f.write("# Randomizer\n")
-        f.write('rando_xex_name = "Rando.xex"\n')
-        f.write("\n")
-        f.write("\n")
-        f.write("# Danger zone\n")
-        f.write("gpu_allow_invalid_fetch_constants = true\n")
-        f.write("game_data_root = \"assets\"\n")
-        f.write("update_data_root = \"update\"\n")
-        f.write("mods_data_root = \"mods\"\n")
-        f.write("license_mask = 1\n")
-        f.write("mnk_mode = true\n")
-        f.write("mnk_capture_mouse = false\n")
 
     copy_post_process_shader(pkg_dir)
 

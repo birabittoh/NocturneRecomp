@@ -16,6 +16,7 @@
 #include <rex/input/input_system.h>
 #include <rex/rex_app.h>
 #include <rex/runtime.h>
+#include <rex/system/game_data_selector.h>
 #include <rex/version.h>
 #include <rex/ui/imgui_drawer.h>
 #include <rex/ui/imgui_theme.h>
@@ -41,6 +42,7 @@
 #include "rando_xex.h"
 #include "repaint_pump.h"
 #include "room_presence.h"
+#include "settings.h"
 #include "version.generated.h"
 
 #include <rex/system/kernel_state.h>
@@ -100,6 +102,37 @@ class NocturnerecompApp : public rex::ReXApp {
     if (rando_active_) {
       nocturne::InstallRandoOverrides(runtime(), rando_base_xex_, rando_patched_xex_);
     }
+  }
+
+  bool SetupEnvironment() override {
+    // Game defaults for SDK cvars must land before the SDK loads any config
+    // file, so a saved/CLI/env override still wins.
+    nocturne::ApplySettingDefaults();
+
+    if (!rex::ReXApp::SetupEnvironment())
+      return false;
+
+    // User-facing settings (Fullscreen, Resolution, ...) live in their own
+    // file, separate from the advanced cvars in the app's normal config, and
+    // are loaded last so they win over both.
+    if (std::filesystem::exists(user_settings_path()))
+      rex::cvar::LoadConfig(user_settings_path());
+
+    rex::system::GameDataSelectorSettings settings;
+    settings.default_xex_sha256 = "26a58b074c5dd6185b77a8111a0012866d11cba674b4b0810d79dbf07ad68aa6";
+    settings.is_xbla = true;
+
+#ifdef NOCTURNE_TU
+    settings.title_update_sha256 = "226420345845a2077ee362ad68e8d444afce549a5eeb7f8c43aebae232fb4b8c";
+#endif
+
+    return rex::system::GameDataSelector::EnsureGameData(settings);
+  }
+
+  std::unique_ptr<rex::ui::ImGuiDialog> OnCreateUserSettingsOverlay() override {
+    return nocturne::CreateSettingsDialog(
+        imgui_drawer(), window(), user_settings_path(), config_path(),
+        static_cast<rex::input::InputSystem*>(runtime()->input_system()));
   }
 
   void OnPostSetup() override {
@@ -431,4 +464,6 @@ class NocturnerecompApp : public rex::ReXApp {
   std::unique_ptr<nocturne::NativeCommandProcessor> native_command_processor_;
   std::unique_ptr<nocturne::HeadlessGpuBridge> headless_gpu_bridge_;
   std::unique_ptr<nocturne::RepaintPumpDrawer> repaint_pump_;
+
+  std::filesystem::path user_settings_path() const { return user_data_root() / "settings.toml"; }
 };
