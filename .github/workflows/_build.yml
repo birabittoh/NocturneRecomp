@@ -54,6 +54,12 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          # Full history + tags: CMakeLists.txt derives NOCTURNE_VERSION from
+          # `git describe --tags`, and a shallow checkout has no tags, so the
+          # build would stamp 0.0.0 and reject mods that declare a
+          # `game_version` requirement.
+          fetch-depth: 0
 
       - name: Install dependencies (Linux)
         if: matrix.platform == 'linux-x64' || matrix.platform == 'linux-arm64'
