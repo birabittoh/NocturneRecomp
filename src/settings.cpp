@@ -92,23 +92,42 @@ constexpr std::array kGameDefaults = {
 // the generic DrawCvarWidget path, but are still listed here so the generic
 // Reset-All / restart-tracking loops cover them; GetFlagInfo/ResetToDefault
 // etc. no-op harmlessly for "vulkan_device" on a build without Vulkan.
-constexpr std::array<const char*, 8> kBasicCvarNames = {
-    "fullscreen",    "resolution",    "resolution_scale", "user_name",
-    "user_language", "gpu_backend", "vulkan_device",     "gpu_plugin"};
+constexpr std::array<const char*, 10> kBasicCvarNames = {
+    "fullscreen",  "resolution",    "resolution_scale", "user_name", "user_language",
+    "gpu_backend", "vulkan_device", "gpu_plugin", "audio_mute", "audio_volume"};
 
-// resolution_scale value that renders at "100%" (native) for a given display
-// resolution. The SDK's resolution_scale is an integer EDRAM/draw
-// supersampling factor (range 1-8), not a fractional multiplier, so this
-// table is the source of truth for what "100%" means per resolution;
-// DrawRenderScaleRow derives 50%-100% steps from it at runtime.
-int ResolutionScaleFor(const std::string& resolution) {
-  if (resolution == "1080p")
-    return 2;
-  if (resolution == "1440p")
-    return 3;
-  if (resolution == "4K")
-    return 4;
-  return 1;  // 720p, and fallback for anything unrecognized.
+// The SDK's resolution_scale is an integer EDRAM/draw supersampling factor
+// (range 1-8), independent of the display resolution -- it's an absolute
+// multiplier on the base render target, not a percentage of "native" for
+// whatever Resolution happens to be set to.
+constexpr int kMaxResolutionScale = 8;
+
+// audio_volume is stored (and applied to samples by the SDL audio driver) as
+// linear amplitude, but human loudness perception is roughly logarithmic --
+// a linear slider (amplitude == percent/100) would spend most of its travel
+// on barely-perceptible changes near the top end and cram all the audible
+// range into the last few percent at the bottom. Map the displayed 0-100%
+// through a dB curve instead: -40dB at 0% (quiet enough to treat as silence
+// below) up to 0dB (full amplitude) at 100%, evenly spaced in dB rather than
+// in amplitude.
+constexpr double kMinVolumeDb = -40.0;
+
+double VolumeAmplitudeFromPercent(int percent) {
+  if (percent <= 0)
+    return 0.0;
+  if (percent >= 100)
+    return 1.0;
+  double db = kMinVolumeDb * (100 - percent) / 100.0;
+  return std::pow(10.0, db / 20.0);
+}
+
+int VolumePercentFromAmplitude(double amplitude) {
+  if (amplitude <= 0.0)
+    return 0;
+  double db = 20.0 * std::log10(amplitude);
+  if (db <= kMinVolumeDb)
+    return 0;
+  return std::clamp(static_cast<int>(std::lround(100.0 - db * 100.0 / kMinVolumeDb)), 0, 100);
 }
 
 struct LanguageOption {
@@ -119,27 +138,17 @@ struct LanguageOption {
 // XLanguage IDs per the Xbox 360 kernel's user_language cvar; note 10 is
 // intentionally absent (not a valid XLanguage).
 constexpr std::array kLanguageOptions = {
-    LanguageOption{"1", "EN (English)"},
-    LanguageOption{"2", "JA (Japanese)"},
-    LanguageOption{"3", "DE (German)"},
-    LanguageOption{"4", "FR (French)"},
-    LanguageOption{"5", "ES (Spanish)"},
-    LanguageOption{"6", "IT (Italian)"},
-    LanguageOption{"7", "KO (Korean)"},
-    LanguageOption{"8", "ZH (Traditional Chinese)"},
-    LanguageOption{"9", "PT (Portuguese)"},
-    LanguageOption{"11", "PL (Polish)"},
-    LanguageOption{"12", "RU (Russian)"},
-    LanguageOption{"13", "SV (Swedish)"},
-    LanguageOption{"14", "TR (Turkish)"},
-    LanguageOption{"15", "NB (Norwegian)"},
-    LanguageOption{"16", "NL (Dutch)"},
-    LanguageOption{"17", "ZH (Simplified Chinese)"},
+    LanguageOption{"1", "English"},
+    LanguageOption{"2", "Japanese"},
+    LanguageOption{"3", "German"},
+    LanguageOption{"4", "French"},
+    LanguageOption{"5", "Spanish"},
+    LanguageOption{"6", "Italian"},
 };
 
 // cvars rendered generically in the collapsed Advanced section, persisted to
 // the app's normal cvar config (nocturnerecomp.toml).
-constexpr std::array<const char*, 11> kAdvancedCvarNames = {
+constexpr std::array<const char*, 8> kAdvancedCvarNames = {
     "post_process_shader_enabled",
     "post_process_shader_path",
     "frame_pacer_enabled",
@@ -147,15 +156,20 @@ constexpr std::array<const char*, 11> kAdvancedCvarNames = {
     "texture_dump_enabled",
     "texture_dump_format",
     "texture_dump_skip_sizes",
-    "mnk_capture_mouse",
-    "mnk_mode",
-    "gpu_allow_invalid_fetch_constants",
     "rando_xex_name",
 };
 
 std::vector<std::string> BasicCvarNames() {
   return std::vector<std::string>(kBasicCvarNames.begin(), kBasicCvarNames.end());
 }
+
+// Populated once by PrewarmSettingsDialogCaches(); every CuratedSettingsDialog
+// instance reads from these rather than re-running the underlying (expensive)
+// enumeration itself.
+std::vector<std::string> g_gpu_plugin_names;
+#if REX_HAS_VULKAN
+std::vector<rex::ui::vulkan::DeviceInfo> g_vulkan_devices;
+#endif
 
 class CuratedSettingsDialog : public rex::ui::ImGuiDialog {
  public:
@@ -168,9 +182,9 @@ class CuratedSettingsDialog : public rex::ui::ImGuiDialog {
         user_settings_path_(std::move(user_settings_path)),
         app_config_path_(std::move(app_config_path)),
         input_system_(input_system) {
-    gpu_plugin_names_ = rex::system::EnumerateGpuPlugins();
+    gpu_plugin_names_ = g_gpu_plugin_names;
 #if REX_HAS_VULKAN
-    vulkan_devices_ = rex::ui::vulkan::EnumerateDevices();
+    vulkan_devices_ = g_vulkan_devices;
 #endif
   }
 
@@ -200,6 +214,8 @@ class CuratedSettingsDialog : public rex::ui::ImGuiDialog {
     DrawFullscreenRow();
     DrawResolutionRow();
     DrawRenderScaleRow();
+    DrawAudioMuteRow();
+    DrawAudioVolumeRow();
     DrawUserNameRow();
     DrawLanguageRow();
     DrawGpuPluginRow();
@@ -305,6 +321,48 @@ class CuratedSettingsDialog : public rex::ui::ImGuiDialog {
     ImGui::PopID();
   }
 
+  void DrawAudioMuteRow() {
+    const auto* entry = rex::cvar::GetFlagInfo("audio_mute");
+    if (!entry)
+      return;
+    ImGui::TextUnformatted("Mute Audio");
+    ImGui::SameLine(180.0f);
+    ImGui::PushID("audio_mute");
+    if (rex::ui::DrawCvarWidget(*entry, 160.0f, /*persist=*/true)) {
+      SaveBasic();
+    }
+    ImGui::PopID();
+  }
+
+  // audio_volume is a Double cvar (0.0-1.0 linear amplitude, applied directly
+  // to samples by the SDL audio driver); DrawCvarWidget's generic Double path
+  // is a plain InputDouble box, not a slider, so this draws its own row the
+  // same way DrawRenderScaleRow does for resolution_scale -- displaying and
+  // editing a perceptually-spaced percentage (see VolumeAmplitudeFromPercent)
+  // rather than the raw amplitude directly.
+  void DrawAudioVolumeRow() {
+    const auto* entry = rex::cvar::GetFlagInfo("audio_volume");
+    if (!entry)
+      return;
+    const auto* mute_entry = rex::cvar::GetFlagInfo("audio_mute");
+    if (mute_entry && mute_entry->getter() == "true")
+      return;
+
+    int percent = VolumePercentFromAmplitude(std::atof(entry->getter().c_str()));
+
+    ImGui::TextUnformatted("Volume");
+    ImGui::SameLine(180.0f);
+    ImGui::SetNextItemWidth(160.0f);
+    ImGui::PushID("audio_volume");
+    bool changed = ImGui::SliderInt("##v", &percent, 0, 100, "%d%%");
+    if (changed) {
+      rex::cvar::SetFlagByName("audio_volume", std::to_string(VolumeAmplitudeFromPercent(percent)),
+                               /*persist=*/true);
+      SaveBasic();
+    }
+    ImGui::PopID();
+  }
+
   void DrawResolutionRow() {
     const auto* entry = rex::cvar::GetFlagInfo("resolution");
     if (!entry)
@@ -323,75 +381,38 @@ class CuratedSettingsDialog : public rex::ui::ImGuiDialog {
     ImGui::SameLine(180.0f);
     ImGui::SetNextItemWidth(160.0f);
     ImGui::PushID("resolution");
-    if (ImGui::BeginCombo("##v", kOptions[cur_idx])) {
-      for (int i = 0; i < static_cast<int>(kOptions.size()); ++i) {
-        bool selected = (i == cur_idx);
-        if (ImGui::Selectable(kOptions[i], selected)) {
-          rex::cvar::SetFlagByName("resolution", kOptions[i], /*persist=*/true);
-          rex::cvar::SetFlagByName("resolution_scale",
-                                   std::to_string(ResolutionScaleFor(kOptions[i])),
-                                   /*persist=*/true);
-          SaveBasic();
-        }
-        if (selected)
-          ImGui::SetItemDefaultFocus();
-      }
-      ImGui::EndCombo();
+    int idx = cur_idx;
+    // Format string is a fixed label, not a %d placeholder -- SliderInt just
+    // displays it verbatim, same trick DrawRenderScaleRow uses for "50%" etc.
+    if (ImGui::SliderInt("##v", &idx, 0, static_cast<int>(kOptions.size()) - 1,
+                         kOptions[idx])) {
+      rex::cvar::SetFlagByName("resolution", kOptions[idx], /*persist=*/true);
+      SaveBasic();
     }
     ImGui::PopID();
   }
 
-  // resolution_scale is an integer cvar (range 1-8) whose named-resolution
-  // steps (1/2/3/4 for 720p/1080p/1440p/4K, per ResolutionScaleFor) are the
-  // only meaningful values -- each option here renders at one of the named
-  // resolutions up to and including the current display resolution (e.g. at
-  // 1440p: render at 720p/1080p/1440p, i.e. 33%/67%/100%). Rather than
-  // sliding over the percentage itself (which lets the handle rest on
-  // in-between values while dragging, since e.g. 73% is a perfectly valid
-  // int even though no scale produces it), the slider's domain *is* the
-  // list of valid scales, so it's mechanically impossible to drag to
-  // anything else. 720p's base of 1 has only one valid scale, so the
-  // slider is disabled there instead of doing nothing.
+  // resolution_scale is an integer cvar (range 1-kMaxResolutionScale), a
+  // plain EDRAM/draw supersampling factor entirely independent of the
+  // Resolution cvar -- it no longer expresses itself as a percentage of the
+  // current display resolution.
   void DrawRenderScaleRow() {
     const auto* scale_entry = rex::cvar::GetFlagInfo("resolution_scale");
-    const auto* res_entry = rex::cvar::GetFlagInfo("resolution");
-    if (!scale_entry || !res_entry)
+    if (!scale_entry)
       return;
 
-    int base = ResolutionScaleFor(res_entry->getter());
     int current_scale = std::atoi(scale_entry->getter().c_str());
-
-    std::vector<int> valid_scales;
-    for (int k = 1; k <= base; ++k) {
-      valid_scales.push_back(k);
-    }
-
-    int idx = 0;
-    for (int i = 0; i < static_cast<int>(valid_scales.size()); ++i) {
-      if (valid_scales[i] == current_scale) {
-        idx = i;
-        break;
-      }
-    }
-
-    int max_idx = static_cast<int>(valid_scales.size()) - 1;
-    if (max_idx == 0)
-      return;  // Only one valid scale (720p) -- nothing to offer, hide the row.
+    int idx = std::clamp(current_scale, 1, kMaxResolutionScale);
 
     ImGui::PushID("render_scale_percent");
 
-    ImGui::TextUnformatted("Render Resolution");
+    ImGui::TextUnformatted("Render Scale");
     ImGui::SameLine(180.0f);
     ImGui::SetNextItemWidth(160.0f);
-    bool changed = ImGui::SliderInt("##v", &idx, 0, max_idx, "");
-
-    int display_percent = static_cast<int>(std::lround(100.0 * valid_scales[idx] / base));
-    ImGui::SameLine();
-    ImGui::Text("%d%%", display_percent);
+    bool changed = ImGui::SliderInt("##v", &idx, 1, kMaxResolutionScale, "%dx");
 
     if (changed) {
-      rex::cvar::SetFlagByName("resolution_scale", std::to_string(valid_scales[idx]),
-                               /*persist=*/true);
+      rex::cvar::SetFlagByName("resolution_scale", std::to_string(idx), /*persist=*/true);
       SaveBasic();
     }
     ImGui::PopID();
@@ -514,7 +535,7 @@ class CuratedSettingsDialog : public rex::ui::ImGuiDialog {
     if (!entry)
       return;
 
-    static constexpr const char* kNativeLabel = "Native (built-in renderer)";
+    static constexpr const char* kNativeLabel = "experimental";
     auto label_for = [&](const std::string& id) -> const char* {
       return id.empty() ? kNativeLabel : id.c_str();
     };
@@ -656,6 +677,13 @@ void ApplySettingDefaults() {
   for (const auto& d : kGameDefaults) {
     rex::cvar::SetDefaultValue(d.cvar, d.value);
   }
+}
+
+void PrewarmSettingsDialogCaches() {
+  g_gpu_plugin_names = rex::system::EnumerateGpuPlugins();
+#if REX_HAS_VULKAN
+  g_vulkan_devices = rex::ui::vulkan::EnumerateDevices();
+#endif
 }
 
 std::unique_ptr<rex::ui::ImGuiDialog> CreateSettingsDialog(

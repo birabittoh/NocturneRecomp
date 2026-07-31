@@ -75,6 +75,11 @@ class NocturnerecompApp : public rex::ReXApp {
     // time (src/version.generated.h, see CMakeLists.txt).
     config.game_version = nocturne::kVersionString;
 
+    // Identifies this project to the SDK's mod manager overlay ("All" tab)
+    // as the goopie.xyz `recompName` to query the public mod catalog for
+    // (see docs/MODS_API.md). Empty would disable the tab outright.
+    config.catalog_name = "nocturnerecomp";
+
     // Explicitly go headless (no xenos/graphics backend) rather than relying
     // on gpu_plugin being unset -- this is the documented entry point for
     // bringing your own renderer via OnCreateImmediateDrawer/OnPreLaunchModule.
@@ -137,6 +142,12 @@ class NocturnerecompApp : public rex::ReXApp {
   }
 
   void OnPostSetup() override {
+    // Runs the settings overlay's GPU plugin / Vulkan device enumeration now,
+    // rather than paying for it on the player's first F4 press (the SDK
+    // destroys and recreates the overlay on every close/open, so without this
+    // it re-ran on every single open). See PrewarmSettingsDialogCaches.
+    nocturne::PrewarmSettingsDialogCaches();
+
     // Bridge the guest "Achievements" pause-menu entry (XamShowAchievementsUI,
     // intercepted in achievements_menu.cpp) to the SDK's built-in achievements
     // overlay: guest A opens it (and pauses the game), controller B closes it.

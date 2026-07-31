@@ -30,6 +30,18 @@ namespace nocturne {
 // loaded), so a saved config or CLI/env override still takes precedence.
 void ApplySettingDefaults();
 
+// Runs the GPU plugin / Vulkan device enumeration that CreateSettingsDialog's
+// dropdowns need, once, and caches the results for every dialog instance
+// created afterwards. Both enumerations are expensive (EnumerateDevices
+// creates and tears down a whole VkInstance to query physical devices) --
+// without this, that cost lands on the first frame after the player presses
+// F4, since the SDK destroys and recreates the dialog on every close/open
+// (see rex_app.cpp's user_settings_overlay_ handling) rather than keeping one
+// alive. Call once after graphics setup, while the game's own render loop is
+// still idle/loading, so the hitch happens there instead of on the player's
+// first F4 press.
+void PrewarmSettingsDialogCaches();
+
 // Creates the curated settings overlay. `user_settings_path` is where the
 // friendly settings (Fullscreen, Resolution) are persisted;
 // `app_config_path` is where everything else (the Advanced section) is
