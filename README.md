@@ -1,7 +1,7 @@
 # NocturneRecomp
 
 Static recompilation of **Castlevania: Symphony of the Night** (Xbox Live Arcade) for Windows
-and Linux, built on the [ReXGlue SDK](https://github.com/rexglue/rexglue-sdk).
+and Linux, built on the [ReXGlue SDK](https://github.com/birabittoh/rexglue-sdk).
 
 This project converts the Xbox 360 PowerPC `default.xex` into native x86_64
 code at build time, then wraps it with a small host runtime (logging,
@@ -15,24 +15,13 @@ Feel free to visit NocturneRecomp's [official Discord server](https://discord.gg
 
 ## Using a prebuilt release
 
-Using Goopie is preferable, as it makes it trivial to manage the game's assets, versions, mods, achievements, leaderboards, etc.
+Get the latest stable build from the [Releases](../../releases/latest) page.
 
-If you still want to go the hard way, do this:
+Nightly builds are available from [CI artifacts](https://nightly.link/birabittoh/NocturneRecomp/workflows/ci/main?preview).
 
-1. Install Python if you don't have it already
-2. Extract the release you just downloaded
-3. Create a `game` directory next to the game executable
-4. Copy `9F2DAA064D494AA82B43B65362C59E9B89A88F8F58` inside the `game` directory
-5. Run `python scripts/extract_game.py` from the release directory
-6. Optional: if you also downloaded a title update (TU) package and build, copy it inside `game` and extract it with:
+Just extract the archive, run the executable and it will prompt you to extract the game.
 
-   ```bash
-   python scripts/extract_tu.py --base assets/default.xex game/TU_1C42227_000010G000000.00000000000G4
-   ```
-
-Finally, run the game executable to play the game.
-
-## Building from scratch (development)
+## Building from scratch
 
 ### 0. Install dependencies
 
@@ -56,7 +45,7 @@ cd NocturneRecomp
 ### 2. Download the ReXGlue SDK
 
 ```bash
-python scripts/download-sdk.py
+python scripts/download-sdk.py --pinned
 ```
 
 ### 3. Provide your game
@@ -79,21 +68,6 @@ python scripts/build.py
 
 # Title Update
 python scripts/build.py --tu /path/to/TU_*
-```
-
-### 5. Run
-
-```bash
-python scripts/run.py
-```
-
-This runs the freshly built executable with the correct CLI arguments
-(`--game_data_root=assets`, `--license_mask=1`).
-
-Any extra arguments are forwarded to the executable, e.g.:
-
-```bash
-python scripts/run.py --vulkan_device 1
 ```
 
 ## Options

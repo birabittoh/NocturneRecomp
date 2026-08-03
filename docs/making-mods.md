@@ -9,8 +9,9 @@ and a single mod can mix both:
 - **Code**: a native DLL that hooks into the app lifecycle (register ImGui
   overlays, keybinds, read guest memory, etc.), via the SDK's mod-plugin ABI.
 
-Mods are enabled in priority order by the `enabled_mods` key in
-`nocturnerecomp.toml`; earlier entries win on conflicting files.
+Mods are enabled in priority order by the `[[mods]]` list in
+`mods/mods.toml` (each entry an `id`/`enabled` pair); earlier entries win on
+conflicting files.
 
 Mod **source** and build tooling live in a separate repo,
 [birabittoh/NocturneRecomp-Mods](https://github.com/birabittoh/NocturneRecomp-Mods)
@@ -240,12 +241,22 @@ if you just want to install one rather than build it yourself.
 
 ### 4. Enable it
 
-Add the mod's folder name to `enabled_mods` in `nocturnerecomp.toml`. Order
+Add a `[[mods]]` entry for the mod's folder name to `mods/mods.toml`. Order
 matters: earlier entries take priority when multiple mods touch the same
 file:
 
 ```toml
-enabled_mods = "music_player,sample_overlay,memory_peek"
+[[mods]]
+enabled = true
+id = 'music_player'
+
+[[mods]]
+enabled = true
+id = 'sample_overlay'
+
+[[mods]]
+enabled = true
+id = 'memory_peek'
 ```
 
 Then run the game (`python scripts/run.py`) and press **F1** to open the mod
