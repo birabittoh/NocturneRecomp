@@ -80,6 +80,23 @@ class NocturnerecompApp : public rex::ReXApp {
     // (see docs/MODS_API.md). Empty would disable the tab outright.
     config.catalog_name = "nocturnerecomp";
 
+    // Lets the SDK's AutoUpdater (F1 mod manager overlay) check
+    // github.com/birabittoh/NocturneRecomp's Releases for a newer build and
+    // offer to download + apply it. "{tag}"/"{platform}" are substituted by
+    // the SDK. A NOCTURNE_TU build must only ever be offered another TU
+    // build (never a vanilla one, and vice versa) since the two patch
+    // different base addresses so the asset name itself encodes which
+    // variant this binary is.
+#ifdef NOCTURNE_TU
+    config.update_asset_format = "nocturnerecomp-tu-{tag}-{platform}";
+#else
+    config.update_asset_format = "nocturnerecomp-{tag}-{platform}";
+#endif
+    config.update_repo = "birabittoh/NocturneRecomp";
+
+    // One-shot toast shown top-left as the game starts
+    config.startup_hint = "Press F4 to open settings.";
+
     // Explicitly go headless (no xenos/graphics backend) rather than relying
     // on gpu_plugin being unset -- this is the documented entry point for
     // bringing your own renderer via OnCreateImmediateDrawer/OnPreLaunchModule.

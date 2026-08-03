@@ -11,9 +11,11 @@
 #include <vector>
 
 #include <rex/cvar.h>
+#include <rex/filesystem.h>
 #include <rex/input/input_system.h>
 #include <rex/platform.h>
 #include <rex/platform/process.h>
+#include <rex/system/auto_updater.h>
 #include <rex/system/gpu_plugin.h>
 #include <rex/ui/imgui_widgets.h>
 #include <rex/ui/overlay/settings_overlay.h>
@@ -211,6 +213,8 @@ class CuratedSettingsDialog : public rex::ui::ImGuiDialog {
       ImGui::Separator();
     }
 
+    DrawUpdateSection();
+
     DrawFullscreenRow();
     DrawResolutionRow();
     DrawRenderScaleRow();
@@ -307,6 +311,75 @@ class CuratedSettingsDialog : public rex::ui::ImGuiDialog {
 
   void SaveBasic() { rex::cvar::SaveConfigSubset(user_settings_path_, BasicCvarNames()); }
   void SaveAdvanced() { rex::cvar::SaveConfig(app_config_path_); }
+
+  // Game self-update (see rex::system::AutoUpdater), surfaced here rather
+  // than the SDK's mod manager overlay (F1) since a player who never touches
+  // mods should still be told about an available update
+  void DrawUpdateSection() {
+    if (!update_check_requested_) {
+      update_check_requested_ = true;
+      auto_updater_.CheckAsync();
+    }
+
+    // A previous session already downloaded and staged an update (whether or
+    // not this one ever calls CheckAsync/InstallAsync again); offer the
+    // restart regardless of auto_updater_'s own in-memory state.
+    if (rex::system::AutoUpdater::HasPendingSelfUpdate(rex::filesystem::GetExecutableFolder())) {
+      ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.45f, 0.85f, 0.55f, 1.0f));
+      ImGui::TextWrapped("An update has been downloaded.");
+      ImGui::PopStyleColor();
+      ImGui::SameLine();
+      if (ImGui::SmallButton("Restart & Apply##autoupdate")) {
+        // This install root contains the running executable itself,
+        // which stays locked for this process's whole lifetime (see
+        // AutoUpdater::ApplyAndRestart's contract). The spawned helper
+        // outlives this process, applies the swap, and launches the new exe.
+        if (rex::system::AutoUpdater::ApplyAndRestart(rex::filesystem::GetExecutableFolder(),
+                                                       rex::filesystem::GetExecutablePath()) &&
+            window_) {
+          window_->RequestClose();
+        }
+      }
+      ImGui::Separator();
+      return;
+    }
+
+    auto install = auto_updater_.InstallSnapshot();
+    if (install.in_progress) {
+      if (install.total_bytes > 0) {
+        ImGui::TextDisabled("Downloading update... %.0f%%",
+                            100.0 * static_cast<double>(install.downloaded_bytes) /
+                                static_cast<double>(install.total_bytes));
+      } else {
+        ImGui::TextDisabled("Downloading update...");
+      }
+      ImGui::Separator();
+      return;
+    }
+    if (install.done && !install.ok) {
+      ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 0.35f, 0.35f, 1.0f));
+      ImGui::TextWrapped("%s", install.message.c_str());
+      ImGui::PopStyleColor();
+      ImGui::Separator();
+      return;
+    }
+
+    if (auto_updater_.state() != rex::system::UpdateCheckState::kUpdateAvailable) {
+      return;  // kIdle/kChecking/kUpToDate/kFailed: nothing worth showing.
+    }
+    auto info = auto_updater_.Available();
+    if (!info) {
+      return;
+    }
+    ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.45f, 0.85f, 0.55f, 1.0f));
+    ImGui::TextWrapped("Update available: v%s", info->version.c_str());
+    ImGui::PopStyleColor();
+    ImGui::SameLine();
+    if (ImGui::SmallButton("Download Update")) {
+      auto_updater_.InstallAsync(*info, rex::filesystem::GetExecutableFolder());
+    }
+    ImGui::Separator();
+  }
 
   void DrawFullscreenRow() {
     const auto* entry = rex::cvar::GetFlagInfo("fullscreen");
@@ -669,6 +742,9 @@ class CuratedSettingsDialog : public rex::ui::ImGuiDialog {
 #endif
   rex::input::InputSystem* input_system_;
   std::unique_ptr<rex::ui::SettingsDialog> dev_settings_overlay_;
+
+  rex::system::AutoUpdater auto_updater_;
+  bool update_check_requested_ = false;
 };
 
 }  // namespace
