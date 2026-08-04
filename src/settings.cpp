@@ -8,15 +8,18 @@
 #include <cmath>
 #include <cstdlib>
 #include <string>
+#include <string_view>
 #include <vector>
 
 #include <rex/cvar.h>
 #include <rex/filesystem.h>
 #include <rex/input/input_system.h>
+#include <rex/logging/macros.h>
 #include <rex/platform.h>
 #include <rex/platform/process.h>
 #include <rex/system/auto_updater.h>
 #include <rex/system/gpu_plugin.h>
+#include <rex/system/mod_registry.h>
 #include <rex/ui/imgui_widgets.h>
 #include <rex/ui/overlay/settings_overlay.h>
 #include <rex/ui/window.h>
@@ -147,6 +150,27 @@ constexpr std::array kLanguageOptions = {
     LanguageOption{"5", "Spanish"},
     LanguageOption{"6", "Italian"},
 };
+
+// Extra entries appended by mods via the "settings.language_option" event
+// (see RegisterLanguageOptionsListener). Owns its own strings, since the
+// event's payload.bytes is only valid for the duration of Publish().
+struct ModLanguageOption {
+  std::string id;
+  std::string label;
+};
+std::vector<ModLanguageOption> g_mod_language_options;
+
+bool IsKnownLanguageId(std::string_view id) {
+  for (const auto& opt : kLanguageOptions) {
+    if (id == opt.id)
+      return true;
+  }
+  for (const auto& opt : g_mod_language_options) {
+    if (id == opt.id)
+      return true;
+  }
+  return false;
+}
 
 // cvars rendered generically in the collapsed Advanced section, persisted to
 // the app's normal cvar config (nocturnerecomp.toml).
@@ -508,10 +532,21 @@ class CuratedSettingsDialog : public rex::ui::ImGuiDialog {
     const auto* entry = rex::cvar::GetFlagInfo("user_language");
     if (!entry)
       return;
+
+    // Built-in options plus anything mods registered via the
+    // settings.language_option event (see RegisterLanguageOptionsListener).
+    // g_mod_language_options's strings outlive this call (only ever
+    // appended to, never cleared/reallocated-away during the app's
+    // lifetime), so c_str() pointers here stay valid for ImGui's use.
+    std::vector<LanguageOption> options(kLanguageOptions.begin(), kLanguageOptions.end());
+    for (const auto& mod_opt : g_mod_language_options) {
+      options.push_back({mod_opt.id.c_str(), mod_opt.label.c_str()});
+    }
+
     std::string current = entry->getter();
     int cur_idx = 0;
-    for (int i = 0; i < static_cast<int>(kLanguageOptions.size()); ++i) {
-      if (current == kLanguageOptions[i].id) {
+    for (int i = 0; i < static_cast<int>(options.size()); ++i) {
+      if (current == options[i].id) {
         cur_idx = i;
         break;
       }
@@ -521,11 +556,11 @@ class CuratedSettingsDialog : public rex::ui::ImGuiDialog {
     ImGui::SameLine(180.0f);
     ImGui::SetNextItemWidth(160.0f);
     ImGui::PushID("user_language");
-    if (ImGui::BeginCombo("##v", kLanguageOptions[cur_idx].label)) {
-      for (int i = 0; i < static_cast<int>(kLanguageOptions.size()); ++i) {
+    if (ImGui::BeginCombo("##v", options[cur_idx].label)) {
+      for (int i = 0; i < static_cast<int>(options.size()); ++i) {
         bool selected = (i == cur_idx);
-        if (ImGui::Selectable(kLanguageOptions[i].label, selected)) {
-          rex::cvar::SetFlagByName("user_language", kLanguageOptions[i].id, /*persist=*/true);
+        if (ImGui::Selectable(options[i].label, selected)) {
+          rex::cvar::SetFlagByName("user_language", options[i].id, /*persist=*/true);
           SaveBasic();
         }
         if (selected)
@@ -760,6 +795,32 @@ void PrewarmSettingsDialogCaches() {
 #if REX_HAS_VULKAN
   g_vulkan_devices = rex::ui::vulkan::EnumerateDevices();
 #endif
+}
+
+void RegisterLanguageOptionsListener(rex::system::ModRegistry* registry) {
+  if (!registry)
+    return;
+  registry->Subscribe("settings.language_option",
+                       [](const rex::system::ModRegistry::EventPayload& payload) {
+                         std::string id = std::to_string(payload.u64);
+                         if (IsKnownLanguageId(id)) {
+                           REXLOG_WARN(
+                               "[settings] ignoring duplicate settings.language_option id {} "
+                               "(already registered)",
+                               id);
+                           return;
+                         }
+                         std::string label(reinterpret_cast<const char*>(payload.bytes.data()),
+                                            payload.bytes.size());
+                         if (label.empty()) {
+                           REXLOG_WARN(
+                               "[settings] ignoring settings.language_option id {} with empty "
+                               "label",
+                               id);
+                           return;
+                         }
+                         g_mod_language_options.push_back({std::move(id), std::move(label)});
+                       });
 }
 
 std::unique_ptr<rex::ui::ImGuiDialog> CreateSettingsDialog(

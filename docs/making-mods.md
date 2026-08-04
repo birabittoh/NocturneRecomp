@@ -378,6 +378,31 @@ and render from that snapshot in `OnDraw`, which does run on the UI thread.
 See `src/event_pong/`, `src/blackboard/`, and
 `src/bus_inspector/` for the pattern.
 
+**Adding a Language dropdown entry**: the curated Settings overlay's
+Language row (`src/settings.cpp`) is app code, not SDK code, so it isn't
+something a mod can reach through `RegisterAddress`/`FindAddress`. Instead
+NocturneRecomp itself subscribes, from `OnPostLoadXexImage()` (after
+`Runtime` exists but before any mod's `OnCreateDialogs` runs), to a
+`"settings.language_option"` event on the shared registry. A mod publishes
+one entry per language it wants to add, from its own `OnCreateDialogs`:
+
+```cpp
+void OnCreateDialogs(rex::ui::ImGuiDrawer* drawer) override {
+  rex::system::ModRegistry::EventPayload payload;
+  payload.u64 = 9;  // XLanguage id. e.g. 9 --> Portuguese
+  const char* label = "Portuguese";
+  payload.bytes = {reinterpret_cast<const uint8_t*>(label), std::strlen(label)};
+  runtime_->mod_registry()->Publish("settings.language_option", payload);
+}
+```
+
+The id is whatever the game itself understands for `user_language` (an
+`XLanguage` value); publishing an id doesn't make the game render that
+language, it only adds the option to the dropdown so a mod that *does* add
+the actual translated text/assets can let the player select it. A duplicate
+id (already built in, or already published by an earlier-loaded mod) is
+dropped with a WARN log, same first-wins rule as `RegisterAddress`.
+
 **Keybind collisions**: `rex::ui::RegisterBind` auto-resolves collisions
 rather than silently shadowing one bind. If two mods both default to the
 same key, the later-loaded one (lower `enabled_mods` priority) is moved to

@@ -23,12 +23,35 @@ namespace rex::input {
 class InputSystem;
 }  // namespace rex::input
 
+namespace rex::system {
+class ModRegistry;
+}  // namespace rex::system
+
 namespace nocturne {
 
 // Overrides the SDK's built-in cvar defaults with the game's own. Call once,
 // before rex::ReXApp::SetupEnvironment() (i.e. before any config file is
 // loaded), so a saved config or CLI/env override still takes precedence.
 void ApplySettingDefaults();
+
+// Subscribes to the "settings.language_option" mod-registry event so a mod
+// can add its own entry to the Language dropdown without patching this file.
+// A publishing mod calls, from its own IModPlugin::OnCreateDialogs:
+//
+//   rex::system::ModRegistry::EventPayload payload;
+//   payload.u64 = 9;  // XLanguage id, e.g. Portuguese
+//   const char* label = "Portuguese";
+//   payload.bytes = {reinterpret_cast<const uint8_t*>(label), strlen(label)};
+//   runtime->mod_registry()->Publish("settings.language_option", payload);
+//
+// Must be called after Runtime exists but before any mod's OnCreateDialogs
+// runs -- true for the call site in nocturnerecomp_app.h's own
+// OnPostLoadXexImage, which the SDK always calls right before it loads mod
+// plugins and dispatches their OnCreateDialogs (see rex_app.cpp's
+// ConstructRuntime). Duplicate ids (already built in, or already registered
+// by an earlier mod) are ignored with a warning, same first-wins rule as
+// RegisterAddress.
+void RegisterLanguageOptionsListener(rex::system::ModRegistry* registry);
 
 // Runs the GPU plugin / Vulkan device enumeration that CreateSettingsDialog's
 // dropdowns need, once, and caches the results for every dialog instance

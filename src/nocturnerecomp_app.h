@@ -124,6 +124,14 @@ class NocturnerecompApp : public rex::ReXApp {
     if (rando_active_) {
       nocturne::InstallRandoOverrides(runtime(), rando_base_xex_, rando_patched_xex_);
     }
+
+    // Runtime (and therefore mod_registry()) exists now but mod plugins
+    // haven't loaded yet -- ConstructRuntime calls OnPostLoadXexImage, then
+    // loads mod plugins and dispatches their OnCreateDialogs afterward (see
+    // rex_app.cpp). This is the last point to subscribe before a mod's
+    // OnCreateDialogs might publish a "settings.language_option" event. See
+    // settings.h.
+    nocturne::RegisterLanguageOptionsListener(runtime()->mod_registry());
   }
 
   bool SetupEnvironment() override {
