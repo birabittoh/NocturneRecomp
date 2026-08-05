@@ -211,9 +211,8 @@ def parse_args():
 def stage_title_update(tu_args, xex_path):
     """Select the TU variant matching xex_path and stage it as the sibling '<xex>p'.
 
-    Also extracts the TU's data files (the replacement audio track) into update/,
-    which run.py mounts as the update: device. Returns the target version label.
-    Exits on no match.
+    Also extracts the TU's data files (the replacement audio track) into update/.
+    Returns the target version label. Exits on no match.
     """
     sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
     import extract_tu
@@ -386,7 +385,7 @@ def main():
         print(
             f"\nBuilt with title update v{tu_version}. The matching patch is staged at "
             f"'{sibling_patch}'\nand is required at runtime — the loader re-applies it to "
-            f"the base image on launch. Run with scripts/run.py."
+            f"the base image on launch. Run with ./nocturnerecomp.exe."
         )
 
 

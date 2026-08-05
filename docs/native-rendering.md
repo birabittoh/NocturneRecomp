@@ -107,8 +107,7 @@ each step verified against a real capture or live run, not just code review.
 ```
 # Normal build + run
 python scripts/build.py
-python scripts/run.py            # NOT ./nocturnerecomp.exe directly —
-                                  # run.py supplies required --game_data_root/--license_mask
+python ./nocturnerecomp.exe
 
 # Debug build with real guest+SDK symbols (see CLAUDE.md for the DLL-naming
 # workaround this currently requires)

@@ -259,7 +259,7 @@ enabled = true
 id = 'memory_peek'
 ```
 
-Then run the game (`python scripts/run.py`) and press **F1** to open the mod
+Then run the game (`./nocturnerecomp.exe`) and press **F1** to open the mod
 manager overlay; it lists every enabled mod, in load order, with its icon
 and a `[code]` badge on mods that loaded a DLL. Check `logs/` if a code mod
 doesn't show up loaded; the loader logs the exact reason (missing DLL, ABI
