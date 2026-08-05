@@ -99,6 +99,7 @@ set(NOCTURNERECOMP_SOURCES
     src/achievements_menu.cpp
     src/fast_forward.cpp
     src/frame_pacer.cpp
+    src/graphics_settings.cpp
     src/headless_gpu_bridge.cpp
     src/native_command_processor.cpp
     src/ppc_interpreter.cpp

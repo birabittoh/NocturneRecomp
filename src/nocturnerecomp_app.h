@@ -35,6 +35,7 @@
 #include "fast_forward.h"
 #include "frame_pacer.h"
 #include "fonts.generated.h"
+#include "graphics_settings.h"
 #include "headless_gpu_bridge.h"
 #include "icon.generated.h"
 #include "native_command_processor.h"
@@ -207,6 +208,10 @@ class NocturnerecompApp : public rex::ReXApp {
     // it's a base feature, not optional content.
     nocturne::GetFastForward().Bind(window(), input_sys, runtime());
 
+    // Formerly the resolution_preset_native mod; moved in-app (see
+    // graphics_settings.h) since it's a base feature, not optional content.
+    nocturne::GetGraphicsSettings().Bind(runtime());
+
     // Steady internal-framerate pacer: drives the game's target_time clock at
     // exactly real-time from a dedicated steady-clock thread, so the PS1
     // simulation holds 60Hz instead of oscillating with vblank/present jitter
@@ -261,6 +266,7 @@ class NocturnerecompApp : public rex::ReXApp {
     nocturne::Achievements().AttachWatcher(drawer);
     nocturne::GetAccentColor().AttachWatcher(drawer);
     nocturne::GetFastForward().AttachWatcher(drawer);
+    nocturne::GetGraphicsSettings().AttachWatcher(drawer);
   }
 
   // Replace the SDK's default pixel font with a serif face that fits the
