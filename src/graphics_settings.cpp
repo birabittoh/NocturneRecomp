@@ -40,6 +40,50 @@ constexpr uint32_t kRectTopOffset = 4;
 constexpr uint32_t kRectRightOffset = 8;
 constexpr uint32_t kRectBottomOffset = 12;
 
+// The title update relocates the whole image, so every guest address below
+// needs a patched-image counterpart. Function addresses were re-derived with
+// scripts/match_tu_functions.py (matching normalized recompiled bodies
+// between a vanilla and a --tu codegen tree; see nocturnerecomp_tu_config.toml
+// for the workflow) -- the shift is regional, not a single constant: +0x200
+// for everything in this file except kFixedTimestepTickFnAddr (+0x1F8) and
+// kAllocFnAddr (+0x1D8), both further from the 0x825B-0x825D core where the
+// shift hasn't caught up to +0x200 yet. Each was confirmed by eyeballing the
+// matched bodies (identical instruction sequences, just relocated).
+//
+// kStretchRectAddr/Max/Min and kUiTransitionManagerAddr are plain .data, not
+// code -- match_tu_functions.py can't find those directly, but they were
+// re-derived by finding the vanilla guest function(s) that reference each
+// address (e.g. kStretchPercentToRectFnAddr itself for the rect trio,
+// sub_825ABED0/the UI manager init for kUiTransitionManagerAddr), matching
+// that function to its TU counterpart, then comparing the load/store offset
+// literal at the same body line in both codegen trees (same technique as
+// match_tu_functions.py, applied to data instead of function entry points).
+// Confirmed live against a running --tu process with
+// scripts/re/scan_guest_memory.py (the same live-tracking technique used for
+// kAccentColorGuestAddress in accent_color.cpp): kStretchRectAddr/Max/Min read
+// back their exact expected content ({0,0,1280,720} max, {232,54,1048,666}
+// min), and kUiTransitionManagerAddr reads a live, plausible heap pointer.
+//
+// kStretchRectAddr/Max/Min are unmoved (same address as vanilla) --
+// apparently this part of .data wasn't relocated by the patch.
+// kUiTransitionManagerAddr moved by -0x240, the same delta already seen for
+// kAccentColorGuestAddress/kPlayerStatsGuestAddress/kRoomsGuestAddress in
+// accent_color.cpp/room_presence.cpp. Don't assume that delta generalizes to
+// other addresses without re-deriving each one -- night-and-day difference
+// between this and kYGlyphNameAddr in native_options.cpp (+0x30) shows deltas
+// vary by which specific .data region an address lives in, not just by
+// address range.
+#ifdef NOCTURNE_TU
+constexpr uint32_t kStretchRectAddr = 0x82882C68u;
+constexpr uint32_t kStretchRectMaxAddr = 0x82882C98u;
+constexpr uint32_t kStretchRectMinAddr = 0x82882CC8u;
+constexpr uint32_t kUiTransitionManagerAddr = 0x82E79DECu;
+constexpr uint32_t kChangeScreenSizeFnAddr = 0x825BA878u;
+constexpr uint32_t kStretchPercentToRectFnAddr = 0x825BB4B0u;
+constexpr uint32_t kStretchWidgetRepositionFnAddr = 0x825AB4B0u;
+constexpr uint32_t kFixedTimestepTickFnAddr = 0x8258B5B0u;
+constexpr uint32_t kSetWidgetTextByIdFnAddr = 0x825CFE68u;
+#else
 constexpr uint32_t kStretchRectAddr = 0x82882C68u;
 constexpr uint32_t kStretchRectMaxAddr = 0x82882C98u;
 constexpr uint32_t kStretchRectMinAddr = 0x82882CC8u;
@@ -49,17 +93,26 @@ constexpr uint32_t kStretchPercentToRectFnAddr = 0x825BB2B0u;
 constexpr uint32_t kStretchWidgetRepositionFnAddr = 0x825AB2B0u;
 constexpr uint32_t kFixedTimestepTickFnAddr = 0x8258B3B8u;
 constexpr uint32_t kSetWidgetTextByIdFnAddr = 0x825CFC68u;
+#endif
 
 // The plain text widget the screens use for headings, and the calls that make
 // one -- all taken from the settings screen's own builder (sub_825B4650),
 // which creates its title exactly this way: allocate, construct with the
 // screen as parent (which is what puts it in the draw list), set the text,
 // then measure it to centre it and give it a colour.
+#ifdef NOCTURNE_TU
+constexpr uint32_t kAllocFnAddr = 0x82576B28u;          // (size) -> pointer
+constexpr uint32_t kTextWidgetCtorFnAddr = 0x825CEFA8u; // (memory, parent) -> widget
+constexpr uint32_t kSetTextFnAddr = 0x825CF040u;        // (widget, utf16)
+constexpr uint32_t kTextWidthFnAddr = 0x825CF208u;      // (widget) -> pixels
+constexpr uint32_t kSetTextColourFnAddr = 0x825CF200u;  // (widget, argb)
+#else
 constexpr uint32_t kAllocFnAddr = 0x82576950u;          // (size) -> pointer
 constexpr uint32_t kTextWidgetCtorFnAddr = 0x825CEDA8u; // (memory, parent) -> widget
 constexpr uint32_t kSetTextFnAddr = 0x825CEE40u;        // (widget, utf16)
 constexpr uint32_t kTextWidthFnAddr = 0x825CF008u;      // (widget) -> pixels
 constexpr uint32_t kSetTextColourFnAddr = 0x825CF000u;  // (widget, argb)
+#endif
 constexpr uint32_t kTextWidgetSize = 4668;
 constexpr uint32_t kWidgetXOffset = 4;
 constexpr uint32_t kWidgetYOffset = 8;
@@ -147,7 +200,11 @@ constexpr uint32_t kWidgetTextBufferOffset = 572;
 // widget-construction call rather than sharing one, so filtering on this
 // call site scopes the relabel to just this screen -- every other screen
 // showing "Default" keeps saying so.
+#ifdef NOCTURNE_TU
+constexpr uint32_t kStretchScreenPromptCallSite = 0x825BB324u;
+#else
 constexpr uint32_t kStretchScreenPromptCallSite = 0x825BB124u;
+#endif
 
 // Mirrors rex::system::XLanguage's numeric values (see xcontent.h), but only
 // the 6 ids settings.cpp's own kLanguageOptions actually offers in the

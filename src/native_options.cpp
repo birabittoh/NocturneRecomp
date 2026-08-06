@@ -111,6 +111,66 @@ namespace {
 // The four sub_825Dxxxx functions are shared by every option list in the game
 // (the controls screen uses them too), so each hook filters on the specific
 // list instance we claimed -- see g_list.
+// The title update relocates the whole image, so every guest address below
+// needs a patched-image counterpart. Function addresses (and the two call-site
+// addresses further down, kWatchdogPostLr/kStretchScreenPromptCallSite-style
+// LRs) were re-derived with scripts/match_tu_functions.py -- matching
+// normalized recompiled bodies between a vanilla and a --tu codegen tree; see
+// nocturnerecomp_tu_config.toml for the workflow. The shift is regional, not
+// a single constant: everything in this file lands on +0x200 except
+// kAllocFnAddr (+0x1D8, shared with graphics_settings.cpp, further from the
+// 0x825B-0x825D core where the shift hasn't caught up to +0x200 yet). Each was
+// confirmed by eyeballing the matched bodies (identical instructions,
+// relocated). A handful of vanilla addresses match more than one TU candidate
+// (small, near-identical widget-setter thunks the normalizer can't tell
+// apart) -- in every case the TU address exactly +0x200 from vanilla is one
+// of the candidates, so that's the one used.
+//
+// kImageBankPtrAddr, kPromptColourAddr, kYGlyphNameAddr, kAppObjectPtrAddr and
+// kUiManagerPtrAddr are plain .data, not code -- match_tu_functions.py can't
+// find those directly, but each was re-derived by finding the vanilla guest
+// function(s) that reference it, matching that function to its TU
+// counterpart, then comparing the load/store offset literal at the same body
+// line in both codegen trees (same technique as match_tu_functions.py,
+// applied to data instead of function entry points). Confirmed live against a
+// running --tu process with scripts/re/scan_guest_memory.py, the same
+// live-tracking technique used for kAccentColorGuestAddress in
+// accent_color.cpp.
+//
+// kPromptColourAddr is unmoved. kImageBankPtrAddr, kAppObjectPtrAddr and
+// kUiManagerPtrAddr all moved by -0x240 -- the same delta already seen for
+// kAccentColorGuestAddress/kPlayerStatsGuestAddress/kRoomsGuestAddress in
+// accent_color.cpp/room_presence.cpp. kYGlyphNameAddr (part of a different,
+// smaller letter-name table) moved by a *different* delta, +0x30 -- don't
+// assume -0x240 generalizes to every address in this address range without
+// re-deriving each one; it happens to be common in this game's .data but
+// isn't universal (kStretchRectAddr/Max/Min and kUiTransitionManagerAddr in
+// graphics_settings.cpp share this same -0x240 for the UI manager pointer but
+// are unmoved for the rect trio, right next to a moved one).
+#ifdef NOCTURNE_TU
+constexpr uint32_t kListSetupFnAddr = 0x825D34B0u;         // (list, x, y, count, spacing, ...)
+constexpr uint32_t kBindRowsFnAddr = 0x825D38B8u;          // (list, entries, count)
+constexpr uint32_t kCycleRowFnAddr = 0x825D37C0u;          // (list, direction)
+constexpr uint32_t kEnableRowFnAddr = 0x825D3730u;         // (list, row)
+constexpr uint32_t kListUpdateFnAddr = 0x825D3AA8u;        // (list, delta)
+constexpr uint32_t kSetWidgetColourFnAddr = 0x825D2338u;   // (widget, argb)
+constexpr uint32_t kSetWidgetTextFnAddr = 0x825D20E0u;     // (widget, utf16_text)
+constexpr uint32_t kSetTextScaleFnAddr = 0x825D22C0u;      // (widget, scale) -- scale in f1
+constexpr uint32_t kSettingsEventFnAddr = 0x825B4158u;     // (screen, message)
+constexpr uint32_t kSettingsActivateFnAddr = 0x825B45E0u;  // (screen, user_index)
+constexpr uint32_t kSettingsUpdateFnAddr = 0x825B4EC0u;    // (screen, delta)
+constexpr uint32_t kSetWidgetTextByIdFnAddr = 0x825D20E8u;  // (widget, string_id)
+constexpr uint32_t kAllocFnAddr = 0x82576B28u;             // (size) -> pointer
+
+constexpr uint32_t kPromptBarLayoutFnAddr = 0x825CAA20u;  // (x, y, width, w1, w2, w3)
+constexpr uint32_t kPromptCtorFnAddr = 0x825D1FB0u;       // (memory, parent, flag) -> prompt
+constexpr uint32_t kPromptSetGlyphFnAddr = 0x825D20F8u;   // (prompt, image)
+constexpr uint32_t kPromptShowGlyphFnAddr = 0x825D2210u;  // (prompt)
+constexpr uint32_t kPromptTextOffsetFnAddr = 0x825D2218u; // (prompt, dx, dy)
+constexpr uint32_t kPromptSetPosFnAddr = 0x825D21A8u;     // (prompt, x, y)
+constexpr uint32_t kTextWidthFnAddr = 0x825CF208u;        // (text_widget) -> pixels
+constexpr uint32_t kFindImageFnAddr = 0x825CED68u;        // (image_bank, name) -> image
+#else
 constexpr uint32_t kListSetupFnAddr = 0x825D32B0u;         // (list, x, y, count, spacing, ...)
 constexpr uint32_t kBindRowsFnAddr = 0x825D36B8u;          // (list, entries, count)
 constexpr uint32_t kCycleRowFnAddr = 0x825D35C0u;          // (list, direction)
@@ -135,6 +195,7 @@ constexpr uint32_t kPromptTextOffsetFnAddr = 0x825D2018u; // (prompt, dx, dy)
 constexpr uint32_t kPromptSetPosFnAddr = 0x825D1FA8u;     // (prompt, x, y)
 constexpr uint32_t kTextWidthFnAddr = 0x825CF008u;        // (text_widget) -> pixels
 constexpr uint32_t kFindImageFnAddr = 0x825CEB68u;        // (image_bank, name) -> image
+#endif
 
 // A prompt is a glyph widget plus a text widget, with the text drawn at a
 // fixed offset from the glyph (kPromptTextOffsetFnAddr sets it; the stock
@@ -155,24 +216,39 @@ constexpr uint32_t kPromptBarWidth = 640;
 // The image bank the glyph names are resolved against, the prompt text colour,
 // and the name of the Y glyph. The glyph names are single-character strings in
 // a descending-letter table ("Z" 0x82202270, "Y" 0x82202274, "X" 0x82202278) --
-// the stock bar uses the X, A and B entries of it.
+// the stock bar uses the X, A and B entries of it. See the block comment above
+// kListSetupFnAddr for how the TU values below were re-derived.
+#ifdef NOCTURNE_TU
+constexpr uint32_t kImageBankPtrAddr = 0x82E7A330u;
+constexpr uint32_t kPromptColourAddr = 0x82895098u;
+constexpr uint32_t kYGlyphNameAddr = 0x822022A4u;
+#else
 constexpr uint32_t kImageBankPtrAddr = 0x82E7A570u;
 constexpr uint32_t kPromptColourAddr = 0x82895098u;
 constexpr uint32_t kYGlyphNameAddr = 0x82202274u;
+#endif
 
 // Every front-end page change goes through this one queue push -- both the way
 // in to the stretch screen (which this file now posts itself, see
 // NativeOptions_SettingsEvent's Y handling) and the pre-game watchdog switch
 // that gets filtered back out. See NativeOptions_PostEvent.
+#ifdef NOCTURNE_TU
+constexpr uint32_t kPostEventFnAddr = 0x825CEAE8u;  // (class, arg1, page, controller)
+#else
 constexpr uint32_t kPostEventFnAddr = 0x825CE8E8u;  // (class, arg1, page, controller)
+#endif
 constexpr uint32_t kEventClassPageSwitch = 8;
 
 // The exact call site of the front-end watchdog's page switch, inside the UI
-// manager's per-frame update (sub_825AAE90). Filtering on the return address
-// keeps the suppression to that one post -- every other switch the manager
-// makes, including the genuine "user signed out" one a few lines above it,
-// goes through untouched.
+// manager's per-frame update (sub_825AAE90, TU sub_825AB090). Filtering on the
+// return address keeps the suppression to that one post -- every other switch
+// the manager makes, including the genuine "user signed out" one a few lines
+// above it, goes through untouched.
+#ifdef NOCTURNE_TU
+constexpr uint32_t kWatchdogPostLr = 0x825AB230u;
+#else
 constexpr uint32_t kWatchdogPostLr = 0x825AB030u;
+#endif
 
 // Front-end page index of the "Change Screen Size" screen, and where the
 // manager keeps the current one.
@@ -184,7 +260,14 @@ constexpr uint32_t kCurrentPageOffset = 4;
 // virtual dispatch, so the return address is all we have to tell this list
 // apart from the controls screen's (which is set up identically, 96-byte
 // entries and all, and must be left alone).
+// Size is unchanged under the TU (confirmed by comparing the matched
+// function's own internal label range in both codegen trees -- both grow by
+// exactly the file's +0x200 delta, i.e. no code was inserted inside it).
+#ifdef NOCTURNE_TU
+constexpr uint32_t kSettingsBuildFnAddr = 0x825B4850u;
+#else
 constexpr uint32_t kSettingsBuildFnAddr = 0x825B4650u;
+#endif
 constexpr uint32_t kSettingsBuildFnSize = 0x4D4u;
 
 // Option-list instance layout (see the header comment above).
@@ -253,11 +336,21 @@ constexpr uint32_t kArrowYBias = 2;
 // and the "a save is loaded" latch inside it -- the flag the front-end
 // watchdog clears on its way out, and the one that decides which page the
 // settings screen exits to.
+// See the block comment above kListSetupFnAddr for how the TU values below
+// were re-derived.
+#ifdef NOCTURNE_TU
+constexpr uint32_t kAppObjectPtrAddr = 0x82E4F5C8u;
+#else
 constexpr uint32_t kAppObjectPtrAddr = 0x82E4F808u;
+#endif
 constexpr uint32_t kInGameLatchOffset = 29;
 
 // The UI manager, again a pointer stored at this address.
+#ifdef NOCTURNE_TU
+constexpr uint32_t kUiManagerPtrAddr = 0x82E79DECu;
+#else
 constexpr uint32_t kUiManagerPtrAddr = 0x82E7A02Cu;
+#endif
 
 // Widget vtable slot that makes a widget visible (the hide side, slot +20, is
 // what the stock update calls on row 2).

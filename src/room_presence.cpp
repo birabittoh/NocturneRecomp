@@ -24,17 +24,44 @@ constexpr char kDiscordClientId[] = "1528401288918728744";
 // (sub_82250D10) uses to look up everything about the active room, including
 // the 3/4-letter room code below. Found by locating that state machine via
 // its "load:c:\bin\%s.bin\n" debug format string and tracing back to the
-// index variable driving its switch statement. Vanilla only -- unlike the
-// player-stats struct below, this hasn't been re-derived for a TU build, so
-// the room half of the presence is simply skipped under NOCTURNE_TU.
-constexpr uint32_t kRoomIndexGuestAddress = 0x83133AEC;
+// index variable driving its switch statement.
+//
+// TU address re-derived by matching sub_82250D10 to its TU counterpart
+// (sub_82250E30, scripts/match_tu_functions.py, delta +0x120) and comparing
+// the load/store offset literal for this address at the same body line in
+// both a vanilla and --tu codegen tree (both use the same base register,
+// itself set from an unchanged `lis r10,-31981` immediate in both builds --
+// only the offset moved, 15084 -> 14508, i.e. delta -0x240, the same delta
+// used throughout this file). Confirmed live against a running --tu process:
+// reads a plausible non-zero index while actually in a room (32, matching
+// the table lookup below resolving to a real room code), and 0 at the main
+// menu as expected.
+#ifdef NOCTURNE_TU
+constexpr uint32_t kRoomIndexGuestAddress = 0x831338ACu;
+#else
+constexpr uint32_t kRoomIndexGuestAddress = 0x83133AECu;
+#endif
 
 // Base of the game's own room table: an array of fixed-size (44-byte)
 // records, one per room index, with a pointer to the room's 3/4-letter code
 // string (e.g. "NO0", "ARE") at offset 0. Same table the state machine above
 // reads via `off_82E00D08 + 11 * v6` (11 dwords == 44 bytes) to build the
 // "c:\bin\<code>.bin" load path.
-constexpr uint32_t kRoomTableGuestAddress = 0x82E00D08;
+//
+// TU address re-derived the same way as kRoomIndexGuestAddress above (same
+// matched function, sub_82250D10 -> sub_82250E30): the table base is built
+// from `lis r11,-32032 / addi r11,r11,<X> / addi r11,r11,32`, where X is
+// 3304 in vanilla and 2744 in the TU -- delta -0x230, notably NOT the -0x240
+// used for kRoomIndexGuestAddress and everywhere else in this file, another
+// reminder the TU's .data shift is regional rather than a single constant.
+// Confirmed live end-to-end: read the index-32 entry's code-pointer field at
+// this TU address + 32*44, dereferenced it, and got back the ASCII string
+// "RNO0" (Black Marble Gallery) -- a real room code, not garbage.
+#ifdef NOCTURNE_TU
+constexpr uint32_t kRoomTableGuestAddress = 0x82E00AD8u;
+#else
+constexpr uint32_t kRoomTableGuestAddress = 0x82E00D08u;
+#endif
 constexpr uint32_t kRoomTableStride = 44;
 // Highest known-populated index in the table (id 56, "RBO0"); anything past
 // this is out of bounds for the vanilla image and skipped rather than read.
@@ -216,11 +243,7 @@ void RoomPresence::Tick() {
   }
   showed_main_menu_ = false;
 
-  // Room (top line, "details"). kRoomIndexGuestAddress/kRoomTableGuestAddress
-  // are vanilla-only (not yet re-derived for a TU image, unlike the player-
-  // stats struct below) -- skip rather than risk reading whatever else lives
-  // at that address in a TU build's relocated .data.
-#ifndef NOCTURNE_TU
+  // Room (top line, "details").
   uint32_t room_id = ReadGuestU32BE(memory, kRoomIndexGuestAddress);
   if (room_id <= kRoomTableMaxIndex && (!has_read_room_once_ || room_id != last_room_id_)) {
     uint32_t code_ptr = ReadGuestU32BE(memory, kRoomTableGuestAddress + room_id * kRoomTableStride);
@@ -233,7 +256,6 @@ void RoomPresence::Tick() {
       }
     }
   }
-#endif
 
   // HP/level/rooms (second line, "state").
   uint32_t hp_current = ReadGuestU32BE(memory, kPlayerStatsGuestAddress + kHpCurrentOffset);
