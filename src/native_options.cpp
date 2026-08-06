@@ -95,10 +95,13 @@
 #include <rex/cvar.h>
 #include <rex/logging.h>
 #include <rex/memory/utils.h>
+#include <rex/platform/process.h>
 #include <rex/ppc/context.h>
 #include <rex/runtime.h>
 #include <rex/system/function_dispatcher.h>
 #include <rex/system/gpu_plugin.h>
+#include <rex/ui/window.h>
+#include <rex/ui/windowed_app_context.h>
 
 namespace nocturne {
 
@@ -398,6 +401,14 @@ bool CvarPendingRestart(const char* name) {
   const auto pending = rex::cvar::GetPendingRestartFlags();
   return std::find(pending.begin(), pending.end(), name) != pending.end();
 }
+
+// True if ANY cvar changed this session (through this screen or otherwise --
+// GetPendingRestartFlags() doesn't distinguish the source) still needs a
+// restart to take effect. Mirrors settings.cpp's own AnyPendingRestart, which
+// drives the ImGui overlay's "Some changes require a restart to take effect."
+// banner -- same underlying state, just read from the guest-driven settings
+// screen instead of ImGui.
+bool AnyPendingRestart() { return !rex::cvar::GetPendingRestartFlags().empty(); }
 
 // Set once by NativeOptions::Bind from Runtime::user_data_root(); empty means
 // Bind() couldn't resolve it (or hasn't run yet), in which case
@@ -1086,6 +1097,13 @@ bool g_pregame_stretch_screen = false;
 // (see ShowWidget) -- the guest does the same dispatch, and there is no
 // static address to hardcode.
 rex::runtime::FunctionDispatcher* g_dispatcher = nullptr;
+
+// Needed to close this process's window after a successful
+// rex::platform::process::Relaunch() -- see the auto-restart-on-accept logic
+// in NativeOptions_SettingsEvent. Runtime::display_window() is read lazily at
+// the point of use rather than cached, since Bind() runs before a display
+// window necessarily exists.
+rex::Runtime* g_runtime = nullptr;
 
 // The settings screen's option list, claimed in the list-setup hook. Every
 // other hook keys off this so the controls screen's identically-shaped list
@@ -1900,6 +1918,49 @@ extern "C" void NativeOptions_SettingsEvent(PPCContext& ctx, uint8_t* base) {
             kCustomRows[i].commit(CustomEntryValue(base, i));
           }
         }
+
+        // Auto-restart on accept, but only from the main-menu entry point,
+        // never the pause-menu one: a restart there would silently discard
+        // whatever run is in progress, with no save prompt (this screen has
+        // no way to warn the player first). The main-menu entry has nothing
+        // to lose, so there's no reason to make the player find and press
+        // the ImGui overlay's own "Restart Now" button separately -- accept
+        // already means "I'm done changing settings."
+        //
+        // Same in-game latch this screen already reads for the pregame
+        // watchdog/stretch-screen tracking above (0 = no save loaded = this
+        // is the main-menu instance). A null latch (app object not resolved
+        // yet) is treated as "not main menu" -- conservatively skip rather
+        // than restart when that can't be determined.
+        const uint32_t latch = InGameLatchAddress(base);
+        const bool main_menu_instance = latch != 0 && Read8(base, latch) == 0;
+        if (main_menu_instance && AnyPendingRestart() && g_runtime && g_runtime->app_context()) {
+          // window->RequestClose() ends up in WindowSDL::RequestCloseImpl,
+          // which calls SDL_DestroyWindow directly (not through SDL's event
+          // queue, unlike Window::RequestPaint -- see its own "callable from
+          // non-UI threads" comment, which RequestClose conspicuously lacks).
+          // This handler runs on the guest CPU thread ("Main XThread"), a
+          // different OS thread from the one that owns the window -- calling
+          // RequestClose from here directly left the old process's window
+          // never actually closing (confirmed live: still running, playing
+          // audio, after the relaunched process had already opened -- lldb
+          // showed the new process's own boot then stalling too, almost
+          // certainly contending with the old process for exclusive
+          // GPU/audio device ownership). CallInUIThread marshals the actual
+          // close onto the thread that owns the window, the same mechanism
+          // window.h documents "functions requested to be executed in the UI
+          // thread... are also allowed to destroy windows" for.
+          rex::ui::WindowedAppContext* app_context = g_runtime->app_context();
+          if (rex::platform::process::Relaunch()) {
+            REXLOG_INFO("[native_options] restart-pending change accepted from the main menu; "
+                        "relaunching");
+            app_context->CallInUIThread([] {
+              if (g_runtime && g_runtime->display_window()) {
+                g_runtime->display_window()->RequestClose();
+              }
+            });
+          }
+        }
       } else if (button == kButtonCancel) {
         for (uint32_t i = 0; i < kCustomRowCount; ++i) {
           if (IsRowActive(kCustomRows[i]) && kCustomRows[i].live && kCustomRows[i].commit) {
@@ -1958,6 +2019,7 @@ void NativeOptions::Bind(rex::Runtime* runtime) {
   }
   auto* dispatcher = runtime_->function_dispatcher();
   g_dispatcher = dispatcher;
+  g_runtime = runtime_;
 
   if (!runtime_->user_data_root().empty()) {
     g_user_settings_path = runtime_->user_data_root() / "settings.toml";
