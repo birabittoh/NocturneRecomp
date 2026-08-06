@@ -18,8 +18,6 @@
 #include <optional>
 #include <string>
 
-#include <imgui.h>
-
 #include <rex/cvar.h>
 #include <rex/logging.h>
 #include <rex/memory/utils.h>
@@ -28,8 +26,6 @@
 #include <rex/system/function_dispatcher.h>
 #include <rex/system/mod_registry.h>
 #include <rex/system/mod_storage.h>
-#include <rex/ui/imgui_dialog.h>
-#include <rex/ui/imgui_drawer.h>
 
 namespace nocturne {
 
@@ -53,6 +49,35 @@ constexpr uint32_t kStretchPercentToRectFnAddr = 0x825BB2B0u;
 constexpr uint32_t kStretchWidgetRepositionFnAddr = 0x825AB2B0u;
 constexpr uint32_t kFixedTimestepTickFnAddr = 0x8258B3B8u;
 constexpr uint32_t kSetWidgetTextByIdFnAddr = 0x825CFC68u;
+
+// The plain text widget the screens use for headings, and the calls that make
+// one -- all taken from the settings screen's own builder (sub_825B4650),
+// which creates its title exactly this way: allocate, construct with the
+// screen as parent (which is what puts it in the draw list), set the text,
+// then measure it to centre it and give it a colour.
+constexpr uint32_t kAllocFnAddr = 0x82576950u;          // (size) -> pointer
+constexpr uint32_t kTextWidgetCtorFnAddr = 0x825CEDA8u; // (memory, parent) -> widget
+constexpr uint32_t kSetTextFnAddr = 0x825CEE40u;        // (widget, utf16)
+constexpr uint32_t kTextWidthFnAddr = 0x825CF008u;      // (widget) -> pixels
+constexpr uint32_t kSetTextColourFnAddr = 0x825CF000u;  // (widget, argb)
+constexpr uint32_t kTextWidgetSize = 4668;
+constexpr uint32_t kWidgetXOffset = 4;
+constexpr uint32_t kWidgetYOffset = 8;
+
+// Opaque black. The channel order is ARGB, pinned down from the settings
+// screen's own background shape (sub_825D0390(shape, 1275068415), i.e.
+// 0x4BFFFFFF -- a ~29% alpha over white, which only reads correctly with the
+// alpha in the high byte).
+constexpr uint32_t kPresetLabelColour = 0xFF000000u;
+
+// Where the preset name is drawn, in the front-end's own 640-wide coordinate
+// space (its help bar sits at y=423, its titles at y=110).
+constexpr int32_t kPresetLabelCentreX = 320;
+constexpr int32_t kPresetLabelY = 230;
+
+// Scratch for staging UTF-16 into guest memory, allocated once from the game's
+// own heap. The text setter copies out of it immediately.
+constexpr uint32_t kTextScratchChars = 64;
 
 // Named after mods_src/graphics_settings' (the separate ImGui-overlay mod in
 // NocturneRecomp-Mods) full preset catalog: PSX Default/Big, 16:10 Default/
@@ -198,8 +223,20 @@ constexpr const char* kPresetAppliedEvent = "graphics_settings.preset_applied";
 // ApplyRequestedPreset).
 std::atomic<int> g_requested_preset{-1};
 
-std::atomic<int> g_toast_preset_index{-1};
-std::atomic<int64_t> g_toast_deadline_ms{0};
+// The preset-name label drawn over the stretch screen, the screen it was
+// built for, and when it should blank itself again. It replaces an ImGui
+// overlay toast that used to do the same job from outside the game.
+uint32_t g_preset_label = 0;
+uint32_t g_preset_label_screen = 0;
+bool g_preset_label_shown = false;
+std::atomic<int64_t> g_preset_label_deadline_ms{0};
+
+PPCFunc* g_alloc_fn = nullptr;
+PPCFunc* g_text_widget_ctor_fn = nullptr;
+PPCFunc* g_set_text_fn = nullptr;
+PPCFunc* g_text_width_fn = nullptr;
+PPCFunc* g_set_text_colour_fn = nullptr;
+uint32_t g_text_scratch = 0;
 
 int64_t NowMs() {
   return std::chrono::duration_cast<std::chrono::milliseconds>(
@@ -217,6 +254,84 @@ void Write32BE(uint8_t* base, uint32_t guest_address, uint32_t value) {
 
 void Write16BE(uint8_t* base, uint32_t guest_address, uint16_t value) {
   rex::memory::store_and_swap<uint16_t>(base + guest_address, value);
+}
+
+// Calls a guest function with a scratch register set, restoring the caller's
+// context afterwards.
+uint32_t CallGuest(PPCContext& ctx, uint8_t* base, PPCFunc* fn, uint32_t r3, uint32_t r4) {
+  if (!fn) {
+    return 0;
+  }
+  PPCContext saved = ctx;
+  ctx.r3.u32 = r3;
+  ctx.r4.u32 = r4;
+  fn(ctx, base);
+  const uint32_t result = ctx.r3.u32;
+  ctx = saved;
+  return result;
+}
+
+// Stages ASCII into the guest scratch buffer as UTF-16 and returns its guest
+// address, allocating the buffer on first use. The preset names are ASCII by
+// construction (see kPresetNames), so this is a widen, not a conversion.
+uint32_t StagePresetName(PPCContext& ctx, uint8_t* base, const char* text) {
+  if (!g_text_scratch) {
+    g_text_scratch = CallGuest(ctx, base, g_alloc_fn, kTextScratchChars * 2, 0);
+    if (!g_text_scratch) {
+      return 0;
+    }
+  }
+  uint32_t length = 0;
+  while (text[length] != '\0' && length < kTextScratchChars - 1) {
+    Write16BE(base, g_text_scratch + length * 2, static_cast<uint16_t>(text[length]));
+    ++length;
+  }
+  Write16BE(base, g_text_scratch + length * 2, 0);
+  return g_text_scratch;
+}
+
+// Builds the label as a child of the stretch screen, once. Parenting it to the
+// screen is what gets it drawn and updated; nothing else has to hold it.
+uint32_t EnsurePresetLabel(PPCContext& ctx, uint8_t* base, uint32_t screen) {
+  if (g_preset_label != 0 && g_preset_label_screen == screen) {
+    return g_preset_label;
+  }
+  if (!g_alloc_fn || !g_text_widget_ctor_fn || !g_set_text_fn) {
+    return 0;
+  }
+  const uint32_t memory = CallGuest(ctx, base, g_alloc_fn, kTextWidgetSize, 0);
+  if (!memory) {
+    return 0;
+  }
+  const uint32_t widget = CallGuest(ctx, base, g_text_widget_ctor_fn, memory, screen);
+  if (!widget) {
+    return 0;
+  }
+  if (g_set_text_colour_fn) {
+    CallGuest(ctx, base, g_set_text_colour_fn, widget, kPresetLabelColour);
+  }
+  g_preset_label = widget;
+  g_preset_label_screen = screen;
+  return widget;
+}
+
+// Shows `text` centred, or blanks the label when given nullptr -- there is no
+// need to hide the widget itself when empty text draws nothing.
+void SetPresetLabelText(PPCContext& ctx, uint8_t* base, const char* text) {
+  if (!g_preset_label || !g_set_text_fn) {
+    return;
+  }
+  const uint32_t staged = StagePresetName(ctx, base, text ? text : "");
+  if (!staged) {
+    return;
+  }
+  CallGuest(ctx, base, g_set_text_fn, g_preset_label, staged);
+
+  const int32_t width = static_cast<int32_t>(CallGuest(ctx, base, g_text_width_fn, g_preset_label, 0));
+  Write32BE(base, g_preset_label + kWidgetXOffset,
+            static_cast<uint32_t>(kPresetLabelCentreX - width / 2));
+  Write32BE(base, g_preset_label + kWidgetYOffset, static_cast<uint32_t>(kPresetLabelY));
+  g_preset_label_shown = text != nullptr;
 }
 
 void PublishPresetApplied(const uint8_t* base) {
@@ -453,8 +568,10 @@ void ApplyPendingCycle(PPCContext& ctx, uint8_t* base) {
   PublishPresetApplied(base);
   SavePresetRatios(base);
 
-  g_toast_preset_index.store(static_cast<int>(g_preset_index), std::memory_order_release);
-  g_toast_deadline_ms.store(NowMs() + kToastDurationMs, std::memory_order_release);
+  if (EnsurePresetLabel(ctx, base, a1)) {
+    SetPresetLabelText(ctx, base, kPresetNames[g_preset_index]);
+    g_preset_label_deadline_ms.store(NowMs() + kToastDurationMs, std::memory_order_release);
+  }
 }
 
 // Applies a preset queued by RequestGraphicsPreset. Unlike ApplyPendingCycle
@@ -599,6 +716,9 @@ extern "C" void GraphicsSettings_StretchScreen(PPCContext& ctx, uint8_t* base) {
   // after the original has run is what makes that distinction free.
   if (leaving) {
     g_screen_open.store(false, std::memory_order_release);
+    if (g_preset_label_shown) {
+      SetPresetLabelText(ctx, base, nullptr);
+    }
     LatchCurrentRectForReassert(base);
 
     // Classify what the player left with. Anything that isn't one of the
@@ -639,6 +759,14 @@ extern "C" void GraphicsSettings_PerFrame(PPCContext& ctx, uint8_t* base) {
   }
 
   ApplyRequestedPreset(ctx, base);
+
+  // Blank the preset name once its moment is up. Doing it here rather than in
+  // the screen's own handler is what makes it time out at all: that handler
+  // only runs when a message arrives, so a player who presses X and then lets
+  // go of the pad would keep the name on screen indefinitely.
+  if (g_preset_label_shown && NowMs() >= g_preset_label_deadline_ms.load(std::memory_order_acquire)) {
+    SetPresetLabelText(ctx, base, nullptr);
+  }
 
   if (g_screen_open.load(std::memory_order_acquire) && g_cycle_requested.exchange(false)) {
     PPCContext saved = ctx;
@@ -697,39 +825,6 @@ void RequestGraphicsPreset(int32_t index) {
   g_requested_preset.store(index, std::memory_order_release);
 }
 
-class GraphicsSettingsToastDialog : public rex::ui::ImGuiDialog {
- public:
-  explicit GraphicsSettingsToastDialog(rex::ui::ImGuiDrawer* drawer) : ImGuiDialog(drawer) {}
-
- protected:
-  void OnDraw(ImGuiIO& io) override {
-    (void)io;
-    int idx = g_toast_preset_index.load(std::memory_order_acquire);
-    // kPresetCount, not kGraphicsPresetCount: the toast is driven by X-cycling
-    // on the stretch screen, which only ever lands on a real preset, and
-    // kPresetNames has no Custom entry.
-    if (idx < 0 || idx >= static_cast<int>(kPresetCount)) {
-      return;
-    }
-    if (NowMs() >= g_toast_deadline_ms.load(std::memory_order_acquire)) {
-      return;
-    }
-
-    const ImGuiViewport* vp = ImGui::GetMainViewport();
-    ImGui::SetNextWindowPos(
-        ImVec2(vp->WorkPos.x + vp->WorkSize.x * 0.5f, vp->WorkPos.y + vp->WorkSize.y * 0.5f),
-        ImGuiCond_Always, ImVec2(0.5f, 0.5f));
-    ImGui::SetNextWindowBgAlpha(0.75f);
-    ImGuiWindowFlags flags = ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_AlwaysAutoResize |
-                             ImGuiWindowFlags_NoFocusOnAppearing | ImGuiWindowFlags_NoNav |
-                             ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoInputs;
-    if (ImGui::Begin("##graphics_settings_toast", nullptr, flags)) {
-      ImGui::Text("Resolution preset: %s", kPresetNames[idx]);
-    }
-    ImGui::End();
-  }
-};
-
 GraphicsSettings::GraphicsSettings() = default;
 GraphicsSettings::~GraphicsSettings() = default;
 
@@ -773,6 +868,11 @@ void GraphicsSettings::Bind(rex::Runtime* runtime) {
                 kStretchPercentToRectFnAddr);
   }
   g_widget_reposition_fn = dispatcher->GetFunction(kStretchWidgetRepositionFnAddr);
+  g_alloc_fn = dispatcher->GetFunction(kAllocFnAddr);
+  g_text_widget_ctor_fn = dispatcher->GetFunction(kTextWidgetCtorFnAddr);
+  g_set_text_fn = dispatcher->GetFunction(kSetTextFnAddr);
+  g_text_width_fn = dispatcher->GetFunction(kTextWidthFnAddr);
+  g_set_text_colour_fn = dispatcher->GetFunction(kSetTextColourFnAddr);
 
   if (!dispatcher->OverrideFunction(kChangeScreenSizeFnAddr, &GraphicsSettings_StretchScreen,
                                     &g_original_stretch_fn)) {
@@ -795,12 +895,6 @@ void GraphicsSettings::Bind(rex::Runtime* runtime) {
   }
 
   REXLOG_INFO("[graphics_settings] hooks installed");
-}
-
-void GraphicsSettings::AttachWatcher(rex::ui::ImGuiDrawer* drawer) {
-  if (drawer && !toast_dialog_) {
-    toast_dialog_ = std::make_unique<GraphicsSettingsToastDialog>(drawer);
-  }
 }
 
 GraphicsSettings& GetGraphicsSettings() {

@@ -271,7 +271,6 @@ class NocturnerecompApp : public rex::ReXApp {
     nocturne::Achievements().AttachWatcher(drawer);
     nocturne::GetAccentColor().AttachWatcher(drawer);
     nocturne::GetFastForward().AttachWatcher(drawer);
-    nocturne::GetGraphicsSettings().AttachWatcher(drawer);
   }
 
   // Replace the SDK's default pixel font with a serif face that fits the

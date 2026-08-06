@@ -9,14 +9,9 @@
 
 namespace rex {
 class Runtime;
-namespace ui {
-class ImGuiDrawer;
-}  // namespace ui
 }  // namespace rex
 
 namespace nocturne {
-
-class GraphicsSettingsToastDialog;  // toast-only ImGui dialog, defined in the .cpp
 
 class GraphicsSettings {
  public:
@@ -29,13 +24,8 @@ class GraphicsSettings {
   // game's own pinned build, not a third-party mod.
   void Bind(rex::Runtime* runtime);
 
-  // Creates the preset-cycled toast notification dialog. Call once the
-  // ImGui drawer is live (OnCreateDialogs).
-  void AttachWatcher(rex::ui::ImGuiDrawer* drawer);
-
  private:
   rex::Runtime* runtime_ = nullptr;
-  std::unique_ptr<GraphicsSettingsToastDialog> toast_dialog_;
 };
 
 // Process-wide instance shared between the app hooks.
