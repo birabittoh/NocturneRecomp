@@ -1,8 +1,16 @@
-// graphics_settings - cycles the "Change Screen Size..." screen's stretch
-// through a few preset percentages via X (repurposed), and relabels
-// that screen's "Default" prompt to a localized "Presets".
+// graphics_settings - owns the stretch preset catalog: applies presets, keeps
+// the choice across launches, and publishes it to interested mods.
+//
+// Presets are picked from the settings screen's Preset row (native_options.cpp,
+// which replaced the stock "Change Screen Size..." row with it -- see
+// RequestGraphicsPreset). The stretch screen that row used to open is still
+// reachable from it with Y, for finer control than the presets give, and this
+// file's hooks on it all still apply: the unclamped percent-to-rect converter,
+// the X-cycles-presets repurposing, and the localized "Presets" relabel of
+// that screen's "Default" prompt.
 #include "graphics_settings.h"
 
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <cmath>
@@ -62,7 +70,39 @@ constexpr const char* kPresetNames[kPresetCount] = {
     "PSX Default", "PSX Big", "16:10 Default", "16:10 Big",
     "16:10 Huge",  "16:10 Extreme", "Stretched"};
 
+// Index the row shows for a hand-dialled stretch that matches no preset.
+constexpr uint32_t kCustomIndex = kGraphicsCustomPresetIndex;
+
+static_assert(kPresetCount + 1 == kGraphicsPresetCount,
+              "kGraphicsPresetTexts (graphics_settings.h) must stay index-aligned with this "
+              "catalog plus one for Custom -- the native options Preset row indexes both by the "
+              "same value");
+
 constexpr int64_t kToastDurationMs = 2000;
+
+// Message class 11 is the d-pad, with word 2 naming the direction. Confirmed
+// from the stretch screen's own handler, which is where the percentages get
+// nudged one step at a time.
+constexpr uint32_t kMsgClassDpad = 11;
+constexpr uint32_t kDpadLeft = 0;
+constexpr uint32_t kDpadRight = 1;
+constexpr uint32_t kDpadUp = 2;
+constexpr uint32_t kDpadDown = 3;
+
+// How far the stretch may be pushed by hand. The vanilla handler clamps to
+// [1,50] horizontally and [1,30] vertically -- the point at which the image
+// fills the screen -- which is exactly the ceiling being lifted here: past it
+// the (unclamped, see GraphicsSettings_PercentToRect) converter extrapolates
+// and the image runs off the edges, which is the intent.
+//
+// A bound still exists, just a far looser one: the percentages feed integer
+// arithmetic in the converter and the profile they're saved to, and nothing
+// good comes of letting them run away. The floor stays at the vanilla 1 --
+// 0 collapses the rect and negatives invert it. The maximum is deliberately
+// above the tallest preset (16:10 Extreme, y=71), so every preset stays
+// reachable by hand.
+constexpr int32_t kStretchPercentMin = 1;
+constexpr int32_t kStretchPercentMax = 150;
 
 // The localized-string-id menu.set_widget_text_by_id_fn uses for "DEFAULT"
 // -- confirmed live by dumping the whole shared string table (base/count
@@ -151,6 +191,13 @@ uint32_t g_preset_index = 0;
 // wanting to track the live stretch preset can subscribe the same way.
 constexpr const char* kPresetAppliedEvent = "graphics_settings.preset_applied";
 
+// A preset picked from somewhere with no live PPCContext of its own -- the
+// native options Preset row's commit, which runs on the guest thread but from
+// inside a hook whose context belongs to an unrelated call. -1 means nothing
+// pending; GraphicsSettings_PerFrame takes it from here (see
+// ApplyRequestedPreset).
+std::atomic<int> g_requested_preset{-1};
+
 std::atomic<int> g_toast_preset_index{-1};
 std::atomic<int64_t> g_toast_deadline_ms{0};
 
@@ -205,12 +252,39 @@ std::optional<rex::system::ModStorage> g_storage;
 // reads stretch_rect, so the window had already closed by the time it
 // mattered. No fixed boot-duration assumption is reliable here, so this
 // reasserts unconditionally, indefinitely, exactly like that removed mod's
-// own ReassertOverride used to -- until a real X press explicitly takes
-// over (see ApplyPendingCycle, which clears this).
+// own ReassertOverride used to.
+//
+// The same engine keeps a *player-applied* preset alive too, for a second
+// reason: the game recomputes stretch_rect from its own profile percents when
+// a save loads. So applying a preset re-points this at the new rect (see
+// LatchCurrentRectForReassert) rather than switching it off.
 std::atomic<bool> g_restoring{false};
 bool g_restore_logged = false;
 double g_pending_restore_width_ratio = 0.0;
 double g_pending_restore_height_ratio = 0.0;
+
+// The player's own stretch, as a fraction of the render resolution -- the one
+// they dialled in on the stretch screen that matched no preset. Kept alongside
+// the "current" ratios rather than derived from them, so that picking a preset
+// from the Preset row and then cycling back to Custom returns to it instead of
+// losing it.
+bool g_has_custom = false;
+double g_custom_width_ratio = 0.0;
+double g_custom_height_ratio = 0.0;
+
+// Which preset a pair of stretch percentages is, or -1 for none -- the test
+// that decides whether leaving the stretch screen counts as "still on a
+// preset" or "this is now Custom". Percentages are what the presets are
+// defined in and what that screen edits, so this is an exact comparison with
+// no tolerance to tune.
+int32_t PresetIndexForPercent(int32_t x, int32_t y) {
+  for (uint32_t i = 0; i < kPresetCount; ++i) {
+    if (static_cast<int32_t>(kPresetX[i]) == x && static_cast<int32_t>(kPresetY[i]) == y) {
+      return static_cast<int32_t>(i);
+    }
+  }
+  return -1;
+}
 
 void SavePresetRatios(const uint8_t* base) {
   if (!g_storage) {
@@ -225,7 +299,42 @@ void SavePresetRatios(const uint8_t* base) {
   }
   g_storage->SetDouble("width_ratio", static_cast<double>(right) / max_w);
   g_storage->SetDouble("height_ratio", static_cast<double>(bottom) / max_h);
+  // The ratios alone can't be turned back into a preset index (two presets
+  // can round to the same rect, and a custom override matches none of them),
+  // and the native Preset row has to show *which* preset is active the moment
+  // the settings screen opens -- so the index is persisted alongside them.
+  g_storage->SetInt("preset_index", static_cast<int64_t>(g_preset_index));
+  if (g_has_custom) {
+    g_storage->SetDouble("custom_width_ratio", g_custom_width_ratio);
+    g_storage->SetDouble("custom_height_ratio", g_custom_height_ratio);
+  }
   g_storage->Save();
+}
+
+// Points the reassert engine below at whatever is in the live rect right now,
+// so it keeps being put back every frame.
+//
+// Applying a stretch *once* isn't enough to make it stick past the menu: the
+// game recomputes stretch_rect from its own profile-stored percents when a
+// save loads, so a preset picked from the main menu was silently overwritten
+// the moment gameplay started (and only appeared to "take" if it was applied
+// again from the pause menu, after that recompute had already happened).
+// The boot-time restore already had to solve this -- see g_restoring's comment
+// on why nothing bounded works -- so an explicitly applied preset just hands
+// itself to the same engine rather than switching it off. Ratios round-trip
+// exactly here (they're derived from the very rect that was just written), so
+// nothing is lost by going through them.
+void LatchCurrentRectForReassert(const uint8_t* base) {
+  uint32_t right = Read32BE(base, kStretchRectAddr + kRectRightOffset);
+  uint32_t bottom = Read32BE(base, kStretchRectAddr + kRectBottomOffset);
+  uint32_t max_w = Read32BE(base, kStretchRectMaxAddr + kRectRightOffset);
+  uint32_t max_h = Read32BE(base, kStretchRectMaxAddr + kRectBottomOffset);
+  if (max_w == 0 || max_h == 0) {
+    return;
+  }
+  g_pending_restore_width_ratio = static_cast<double>(right) / max_w;
+  g_pending_restore_height_ratio = static_cast<double>(bottom) / max_h;
+  g_restoring.store(true, std::memory_order_release);
 }
 
 // Applies a persisted ratio directly to the live rect (LEFT/TOP derived as
@@ -258,17 +367,19 @@ bool ApplyPendingRestore(uint8_t* base) {
   return true;
 }
 
-// Full replacement for the vanilla percent-to-rect converter -- same
-// formula, confirmed via its decompile, minus its two [1,50]/[1,30] clamp
-// checks, so writing an out-of-range percent (e.g. >50) correctly
-// extrapolates the rect past the native bounds. Real player d-pad input is
-// unaffected: the stretch screen's own d-pad handler has a *separate* clamp
-// on the percent fields that this doesn't touch.
-extern "C" void GraphicsSettings_PercentToRect(PPCContext& ctx, uint8_t* base) {
-  uint32_t a1 = static_cast<uint32_t>(ctx.r3.u32);
-  int32_t x = static_cast<int32_t>(Read32BE(base, a1 + kStretchXOffset));
-  int32_t y = static_cast<int32_t>(Read32BE(base, a1 + kStretchYOffset));
-
+// The vanilla percent-to-rect converter's arithmetic -- same formula,
+// confirmed via its decompile, minus its two [1,50]/[1,30] clamp checks, so
+// an out-of-range percent (e.g. >50) correctly extrapolates the rect past the
+// native bounds. The stretch screen's own d-pad handler has a *separate* clamp
+// on the percent fields, which this doesn't touch -- that one is lifted in
+// GraphicsSettings_StretchScreen instead, so hand adjustment can run off the
+// screen edges too.
+//
+// Takes the percents as arguments rather than reading them out of a screen
+// instance, so a preset can also be applied with no stretch screen open --
+// which is the only way the native options row can apply one (see
+// ApplyRequestedPreset).
+void WriteStretchRectForPercent(uint8_t* base, int32_t x, int32_t y) {
   int32_t max_left = static_cast<int32_t>(Read32BE(base, kStretchRectMaxAddr + kRectLeftOffset));
   int32_t max_top = static_cast<int32_t>(Read32BE(base, kStretchRectMaxAddr + kRectTopOffset));
   int32_t max_right = static_cast<int32_t>(Read32BE(base, kStretchRectMaxAddr + kRectRightOffset));
@@ -289,13 +400,30 @@ extern "C" void GraphicsSettings_PercentToRect(PPCContext& ctx, uint8_t* base) {
   Write32BE(base, kStretchRectAddr + kRectTopOffset, static_cast<uint32_t>(top));
   Write32BE(base, kStretchRectAddr + kRectRightOffset, static_cast<uint32_t>(right));
   Write32BE(base, kStretchRectAddr + kRectBottomOffset, static_cast<uint32_t>(bottom));
+}
 
-  if (g_widget_reposition_fn) {
-    ctx.r3.u32 = Read32BE(base, kUiTransitionManagerAddr);
-    ctx.r4.u32 = static_cast<uint32_t>(x);
-    ctx.r5.u32 = static_cast<uint32_t>(y);
-    g_widget_reposition_fn(ctx, base);
+// Repositions the front-end widgets to match a just-applied stretch, exactly
+// as the vanilla converter's own tail call does. Clobbers r3-r5, so callers
+// that need their context back save and restore it themselves.
+void RepositionWidgets(PPCContext& ctx, uint8_t* base, int32_t x, int32_t y) {
+  if (!g_widget_reposition_fn) {
+    return;
   }
+  ctx.r3.u32 = Read32BE(base, kUiTransitionManagerAddr);
+  ctx.r4.u32 = static_cast<uint32_t>(x);
+  ctx.r5.u32 = static_cast<uint32_t>(y);
+  g_widget_reposition_fn(ctx, base);
+}
+
+// Full replacement for the vanilla converter: reads the screen instance's own
+// percent fields, then does exactly what the original did with them.
+extern "C" void GraphicsSettings_PercentToRect(PPCContext& ctx, uint8_t* base) {
+  uint32_t a1 = static_cast<uint32_t>(ctx.r3.u32);
+  int32_t x = static_cast<int32_t>(Read32BE(base, a1 + kStretchXOffset));
+  int32_t y = static_cast<int32_t>(Read32BE(base, a1 + kStretchYOffset));
+
+  WriteStretchRectForPercent(base, x, y);
+  RepositionWidgets(ctx, base, x, y);
 }
 
 // Applies the next preset using whatever live ctx/base this call was given
@@ -307,11 +435,6 @@ void ApplyPendingCycle(PPCContext& ctx, uint8_t* base) {
     return;
   }
 
-  // An explicit player-driven cycle always wins outright, even mid-restore
-  // -- otherwise this press could get silently overwritten by the very
-  // next reassert tick.
-  g_restoring.store(false, std::memory_order_release);
-
   g_preset_index = (g_preset_index + 1) % kPresetCount;
   uint32_t target_x = kPresetX[g_preset_index];
   uint32_t target_y = kPresetY[g_preset_index];
@@ -321,11 +444,69 @@ void ApplyPendingCycle(PPCContext& ctx, uint8_t* base) {
 
   ctx.r3.u32 = a1;
   GraphicsSettings_PercentToRect(ctx, base);
+
+  // An explicit player-driven cycle takes the reassert engine over -- both so
+  // it isn't overwritten by the next restore tick, and so it survives the
+  // game's own recompute on save load (see LatchCurrentRectForReassert).
+  LatchCurrentRectForReassert(base);
+
   PublishPresetApplied(base);
   SavePresetRatios(base);
 
   g_toast_preset_index.store(static_cast<int>(g_preset_index), std::memory_order_release);
   g_toast_deadline_ms.store(NowMs() + kToastDurationMs, std::memory_order_release);
+}
+
+// Applies a preset queued by RequestGraphicsPreset. Unlike ApplyPendingCycle
+// this doesn't go through a screen instance's percent fields -- there needn't
+// be one, since the request comes from the settings screen's own Preset row --
+// so it writes the rect directly, the same way ApplyPendingRestore does. If
+// the stretch screen *has* been visited this session its percent fields are
+// updated too, so re-opening it doesn't show stale numbers.
+void ApplyRequestedPreset(PPCContext& ctx, uint8_t* base) {
+  const int index = g_requested_preset.exchange(-1, std::memory_order_acq_rel);
+  if (index < 0 || index >= static_cast<int>(kGraphicsPresetCount)) {
+    return;
+  }
+
+  // Custom isn't a percentage pair, so it goes back through the ratio path --
+  // the same one the boot-time restore uses, since a hand-dialled stretch is
+  // only ever recorded as a ratio.
+  if (index == static_cast<int>(kCustomIndex)) {
+    if (!g_has_custom) {
+      return;
+    }
+    g_preset_index = kCustomIndex;
+    g_pending_restore_width_ratio = g_custom_width_ratio;
+    g_pending_restore_height_ratio = g_custom_height_ratio;
+    if (ApplyPendingRestore(base)) {
+      g_restoring.store(true, std::memory_order_release);
+      SavePresetRatios(base);
+    }
+    return;
+  }
+
+  g_preset_index = static_cast<uint32_t>(index);
+  const int32_t x = static_cast<int32_t>(kPresetX[index]);
+  const int32_t y = static_cast<int32_t>(kPresetY[index]);
+
+  const uint32_t a1 = g_last_a1.load(std::memory_order_acquire);
+  if (a1 != 0) {
+    Write32BE(base, a1 + kStretchXOffset, static_cast<uint32_t>(x));
+    Write32BE(base, a1 + kStretchYOffset, static_cast<uint32_t>(y));
+  }
+
+  WriteStretchRectForPercent(base, x, y);
+  PPCContext saved = ctx;
+  RepositionWidgets(ctx, base, x, y);
+  ctx = saved;
+
+  // Takes over the reassert engine rather than switching it off: the pick has
+  // to survive the game's own recompute when a save loads.
+  LatchCurrentRectForReassert(base);
+
+  PublishPresetApplied(base);
+  SavePresetRatios(base);
 }
 
 // Hooks the stretch screen itself: tracks the live a1 and open/close state,
@@ -342,9 +523,35 @@ extern "C" void GraphicsSettings_StretchScreen(PPCContext& ctx, uint8_t* base) {
 
   uint32_t msg0 = Read32BE(base, a2 + 0);
   uint32_t msg2 = Read32BE(base, a2 + 8);
-  if (msg0 == 0 && msg2 == 5) {
-    g_screen_open.store(false, std::memory_order_release);
+
+  // A (accept) and B (cancel) both leave the screen. Tracking *both* matters
+  // now that "open" also suspends the reassert engine: treating only B as the
+  // exit would leave it suspended for the rest of the session after an A.
+  const bool leaving = msg0 == 0 && (msg2 == 4 || msg2 == 5);
+
+  // A d-pad step, re-applied after the original with our own wider bounds.
+  //
+  // The vanilla handler does `percent += 1` and clamps, so it can't simply be
+  // let through: once the value is sitting on 50 (or 30) every further press
+  // is a no-op. Recomputing the step from the value we saw going in, and
+  // writing it back afterwards, overrides that clamp without having to
+  // reimplement the rest of what the handler does on a d-pad press (the
+  // bump feedback, the base-class handling).
+  int32_t dpad_dx = 0;
+  int32_t dpad_dy = 0;
+  if (msg0 == kMsgClassDpad && a1 != 0) {
+    switch (msg2) {
+      case kDpadLeft: dpad_dx = -1; break;
+      case kDpadRight: dpad_dx = 1; break;
+      case kDpadUp: dpad_dy = 1; break;
+      case kDpadDown: dpad_dy = -1; break;
+      default: break;
+    }
   }
+  const int32_t percent_x_before =
+      dpad_dx != 0 ? static_cast<int32_t>(Read32BE(base, a1 + kStretchXOffset)) : 0;
+  const int32_t percent_y_before =
+      dpad_dy != 0 ? static_cast<int32_t>(Read32BE(base, a1 + kStretchYOffset)) : 0;
 
   bool suppress_default_reset = false;
   if (msg0 == 0 && msg2 == 6) {
@@ -366,14 +573,72 @@ extern "C" void GraphicsSettings_StretchScreen(PPCContext& ctx, uint8_t* base) {
   if (suppress_default_reset) {
     Write32BE(base, a2 + 8, 6);
   }
+
+  if (dpad_dx != 0 || dpad_dy != 0) {
+    const int32_t x = dpad_dx != 0
+                          ? std::clamp(percent_x_before + dpad_dx, kStretchPercentMin,
+                                       kStretchPercentMax)
+                          : static_cast<int32_t>(Read32BE(base, a1 + kStretchXOffset));
+    const int32_t y = dpad_dy != 0
+                          ? std::clamp(percent_y_before + dpad_dy, kStretchPercentMin,
+                                       kStretchPercentMax)
+                          : static_cast<int32_t>(Read32BE(base, a1 + kStretchYOffset));
+    Write32BE(base, a1 + kStretchXOffset, static_cast<uint32_t>(x));
+    Write32BE(base, a1 + kStretchYOffset, static_cast<uint32_t>(y));
+
+    // The handler recomputed the rect from the value it clamped, so redo it
+    // from ours.
+    PPCContext saved = ctx;
+    ctx.r3.u32 = a1;
+    GraphicsSettings_PercentToRect(ctx, base);
+    ctx = saved;
+  }
+
+  // Adopt whatever the player settled on -- the accepted value on A, or the
+  // one the vanilla handler just restored from the profile on B. Latching
+  // after the original has run is what makes that distinction free.
+  if (leaving) {
+    g_screen_open.store(false, std::memory_order_release);
+    LatchCurrentRectForReassert(base);
+
+    // Classify what the player left with. Anything that isn't one of the
+    // presets becomes (or replaces) Custom, which is what puts that entry in
+    // the Preset row's list -- so adjusting a preset by hand shows up there as
+    // its own choice rather than silently leaving the row claiming the preset
+    // it no longer matches.
+    const uint32_t screen = g_last_a1.load(std::memory_order_acquire);
+    if (screen != 0) {
+      const int32_t x = static_cast<int32_t>(Read32BE(base, screen + kStretchXOffset));
+      const int32_t y = static_cast<int32_t>(Read32BE(base, screen + kStretchYOffset));
+      const int32_t matched = PresetIndexForPercent(x, y);
+      if (matched >= 0) {
+        g_preset_index = static_cast<uint32_t>(matched);
+      } else {
+        g_preset_index = kCustomIndex;
+        g_has_custom = true;
+        g_custom_width_ratio = g_pending_restore_width_ratio;
+        g_custom_height_ratio = g_pending_restore_height_ratio;
+      }
+    }
+
+    SavePresetRatios(base);
+  }
 }
 
 // Hooks a guaranteed-every-frame guest function purely to get a live, valid
 // PPCContext without waiting for the player to press a button.
 extern "C" void GraphicsSettings_PerFrame(PPCContext& ctx, uint8_t* base) {
-  if (g_restoring.load(std::memory_order_acquire)) {
+  // Suspended while the stretch screen is open: that screen writes the rect
+  // live from its own percent fields as the player holds a direction, and a
+  // reassert every frame would put the previous value straight back -- which
+  // looks exactly like the d-pad doing nothing. The screen re-latches whatever
+  // the player settles on when it closes (see GraphicsSettings_StretchScreen).
+  if (g_restoring.load(std::memory_order_acquire) &&
+      !g_screen_open.load(std::memory_order_acquire)) {
     ApplyPendingRestore(base);
   }
+
+  ApplyRequestedPreset(ctx, base);
 
   if (g_screen_open.load(std::memory_order_acquire) && g_cycle_requested.exchange(false)) {
     PPCContext saved = ctx;
@@ -415,6 +680,23 @@ extern "C" void GraphicsSettings_SetWidgetText(PPCContext& ctx, uint8_t* base) {
 
 }  // namespace
 
+const char16_t* const kGraphicsPresetTexts[kGraphicsPresetCount] = {
+    u"PSX Default", u"PSX Big",       u"16:10 Default", u"16:10 Big",
+    u"16:10 Huge",  u"16:10 Extreme", u"Stretched",     u"Custom"};
+
+uint32_t GraphicsPresetChoiceCount() {
+  return g_has_custom ? kGraphicsPresetCount : kPresetCount;
+}
+
+int32_t GetGraphicsPresetIndex() { return static_cast<int32_t>(g_preset_index); }
+
+void RequestGraphicsPreset(int32_t index) {
+  if (index < 0 || index >= static_cast<int32_t>(GraphicsPresetChoiceCount())) {
+    return;
+  }
+  g_requested_preset.store(index, std::memory_order_release);
+}
+
 class GraphicsSettingsToastDialog : public rex::ui::ImGuiDialog {
  public:
   explicit GraphicsSettingsToastDialog(rex::ui::ImGuiDrawer* drawer) : ImGuiDialog(drawer) {}
@@ -423,6 +705,9 @@ class GraphicsSettingsToastDialog : public rex::ui::ImGuiDialog {
   void OnDraw(ImGuiIO& io) override {
     (void)io;
     int idx = g_toast_preset_index.load(std::memory_order_acquire);
+    // kPresetCount, not kGraphicsPresetCount: the toast is driven by X-cycling
+    // on the stretch screen, which only ever lands on a real preset, and
+    // kPresetNames has no Custom entry.
     if (idx < 0 || idx >= static_cast<int>(kPresetCount)) {
       return;
     }
@@ -431,8 +716,9 @@ class GraphicsSettingsToastDialog : public rex::ui::ImGuiDialog {
     }
 
     const ImGuiViewport* vp = ImGui::GetMainViewport();
-    ImGui::SetNextWindowPos(ImVec2(vp->WorkPos.x + vp->WorkSize.x - 20.0f, vp->WorkPos.y + 20.0f),
-                            ImGuiCond_Always, ImVec2(1.0f, 0.0f));
+    ImGui::SetNextWindowPos(
+        ImVec2(vp->WorkPos.x + vp->WorkSize.x * 0.5f, vp->WorkPos.y + vp->WorkSize.y * 0.5f),
+        ImGuiCond_Always, ImVec2(0.5f, 0.5f));
     ImGui::SetNextWindowBgAlpha(0.75f);
     ImGuiWindowFlags flags = ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_AlwaysAutoResize |
                              ImGuiWindowFlags_NoFocusOnAppearing | ImGuiWindowFlags_NoNav |
@@ -457,6 +743,20 @@ void GraphicsSettings::Bind(rex::Runtime* runtime) {
 
   g_storage.emplace(runtime_->user_data_root() / "mods" / "graphics_settings.cfg");
   g_storage->Load();
+  auto custom_width = g_storage->GetDouble("custom_width_ratio");
+  auto custom_height = g_storage->GetDouble("custom_height_ratio");
+  if (custom_width && custom_height && *custom_width > 0.0 && *custom_height > 0.0) {
+    g_custom_width_ratio = *custom_width;
+    g_custom_height_ratio = *custom_height;
+    g_has_custom = true;
+  }
+  // Loaded after the custom ratios: a saved index of kCustomIndex is only
+  // valid if the custom stretch it refers to came back too.
+  if (auto preset_index = g_storage->GetInt("preset_index");
+      preset_index && *preset_index >= 0 &&
+      *preset_index < static_cast<int64_t>(GraphicsPresetChoiceCount())) {
+    g_preset_index = static_cast<uint32_t>(*preset_index);
+  }
   auto width_ratio = g_storage->GetDouble("width_ratio");
   auto height_ratio = g_storage->GetDouble("height_ratio");
   if (width_ratio && height_ratio && *width_ratio > 0.0 && *height_ratio > 0.0) {

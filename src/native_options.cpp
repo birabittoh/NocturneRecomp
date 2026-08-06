@@ -59,11 +59,17 @@
 // So adding rows is an *append*: raise the count at the list-setup call, hand
 // the bind call an extended copy of the table, and paint our rows' own text
 // over the widgets the list just created. Appending *after* the stock rows
-// matters: the handler only opens the resolution screen when the selected row
-// is exactly 2 (and sub_825B4CC0 hides the left/right arrows on that same
-// row), so anything inserted *before* index 3 would silently rewire both
-// checks. Past index 2 a row draws the arrows and takes A as "accept and
+// matters: past index 2 a row draws the arrows and takes A as "accept and
 // close", which is what the stock rows 0/1 do too.
+//
+// Row 2 is the exception, and is special-cased throughout the screen because
+// it *was* "Change Screen Size...", the one row that opened another screen
+// (page 17) rather than cycling a value. It is now the Preset row (see the
+// "Preset" section below), which cycles like any other, so all three of those
+// special cases are undone: the page-17 jump and the prompt-bar hint in
+// NativeOptions_SettingsEvent, and the hidden left/right arrows in
+// NativeOptions_SettingsUpdate. The screen itself is still reachable, but only
+// through Y, which this file posts the page switch for directly.
 //
 // Note this screen is *shared*: on A or B its handler checks the in-game flag
 // (byte at 0x82E4F808+29) and returns to page 18 (the pause menu) when a save
@@ -83,6 +89,7 @@
 #include <iterator>
 #include <string>
 
+#include "graphics_settings.h"
 #include "settings.h"
 
 #include <rex/cvar.h>
@@ -114,10 +121,49 @@ constexpr uint32_t kSetWidgetTextFnAddr = 0x825D1EE0u;     // (widget, utf16_tex
 constexpr uint32_t kSetTextScaleFnAddr = 0x825D20C0u;      // (widget, scale) -- scale in f1
 constexpr uint32_t kSettingsEventFnAddr = 0x825B3F58u;     // (screen, message)
 constexpr uint32_t kSettingsActivateFnAddr = 0x825B43E0u;  // (screen, user_index)
+constexpr uint32_t kSettingsUpdateFnAddr = 0x825B4CC0u;    // (screen, delta)
+constexpr uint32_t kSetWidgetTextByIdFnAddr = 0x825D1EE8u;  // (widget, string_id)
 constexpr uint32_t kAllocFnAddr = 0x82576950u;             // (size) -> pointer
 
-// Every front-end page change goes through this one queue push, which is where
-// the pre-game watchdog switch gets filtered out. See NativeOptions_PostEvent.
+// The screen's own widget builder, and the prompt-bar pieces it uses. See
+// NativeOptions_PromptBarLayout for how the fourth prompt is added.
+constexpr uint32_t kPromptBarLayoutFnAddr = 0x825CA820u;  // (x, y, width, w1, w2, w3)
+constexpr uint32_t kPromptCtorFnAddr = 0x825D1DB0u;       // (memory, parent, flag) -> prompt
+constexpr uint32_t kPromptSetGlyphFnAddr = 0x825D1EF8u;   // (prompt, image)
+constexpr uint32_t kPromptShowGlyphFnAddr = 0x825D2010u;  // (prompt)
+constexpr uint32_t kPromptTextOffsetFnAddr = 0x825D2018u; // (prompt, dx, dy)
+constexpr uint32_t kPromptSetPosFnAddr = 0x825D1FA8u;     // (prompt, x, y)
+constexpr uint32_t kTextWidthFnAddr = 0x825CF008u;        // (text_widget) -> pixels
+constexpr uint32_t kFindImageFnAddr = 0x825CEB68u;        // (image_bank, name) -> image
+
+// A prompt is a glyph widget plus a text widget, with the text drawn at a
+// fixed offset from the glyph (kPromptTextOffsetFnAddr sets it; the stock
+// prompts all use 30,5).
+constexpr uint32_t kPromptGlyphOffset = 544;
+constexpr uint32_t kPromptTextOffset = 548;
+constexpr uint32_t kPromptGlyphWidthOffset = 536;
+constexpr uint32_t kPromptSize = 552;
+constexpr uint32_t kPromptTextDx = 30;
+constexpr uint32_t kPromptTextDy = 5;
+
+// Where the bar itself sits, and the pointers the builder feeds it. The
+// x/y/width are the builder's own arguments (0, 423, 640).
+constexpr uint32_t kPromptBarX = 0;
+constexpr uint32_t kPromptBarY = 423;
+constexpr uint32_t kPromptBarWidth = 640;
+
+// The image bank the glyph names are resolved against, the prompt text colour,
+// and the name of the Y glyph. The glyph names are single-character strings in
+// a descending-letter table ("Z" 0x82202270, "Y" 0x82202274, "X" 0x82202278) --
+// the stock bar uses the X, A and B entries of it.
+constexpr uint32_t kImageBankPtrAddr = 0x82E7A570u;
+constexpr uint32_t kPromptColourAddr = 0x82895098u;
+constexpr uint32_t kYGlyphNameAddr = 0x82202274u;
+
+// Every front-end page change goes through this one queue push -- both the way
+// in to the stretch screen (which this file now posts itself, see
+// NativeOptions_SettingsEvent's Y handling) and the pre-game watchdog switch
+// that gets filtered back out. See NativeOptions_PostEvent.
 constexpr uint32_t kPostEventFnAddr = 0x825CE8E8u;  // (class, arg1, page, controller)
 constexpr uint32_t kEventClassPageSwitch = 8;
 
@@ -176,32 +222,63 @@ constexpr uint32_t kVanillaRowCount = 3;
 // The screen's own option list, off the screen instance.
 constexpr uint32_t kScreenListOffset = 560;
 
-// Rows the stock Activate greys out until a save is loaded: Volume and
-// "Change Screen Size...". See NativeOptions_SettingsActivate.
+// Rows the stock Activate greys out until a save is loaded: Volume and the
+// row that was "Change Screen Size...". See NativeOptions_SettingsActivate.
 constexpr uint32_t kGatedFirstRow = 1;
 constexpr uint32_t kGatedLastRow = 2;
 
-// "Change Screen Size...", the one row whose A opens another screen.
-constexpr uint32_t kResolutionScreenRow = 2;
+// The stock "Change Screen Size..." row, now the Preset row. Still the row the
+// screen special-cases as "the one that opens another screen", which is what
+// NativeOptions_SettingsEvent and NativeOptions_SettingsUpdate undo.
+constexpr uint32_t kPresetRow = 2;
+
+// The screen's prompt-bar widget, and the string ids the screen sets it to:
+// sub_825B3F58 opens with `set_text_by_id(screen+584, selected == 2 ? 9 : 4)`
+// -- id 9 being the "opens a submenu" hint that row no longer deserves.
+constexpr uint32_t kScreenPromptOffset = 584;
+constexpr uint32_t kPromptOrdinaryRowStringId = 4;
+
+// The screen's left/right arrow widgets, and the x positions sub_825B4CC0
+// gives them for an ordinary row. Their y comes from the selected row's own
+// value widget (+8), plus 2.
+constexpr uint32_t kScreenLeftArrowOffset = 544;
+constexpr uint32_t kScreenRightArrowOffset = 548;
+constexpr uint32_t kArrowLeftX = 360;
+constexpr uint32_t kArrowRightX = 525;
+constexpr uint32_t kWidgetXOffset = 4;
+constexpr uint32_t kWidgetYOffset = 8;
+constexpr uint32_t kArrowYBias = 2;
 
 // The app object (a pointer *stored at* this address, not the object itself)
-// and the "a save is loaded" latch inside it. sub_825B3F58 gates both its
-// return page and its Change-Screen-Size navigation on this byte.
+// and the "a save is loaded" latch inside it -- the flag the front-end
+// watchdog clears on its way out, and the one that decides which page the
+// settings screen exits to.
 constexpr uint32_t kAppObjectPtrAddr = 0x82E4F808u;
 constexpr uint32_t kInGameLatchOffset = 29;
 
 // The UI manager, again a pointer stored at this address.
 constexpr uint32_t kUiManagerPtrAddr = 0x82E7A02Cu;
 
+// Widget vtable slot that makes a widget visible (the hide side, slot +20, is
+// what the stock update calls on row 2).
+constexpr uint32_t kWidgetVtableShow = 16;
+
 // Message layout for a screen's event handler: word 0 is the event class
 // (0 = button press) and word 2 is the button. 4/5/6 are A/B/X, matching the
 // screen's own "X defaults, A accept, B cancel" prompt bar.
 constexpr uint32_t kMsgClass = 0;
 constexpr uint32_t kMsgButton = 8;
+// Word 3: which controller sent it. Every page switch the screen posts passes
+// this straight through.
+constexpr uint32_t kMsgController = 12;
 constexpr uint32_t kMsgClassButton = 0;
 constexpr uint32_t kButtonAccept = 4;
 constexpr uint32_t kButtonCancel = 5;
 constexpr uint32_t kButtonDefaults = 6;
+// Y, which this screen receives and ignores -- there is no fourth prompt in
+// its bar. Repurposed as the way back into the stretch screen the Preset row
+// displaced; see NativeOptions_SettingsEvent.
+constexpr uint32_t kButtonStretchScreen = 7;
 
 // Mirrors graphics_settings.cpp's XLanguageId -- the six languages the
 // in-game Language dropdown offers; anything else falls back to English.
@@ -308,6 +385,12 @@ struct CustomRow {
   // is rendered by the game itself.
   const char16_t* const* values = nullptr;
   uint32_t value_count = 0;
+
+  // Optional: how many of `values` are actually offered right now, re-asked
+  // every time the screen binds. For a row whose tail entries only become
+  // reachable once something exists to back them (the Preset row's "Custom").
+  // Must never exceed `value_count`, which stays the size of the array.
+  uint32_t (*live_value_count)() = nullptr;
 
   // Numeric row bounds. Ignored when `values` is set.
   int32_t min = 0;
@@ -610,6 +693,68 @@ void CommitMasterVolumeStep(int32_t step) {
   SaveToUserSettings(kAudioVolumeCvar);
 }
 
+// --- Preset (takes over the stock row 2) ------------------------------------
+
+// The stock row 2 was "Change Screen Size...", the one row that navigated to
+// another screen (page 17) instead of cycling a value. That screen's entire
+// job was picking a stretch preset -- graphics_settings.cpp already cycled its
+// own catalog there with X -- so the row is replaced outright by a normal
+// spinner over that same catalog, and the screen is no longer reachable from
+// this menu. Everything the screen offered is now one left/right away.
+//
+// Taking over row 2 specifically means neutralising the three places the
+// stock screen treats it as "the row that opens a screen" rather than as an
+// ordinary row -- see NativeOptions_SettingsEvent (the page-17 jump and the
+// prompt-bar hint) and NativeOptions_SettingsUpdate (the hidden arrows).
+//
+// commit() only *queues* the preset: applying it writes guest memory and
+// calls a guest function, which needs a live PPCContext this path doesn't own,
+// so graphics_settings applies it on its next per-frame tick. That is also why
+// this row is `live` -- the player sees each preset as they cycle onto it, one
+// frame later, and B puts the original back the same way.
+const char16_t* PresetLabel() {
+  switch (CurrentLanguage()) {
+    case XLanguageId::kItalian:
+      return u"Preset";
+    // No kJapanese case -- see ResolutionLabel's comment on why.
+    case XLanguageId::kGerman:
+      return u"Voreinstellung";
+    case XLanguageId::kFrench:
+      return u"Préréglage";
+    case XLanguageId::kSpanish:
+      return u"Preajuste";
+    case XLanguageId::kEnglish:
+    default:
+      return u"Preset";
+  }
+}
+
+// The Y prompt's text. All caps to match the prompt bar's own strings (the
+// rows are title case, the bar is not), and kept short because a fourth prompt
+// has to share the bar's 640px with three others -- NativeOptions_SettingsBuild
+// silently leaves the stock layout alone if the four don't fit, so a long
+// translation would cost the prompt entirely rather than overflow.
+//
+// Read once, when the screen object is built, unlike the row labels which are
+// re-read on every paint. That's fine here: `user_language` is restart-scoped,
+// so it cannot change between the build and the screen being shown.
+const char16_t* CustomPromptLabel() {
+  switch (CurrentLanguage()) {
+    case XLanguageId::kItalian:
+      return u"PERSONALIZZA";
+    // No kJapanese case -- see ResolutionLabel's comment on why.
+    case XLanguageId::kGerman:
+      return u"ANPASSEN";
+    case XLanguageId::kFrench:
+      return u"AJUSTER";
+    case XLanguageId::kSpanish:
+      return u"AJUSTAR";
+    case XLanguageId::kEnglish:
+    default:
+      return u"CUSTOMIZE";
+  }
+}
+
 // --- Graphics (stock row 0, relabelled) -------------------------------------
 
 // The Italian localisation of the Graphics row reads "Grafici" (the plural of
@@ -654,6 +799,18 @@ constexpr CustomRow kCustomRows[] = {
         .live = true,
         .pin_stock_to_max = true,
         .available = &MasterVolumeAvailable,
+    },
+    {
+        .list_row = kPresetRow,
+        .label = &PresetLabel,
+        .values = kGraphicsPresetTexts,
+        .value_count = kGraphicsPresetCount,
+        // "Custom" (the last entry) only joins the cycle once the player has
+        // dialled a stretch in by hand on the screen Y opens.
+        .live_value_count = &GraphicsPresetChoiceCount,
+        .get = &GetGraphicsPresetIndex,
+        .commit = &RequestGraphicsPreset,
+        .live = true,
     },
     {
         // `live` here doesn't mean the *effect* is immediate -- resolution is
@@ -778,7 +935,14 @@ int32_t FindActiveValueRow(uint32_t list_row) {
 int32_t RowMin(const CustomRow& row) { return IsEnumRow(row) ? 0 : row.min; }
 
 int32_t RowMax(const CustomRow& row) {
-  return IsEnumRow(row) ? static_cast<int32_t>(row.value_count) - 1 : row.max;
+  if (!IsEnumRow(row)) {
+    return row.max;
+  }
+  uint32_t count = row.value_count;
+  if (row.live_value_count) {
+    count = std::clamp(row.live_value_count(), uint32_t{1}, row.value_count);
+  }
+  return static_cast<int32_t>(count) - 1;
 }
 
 int32_t RowStep(const CustomRow& row) { return IsEnumRow(row) ? 1 : row.step; }
@@ -799,13 +963,36 @@ PPCFunc* g_set_text_scale_fn = nullptr;
 PPCFunc* g_enable_row_fn = nullptr;
 PPCFunc* g_original_list_update_fn = nullptr;
 PPCFunc* g_set_widget_colour_fn = nullptr;
+PPCFunc* g_set_widget_text_by_id_fn = nullptr;
 PPCFunc* g_alloc_fn = nullptr;
+PPCFunc* g_original_settings_update_fn = nullptr;
 PPCFunc* g_original_post_event_fn = nullptr;
+PPCFunc* g_original_prompt_bar_layout_fn = nullptr;
+PPCFunc* g_original_settings_build_fn = nullptr;
+PPCFunc* g_prompt_ctor_fn = nullptr;
+PPCFunc* g_prompt_set_glyph_fn = nullptr;
+PPCFunc* g_prompt_show_glyph_fn = nullptr;
+PPCFunc* g_prompt_text_offset_fn = nullptr;
+PPCFunc* g_prompt_set_pos_fn = nullptr;
+PPCFunc* g_text_width_fn = nullptr;
+PPCFunc* g_find_image_fn = nullptr;
 
-// True from the moment we force our way into the resolution screen with no
-// save loaded, until we leave it again. Scopes both the watchdog suppression
-// and the latch cleanup below to exactly that window.
-bool g_pregame_resolution_screen = false;
+// The settings screen's three stock prompts, left to right (X, A, B), captured
+// during the build; and the fourth ("Custom", for Y) this file adds, with the
+// screen it belongs to. See NativeOptions_PromptBarLayout.
+std::array<uint32_t, 3> g_stock_prompts = {};
+uint32_t g_custom_prompt = 0;
+uint32_t g_custom_prompt_screen = 0;
+
+// True from the moment we open the stretch screen with no save loaded, until
+// we leave it again. Scopes both the watchdog suppression and the latch
+// cleanup in NativeOptions_PostEvent to exactly that window.
+bool g_pregame_stretch_screen = false;
+
+// Needed to resolve a widget's virtual "show" through its vtable at runtime
+// (see ShowWidget) -- the guest does the same dispatch, and there is no
+// static address to hardcode.
+rex::runtime::FunctionDispatcher* g_dispatcher = nullptr;
 
 // The settings screen's option list, claimed in the list-setup hook. Every
 // other hook keys off this so the controls screen's identically-shaped list
@@ -868,7 +1055,6 @@ uint32_t InGameLatchAddress(const uint8_t* base) {
   return app_object ? app_object + kInGameLatchOffset : 0;
 }
 
-
 // Calls a guest function with a scratch register set, restoring the caller's
 // context afterwards -- same pattern graphics_settings.cpp uses to reuse the
 // live context for its own guest calls.
@@ -883,6 +1069,77 @@ uint32_t CallGuest(PPCContext& ctx, uint8_t* base, PPCFunc* fn, uint32_t r3, uin
   const uint32_t result = ctx.r3.u32;
   ctx = saved;
   return result;
+}
+
+// Queues a front-end page switch, exactly as the screens themselves do.
+//
+// Goes to the *original* post rather than our own override: our filter reads
+// the caller's return address to recognise the watchdog's post, and the lr in
+// this context belongs to whatever guest call we are wrapping, not to a real
+// call site.
+void CallGuestPageSwitch(PPCContext& ctx, uint8_t* base, uint32_t page, uint32_t controller) {
+  if (!g_original_post_event_fn) {
+    return;
+  }
+  PPCContext saved = ctx;
+  ctx.r3.u32 = kEventClassPageSwitch;
+  ctx.r4.u32 = 0;
+  ctx.r5.u32 = page;
+  ctx.r6.u32 = controller;
+  g_original_post_event_fn(ctx, base);
+  ctx = saved;
+}
+
+// Allocates the shared entry table + text scratch from the game's own heap,
+// once. Both the row binding and the prompt-bar builder need the scratch, and
+// either can run first (the builder runs when the screen object is created,
+// the bind when it opens), so neither owns the allocation.
+bool EnsureArena(PPCContext& ctx, uint8_t* base) {
+  if (g_entries) {
+    return true;
+  }
+  const uint32_t arena = CallGuest(ctx, base, g_alloc_fn, kArenaSize, 0);
+  if (!arena) {
+    REXLOG_WARN("[native_options] guest allocation failed; no extra rows");
+    return false;
+  }
+  g_entries = arena;
+  g_text_scratch = arena + kTotalRowCount * kEntryStride;
+  return true;
+}
+
+// Copies UTF-16 text into the shared guest scratch buffer and returns its
+// guest address, or 0 if there is no scratch. The guest text setters copy out
+// of it immediately, so one buffer serves every caller.
+uint32_t StageText(uint8_t* base, const char16_t* text) {
+  if (!g_text_scratch || !text) {
+    return 0;
+  }
+  uint32_t length = 0;
+  while (text[length] != u'\0' && length < kTextScratchChars - 1) {
+    Write16BE(base, g_text_scratch + length * 2, static_cast<uint16_t>(text[length]));
+    ++length;
+  }
+  Write16BE(base, g_text_scratch + length * 2, 0);
+  return g_text_scratch;
+}
+
+// Makes a widget visible through its own vtable, the same virtual the stock
+// screen update calls. Resolved per call because the target depends on the
+// widget's class -- there is no one address to hook.
+void ShowWidget(PPCContext& ctx, uint8_t* base, uint32_t widget) {
+  if (!widget || !g_dispatcher) {
+    return;
+  }
+  const uint32_t vtable = Read32BE(base, widget);
+  if (!vtable) {
+    return;
+  }
+  const uint32_t show_addr = Read32BE(base, vtable + kWidgetVtableShow);
+  if (!show_addr) {
+    return;
+  }
+  CallGuest(ctx, base, g_dispatcher->GetFunction(show_addr), widget, 0);
 }
 
 // The list's normal row text scale, read live rather than hardcoded.
@@ -931,13 +1188,7 @@ void SetWidgetText(PPCContext& ctx, uint8_t* base, uint32_t widget, const char16
     }
   }
 
-  uint32_t length = 0;
-  while (text[length] != u'\0' && length < kTextScratchChars - 1) {
-    Write16BE(base, g_text_scratch + length * 2, static_cast<uint16_t>(text[length]));
-    ++length;
-  }
-  Write16BE(base, g_text_scratch + length * 2, 0);
-  CallGuest(ctx, base, g_set_widget_text_fn, widget, g_text_scratch);
+  CallGuest(ctx, base, g_set_widget_text_fn, widget, StageText(base, text));
 
   if (g_set_text_scale_fn) {
     PPCContext saved = ctx;
@@ -1064,15 +1315,7 @@ extern "C" void NativeOptions_BindRows(PPCContext& ctx, uint8_t* base) {
   bool ours = g_list != 0 && ctx.r3.u32 == g_list && ctx.r5.u32 == kVanillaRowCount;
 
   if (ours) {
-    if (!g_entries) {
-      const uint32_t arena = CallGuest(ctx, base, g_alloc_fn, kArenaSize, 0);
-      if (arena) {
-        g_entries = arena;
-        g_text_scratch = arena + kTotalRowCount * kEntryStride;
-      } else {
-        REXLOG_WARN("[native_options] guest allocation failed; no extra rows");
-      }
-    }
+    EnsureArena(ctx, base);
     if (g_entries) {
       g_vanilla_entries = ctx.r4.u32;
       for (uint32_t i = 0; i < kVanillaRowCount * kEntryStride; i += 4) {
@@ -1180,6 +1423,36 @@ extern "C" void NativeOptions_ListUpdate(PPCContext& ctx, uint8_t* base) {
   if (g_original_list_update_fn) {
     g_original_list_update_fn(ctx, base);
   }
+
+  // Repaint the Preset row's value, which that same Update just blanked.
+  //
+  // It opens with `set_text(list+768, "")` -- value widget 2, hardcoded, no
+  // condition -- because the row it was written for ("Change Screen Size...")
+  // navigated instead of holding a value. Painting once at bind time is
+  // therefore not enough for row 2 the way it is for every other row: the text
+  // survives exactly until the next frame. The preset still applied, which is
+  // why the row looked empty rather than broken.
+  //
+  // The scale is preserved rather than reasserted: the blanking doesn't touch
+  // it, so whatever the widget carries is already right, including the larger
+  // scale the list gives the selected row.
+  if (g_list == 0 || list != g_list) {
+    return;
+  }
+  const int32_t custom_index = FindActiveValueRow(kPresetRow);
+  if (custom_index < 0) {
+    return;
+  }
+  const CustomRow& row = kCustomRows[custom_index];
+  if (!IsEnumRow(row)) {
+    return;
+  }
+  const int32_t value = CustomEntryValue(base, static_cast<uint32_t>(custom_index));
+  if (value < 0 || value >= static_cast<int32_t>(row.value_count)) {
+    return;
+  }
+  SetWidgetText(ctx, base, Read32BE(base, g_list + kListRowValues + 4 * kPresetRow),
+                row.values[value], /*preserve_scale=*/true);
 }
 
 // Keeps every stock row usable regardless of whether a save is loaded.
@@ -1216,13 +1489,169 @@ extern "C" void NativeOptions_SettingsActivate(PPCContext& ctx, uint8_t* base) {
   }
 }
 
-// Keeps the pre-game resolution screen from being yanked away the frame after
-// it opens.
+// Captures the settings screen's three prompt widgets.
+//
+// The bar layout (sub_825CA820) is the only place all three are visible at
+// once: the builder keeps just the A prompt on the screen object (+584) and
+// drops the X and B ones as locals the moment it has spread them. That
+// function also takes exactly three widgets and spreads them across the bar's
+// width -- gaps of (width - total)/4 -- so a fourth prompt means re-laying the
+// row out by hand afterwards, with the three captured here.
+extern "C" void NativeOptions_PromptBarLayout(PPCContext& ctx, uint8_t* base) {
+  const uint32_t lr = static_cast<uint32_t>(ctx.lr);
+  if (lr > kSettingsBuildFnAddr && lr <= kSettingsBuildFnAddr + kSettingsBuildFnSize) {
+    // (x, y, width, X, A, B) -- the three widgets are the *last* three
+    // arguments, r6/r7/r8; r3-r5 are the bar's own geometry.
+    g_stock_prompts[0] = ctx.r6.u32;  // X, leftmost
+    g_stock_prompts[1] = ctx.r7.u32;  // A
+    g_stock_prompts[2] = ctx.r8.u32;  // B
+  }
+
+  if (g_original_prompt_bar_layout_fn) {
+    g_original_prompt_bar_layout_fn(ctx, base);
+  }
+}
+
+// One prompt's width on the bar: its glyph plus its text, the same sum the
+// stock layout uses.
+uint32_t PromptWidth(PPCContext& ctx, uint8_t* base, uint32_t prompt) {
+  const uint32_t glyph = Read32BE(base, prompt + kPromptGlyphOffset);
+  const uint32_t text = Read32BE(base, prompt + kPromptTextOffset);
+  const uint32_t glyph_width = glyph ? Read32BE(base, glyph + kPromptGlyphWidthOffset) : 0;
+  const uint32_t text_width =
+      text ? CallGuest(ctx, base, g_text_width_fn, text, 0) : 0;
+  return glyph_width + text_width;
+}
+
+// Builds the "Custom" prompt, mirroring the builder's own recipe for the three
+// stock ones: allocate, construct, point it at a glyph from the image bank,
+// set the text, offset the text from the glyph, colour it. The only departure
+// is the text itself -- the stock prompts take a string-table id, and there is
+// no id for this -- so it goes in as literal UTF-16 and the text scale is
+// copied off a stock prompt, which the by-id setter would have supplied.
+uint32_t CreateCustomPrompt(PPCContext& ctx, uint8_t* base, uint32_t screen) {
+  if (!g_alloc_fn || !g_prompt_ctor_fn || !g_find_image_fn || !g_set_widget_text_fn) {
+    return 0;
+  }
+  const uint32_t memory = CallGuest(ctx, base, g_alloc_fn, kPromptSize, 0);
+  if (!memory) {
+    return 0;
+  }
+
+  PPCContext saved = ctx;
+  ctx.r3.u32 = memory;
+  ctx.r4.u32 = screen;
+  ctx.r5.u32 = 0;
+  g_prompt_ctor_fn(ctx, base);
+  const uint32_t prompt = ctx.r3.u32;
+  ctx = saved;
+  if (!prompt) {
+    return 0;
+  }
+
+  const uint32_t bank = Read32BE(base, kImageBankPtrAddr);
+  const uint32_t image = CallGuest(ctx, base, g_find_image_fn, bank, kYGlyphNameAddr);
+  if (image && g_prompt_set_glyph_fn) {
+    CallGuest(ctx, base, g_prompt_set_glyph_fn, prompt, image);
+  }
+  if (g_prompt_show_glyph_fn) {
+    CallGuest(ctx, base, g_prompt_show_glyph_fn, prompt, 0);
+  }
+
+  CallGuest(ctx, base, g_set_widget_text_fn, prompt, StageText(base, CustomPromptLabel()));
+
+  if (g_prompt_text_offset_fn) {
+    saved = ctx;
+    ctx.r3.u32 = prompt;
+    ctx.r4.u32 = kPromptTextDx;
+    ctx.r5.u32 = kPromptTextDy;
+    g_prompt_text_offset_fn(ctx, base);
+    ctx = saved;
+  }
+
+  // Match a stock prompt's text scale, which its string-table lookup set.
+  const uint32_t stock_text = Read32BE(base, g_stock_prompts[0] + kPromptTextOffset);
+  if (stock_text && g_set_text_scale_fn) {
+    const float scale = std::bit_cast<float>(Read32BE(base, stock_text + kWidgetTextScaleOffset));
+    if (scale > 0.0f && scale <= 4.0f) {
+      saved = ctx;
+      ctx.r3.u32 = prompt;
+      ctx.f1.f64 = static_cast<double>(scale);
+      g_set_text_scale_fn(ctx, base);
+      ctx = saved;
+    }
+  }
+
+  if (g_set_widget_colour_fn) {
+    CallGuest(ctx, base, g_set_widget_colour_fn, prompt, Read32BE(base, kPromptColourAddr));
+  }
+  return prompt;
+}
+
+// Adds the "Custom" prompt for Y and re-spaces the bar to fit four.
+//
+// Runs after the builder rather than inside it because the builder is where
+// the screen pointer (the prompt's parent, which is what puts it in the draw
+// list) and the finished stock prompts both exist. The spacing mirrors the
+// stock layout's own formula with one more item: n+1 equal gaps around n
+// prompts.
+extern "C" void NativeOptions_SettingsBuild(PPCContext& ctx, uint8_t* base) {
+  const uint32_t screen = ctx.r3.u32;
+
+  g_stock_prompts = {};
+  if (g_original_settings_build_fn) {
+    g_original_settings_build_fn(ctx, base);
+  }
+
+  if (!screen || g_stock_prompts[0] == 0 || g_stock_prompts[1] == 0 || g_stock_prompts[2] == 0) {
+    return;
+  }
+  if (!EnsureArena(ctx, base)) {
+    return;
+  }
+
+  // The builder runs once per screen object, but guard anyway: a second prompt
+  // on the same screen would be invisible extra work at best.
+  if (g_custom_prompt_screen != screen) {
+    g_custom_prompt = CreateCustomPrompt(ctx, base, screen);
+    g_custom_prompt_screen = g_custom_prompt ? screen : 0;
+  }
+  if (!g_custom_prompt || !g_prompt_set_pos_fn) {
+    return;
+  }
+
+  const std::array<uint32_t, 4> prompts = {g_stock_prompts[0], g_stock_prompts[1],
+                                           g_stock_prompts[2], g_custom_prompt};
+  std::array<uint32_t, 4> widths = {};
+  uint32_t total = 0;
+  for (size_t i = 0; i < prompts.size(); ++i) {
+    widths[i] = PromptWidth(ctx, base, prompts[i]);
+    total += widths[i];
+  }
+  if (total >= kPromptBarWidth) {
+    return;  // nothing sensible to space; leave the stock three where they are
+  }
+
+  const uint32_t gap = (kPromptBarWidth - total) / (static_cast<uint32_t>(prompts.size()) + 1);
+  uint32_t x = kPromptBarX + gap;
+  for (size_t i = 0; i < prompts.size(); ++i) {
+    PPCContext saved = ctx;
+    ctx.r3.u32 = prompts[i];
+    ctx.r4.u32 = x;
+    ctx.r5.u32 = kPromptBarY;
+    g_prompt_set_pos_fn(ctx, base);
+    ctx = saved;
+    x += widths[i] + gap;
+  }
+}
+
+// Keeps the pre-game stretch screen from being yanked away the frame after it
+// opens.
 //
 // With no game running, the UI manager's per-frame update (sub_825AAE90) runs
 // a watchdog: "game state settled && no page switch pending && not on page 0"
 // makes it clear the save-loaded latch and post its own switch back to
-// mPrevScreen. The resolution screen trips it every time, because its own
+// mPrevScreen. The stretch screen trips it every time, because its own
 // Activate (sub_825BACC0) sets `mgr+332 = 0` -- so there is no winning the
 // fight over that flag from outside; whatever we write, Activate clears it a
 // frame later. In-game the whole block is disarmed (the state comparison is
@@ -1235,7 +1664,7 @@ extern "C" void NativeOptions_SettingsActivate(PPCContext& ctx, uint8_t* base) {
 // posting, so having swallowed its post once it stays disarmed -- this fires
 // exactly once per visit, not every frame.
 extern "C" void NativeOptions_PostEvent(PPCContext& ctx, uint8_t* base) {
-  if (ctx.r3.u32 == kEventClassPageSwitch && g_pregame_resolution_screen) {
+  if (ctx.r3.u32 == kEventClassPageSwitch && g_pregame_stretch_screen) {
     const uint32_t manager = Read32BE(base, kUiManagerPtrAddr);
     const uint32_t current_page = manager ? Read32BE(base, manager + kCurrentPageOffset) : 0;
     const uint32_t latch = InGameLatchAddress(base);
@@ -1253,7 +1682,7 @@ extern "C" void NativeOptions_PostEvent(PPCContext& ctx, uint8_t* base) {
       // this the front-end would keep believing a save was loaded -- and the
       // settings screen we are returning to would then try to exit to the
       // pause menu instead of the main menu.
-      g_pregame_resolution_screen = false;
+      g_pregame_stretch_screen = false;
       if (latch) {
         Write8(base, latch, 0);
       }
@@ -1265,41 +1694,110 @@ extern "C" void NativeOptions_PostEvent(PPCContext& ctx, uint8_t* base) {
   }
 }
 
+// Gives the Preset row the left/right arrows every other row gets.
+//
+// The screen's per-frame update (sub_825B4CC0) hides both arrow widgets
+// whenever row 2 is selected -- correct when that row opened a submenu, wrong
+// now that it cycles a value. Showing them back afterwards, rather than
+// skipping the original, keeps everything else that update does (including the
+// base-class update it tails into) exactly as it was; the position is the same
+// one the stock path computes for an ordinary row, taken from the selected
+// row's own value widget.
+extern "C" void NativeOptions_SettingsUpdate(PPCContext& ctx, uint8_t* base) {
+  const uint32_t screen = ctx.r3.u32;
+  const bool ours = screen != 0 && g_list != 0 && Read32BE(base, screen + kScreenListOffset) == g_list;
+  const bool preset_row_selected =
+      ours && Read32BE(base, g_list + kListSelectedRow) == kPresetRow;
+
+  if (g_original_settings_update_fn) {
+    g_original_settings_update_fn(ctx, base);
+  }
+
+  if (!preset_row_selected) {
+    return;
+  }
+
+  const uint32_t value_widget = Read32BE(base, g_list + kListRowValues + 4 * kPresetRow);
+  if (!value_widget) {
+    return;
+  }
+  const uint32_t y = Read32BE(base, value_widget + kWidgetYOffset) + kArrowYBias;
+
+  const uint32_t arrows[2] = {Read32BE(base, screen + kScreenLeftArrowOffset),
+                              Read32BE(base, screen + kScreenRightArrowOffset)};
+  const uint32_t xs[2] = {kArrowLeftX, kArrowRightX};
+  for (int i = 0; i < 2; ++i) {
+    if (!arrows[i]) {
+      continue;
+    }
+    ShowWidget(ctx, base, arrows[i]);
+    Write32BE(base, arrows[i] + kWidgetXOffset, xs[i]);
+    Write32BE(base, arrows[i] + kWidgetYOffset, y);
+  }
+}
+
 // A commits every custom row. B rolls back the live ones -- they have been
 // applying as the player cycled, so cancelling has to undo that; the non-live
 // ones need nothing, since the re-bind on the way out reloads them from their
 // own `get`. X ("defaults") does the same rollback and repaints.
 extern "C" void NativeOptions_SettingsEvent(PPCContext& ctx, uint8_t* base) {
+  const uint32_t screen = ctx.r3.u32;
   const uint32_t message = ctx.r4.u32;
   bool reset_rows = false;
-  uint32_t forced_latch_address = 0;
+  bool restore_selected_row = false;
 
   if (message && g_list) {
     const uint32_t message_class = Read32BE(base, message + kMsgClass);
     const uint32_t button = Read32BE(base, message + kMsgButton);
 
-    // Unlock "Change Screen Size..." before a save is loaded.
+    // Stop A on the Preset row from opening the old resolution screen.
     //
-    // Greying the row out and letting it navigate are two separate gates:
-    // NativeOptions_SettingsActivate re-enables the row, but the handler
-    // *also* guards the page-17 jump on the same save-loaded latch --
+    // The handler navigates on `selected_row == 2 && save_loaded`, so with a
+    // save loaded A on this row would leave the settings screen entirely
+    // instead of accepting like every other row. The narrow fix is to hide
+    // the row number across that one call: with anything else selected the
+    // handler takes its ordinary accept-and-close path, which is exactly what
+    // this row wants. Restricted to the A message on purpose -- the messages
+    // that fall through to the base list handler (sub_825D1410) *do* read and
+    // write the selected row, and lying to those would break navigation.
     //
-    //   if ( selected_row == 2 && latch ) sub_825CE8E8(8, 0, 17, ...);
-    //
-    // -- so without this the row highlights, accepts A, misses that branch
-    // and falls through to the exit path, dumping the player back to the
-    // main menu. Raising the latch just across the original call takes the
-    // intended branch, which posts the page switch and returns immediately;
-    // nothing else in that call reads the latch afterwards. It goes straight
-    // back down so the rest of the front-end still sees the true game state
-    // (the screen we are switching to does not read it at all).
+    // This also settles the prompt-bar hint the same function sets from the
+    // same comparison at its top (id 9, "opens a submenu", vs id 4 for an
+    // ordinary row) -- but only for this one message, hence the unconditional
+    // correction further down.
     if (message_class == kMsgClassButton && button == kButtonAccept &&
-        Read32BE(base, g_list + kListSelectedRow) == kResolutionScreenRow) {
+        Read32BE(base, g_list + kListSelectedRow) == kPresetRow) {
+      Write32BE(base, g_list + kListSelectedRow, 0);
+      restore_selected_row = true;
+    }
+
+    // Y opens the stretch screen the Preset row displaced, for the finer
+    // control it offers (arbitrary percentages rather than the 7 presets).
+    //
+    // The screen has no prompt for it -- its bar only fits A/B/X, all three
+    // already taken -- so this is deliberately undocumented in-game rather
+    // than something a player is expected to discover. Posting the page
+    // switch here, instead of letting the handler do it, means not having to
+    // borrow the save-loaded latch to reach the branch that would: the only
+    // thing the latch is still needed for is the pre-game watchdog (see
+    // NativeOptions_PostEvent). Returning 1 without running the original is
+    // what the stock navigation path does too.
+    // kButtonStretchScreen is Y by the same A=4/B=5/X=6 ordering the screen's
+    // own prompts confirm, which is as far as static RE got: the code that
+    // turns pad bits into these ids couldn't be pinned down (the button tests
+    // compile to rlwinm., not a searchable mask constant). If Y turns out to
+    // arrive as something else, this logs the real id on the first press.
+    if (message_class == kMsgClassButton && button > kButtonStretchScreen) {
+      REXLOG_DEBUG("[native_options] settings screen: unhandled button id {}", button);
+    }
+
+    if (message_class == kMsgClassButton && button == kButtonStretchScreen) {
+      const uint32_t controller = Read32BE(base, message + kMsgController);
       const uint32_t latch = InGameLatchAddress(base);
-      if (latch && Read8(base, latch) == 0) {
-        Write8(base, latch, 1);
-        forced_latch_address = latch;
-      }
+      g_pregame_stretch_screen = latch != 0 && Read8(base, latch) == 0;
+      CallGuestPageSwitch(ctx, base, kResolutionPage, controller);
+      ctx.r3.u32 = 1;
+      return;
     }
 
     if (message_class == kMsgClassButton && g_entries) {
@@ -1325,14 +1823,21 @@ extern "C" void NativeOptions_SettingsEvent(PPCContext& ctx, uint8_t* base) {
     g_original_settings_event_fn(ctx, base);
   }
 
-  if (forced_latch_address) {
-    Write8(base, forced_latch_address, 0);
+  if (restore_selected_row) {
+    Write32BE(base, g_list + kListSelectedRow, kPresetRow);
+  }
 
-    // From here until we leave it again, the resolution screen is open with
-    // no save loaded -- a state the front-end watchdog actively tries to undo,
-    // and which leaves the latch needing cleanup on the way out. Both are
-    // handled in NativeOptions_PostEvent.
-    g_pregame_resolution_screen = true;
+  // Every message repaints the prompt bar from `selected == 2 ? 9 : 4`, so
+  // correcting it has to happen here rather than once on entry. Cheap enough
+  // to do unconditionally on the row: it is the same setter the screen itself
+  // just called, with the id every other row gets.
+  if (screen && g_list && g_set_widget_text_by_id_fn &&
+      Read32BE(base, screen + kScreenListOffset) == g_list &&
+      Read32BE(base, g_list + kListSelectedRow) == kPresetRow) {
+    const uint32_t prompt = Read32BE(base, screen + kScreenPromptOffset);
+    if (prompt) {
+      CallGuest(ctx, base, g_set_widget_text_by_id_fn, prompt, kPromptOrdinaryRowStringId);
+    }
   }
 
   if (reset_rows) {
@@ -1359,6 +1864,7 @@ void NativeOptions::Bind(rex::Runtime* runtime) {
     return;
   }
   auto* dispatcher = runtime_->function_dispatcher();
+  g_dispatcher = dispatcher;
 
   if (!runtime_->user_data_root().empty()) {
     g_user_settings_path = runtime_->user_data_root() / "settings.toml";
@@ -1368,6 +1874,14 @@ void NativeOptions::Bind(rex::Runtime* runtime) {
   g_set_text_scale_fn = dispatcher->GetFunction(kSetTextScaleFnAddr);
   g_enable_row_fn = dispatcher->GetFunction(kEnableRowFnAddr);
   g_set_widget_colour_fn = dispatcher->GetFunction(kSetWidgetColourFnAddr);
+  g_set_widget_text_by_id_fn = dispatcher->GetFunction(kSetWidgetTextByIdFnAddr);
+  g_prompt_ctor_fn = dispatcher->GetFunction(kPromptCtorFnAddr);
+  g_prompt_set_glyph_fn = dispatcher->GetFunction(kPromptSetGlyphFnAddr);
+  g_prompt_show_glyph_fn = dispatcher->GetFunction(kPromptShowGlyphFnAddr);
+  g_prompt_text_offset_fn = dispatcher->GetFunction(kPromptTextOffsetFnAddr);
+  g_prompt_set_pos_fn = dispatcher->GetFunction(kPromptSetPosFnAddr);
+  g_text_width_fn = dispatcher->GetFunction(kTextWidthFnAddr);
+  g_find_image_fn = dispatcher->GetFunction(kFindImageFnAddr);
   g_alloc_fn = dispatcher->GetFunction(kAllocFnAddr);
   if (!g_set_widget_text_fn || !g_alloc_fn) {
     REXLOG_WARN("[native_options] set-widget-text/alloc unavailable; no extra rows");
@@ -1417,15 +1931,31 @@ void NativeOptions::Bind(rex::Runtime* runtime) {
   if (!dispatcher->OverrideFunction(kSettingsActivateFnAddr, &NativeOptions_SettingsActivate,
                                     &g_original_settings_activate_fn)) {
     REXLOG_WARN("[native_options] OverrideFunction failed for {:08X} (settings activate); Volume "
-                "and Change Screen Size will stay greyed out until a save is loaded",
+                "and Preset will stay greyed out until a save is loaded",
                 kSettingsActivateFnAddr);
+  }
+
+  if (!dispatcher->OverrideFunction(kPromptBarLayoutFnAddr, &NativeOptions_PromptBarLayout,
+                                    &g_original_prompt_bar_layout_fn) ||
+      !dispatcher->OverrideFunction(kSettingsBuildFnAddr, &NativeOptions_SettingsBuild,
+                                    &g_original_settings_build_fn)) {
+    REXLOG_WARN("[native_options] OverrideFunction failed for {:08X}/{:08X} (prompt bar); Y will "
+                "still open the stretch screen but the bar will show no prompt for it",
+                kPromptBarLayoutFnAddr, kSettingsBuildFnAddr);
   }
 
   if (!dispatcher->OverrideFunction(kPostEventFnAddr, &NativeOptions_PostEvent,
                                     &g_original_post_event_fn)) {
-    REXLOG_WARN("[native_options] OverrideFunction failed for {:08X} (page switches); opening "
-                "Change Screen Size with no save loaded will bounce back to the main menu",
+    REXLOG_WARN("[native_options] OverrideFunction failed for {:08X} (page switches); Y will not "
+                "open the stretch screen",
                 kPostEventFnAddr);
+  }
+
+  if (!dispatcher->OverrideFunction(kSettingsUpdateFnAddr, &NativeOptions_SettingsUpdate,
+                                    &g_original_settings_update_fn)) {
+    REXLOG_WARN("[native_options] OverrideFunction failed for {:08X} (settings update); the Preset "
+                "row will cycle but show no left/right arrows",
+                kSettingsUpdateFnAddr);
   }
 
   REXLOG_INFO("[native_options] hooks installed ({} row(s) in table)", kCustomRowCount);
