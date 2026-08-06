@@ -556,13 +556,19 @@ const char16_t* ResolutionLabel() {
     switch (CurrentLanguage()) {
       case XLanguageId::kItalian:
         return u"Risoluzione";
-      // No kJapanese case: the literal-text widget setter (SetWidgetText,
-      // via 0x825D1EE0) writes raw UTF-16 straight into the widget with no
-      // font/atlas selection of its own -- glyph rendering is resolved later
-      // from whatever's actually baked into the game's glyph atlas, which
-      // only covers the shipped string table's own corpus. A phrase we
-      // invented (never part of that corpus, e.g. "解像度") has no glyph
-      // there and shows as tofu, so this falls back to English instead.
+      // The literal-text widget setter (SetWidgetText, via 0x825D1EE0) and
+      // the shipped string table's own setter (SetWidgetTextById, via
+      // 0x825D1EE8) both bottom out in the same raw UTF-16 copy into the
+      // widget's text buffer (sub_825E5D30 in each of sub_825CEE40 and
+      // sub_825CFC68) -- there is no separate font/atlas selection for
+      // literal text. Glyph rendering reads from one shared, lazily
+      // populated glyph cache (dword_82E7A574) built from whichever
+      // font_<lang>.xpr the boot-time language switch in sub_82586AA8
+      // loaded (font_ja.xpr for kJapanese), so any text painted while the
+      // game is running in Japanese -- literal or looked-up -- already
+      // renders through that font.
+      case XLanguageId::kJapanese:
+        return u"解像度";
       case XLanguageId::kGerman:
         return u"Auflösung";
       case XLanguageId::kFrench:
@@ -613,8 +619,10 @@ const char16_t* FullscreenLabel() {
   switch (CurrentLanguage()) {
     case XLanguageId::kItalian:
       return u"Schermo intero";
-    // No kJapanese case -- see ResolutionLabel's comment on why: an invented
-    // phrase has no baked glyph in the game's atlas and renders as tofu.
+    // See ResolutionLabel's comment: literal text renders through the same
+    // language-selected font as looked-up text, so this is safe.
+    case XLanguageId::kJapanese:
+      return u"フルスクリーン";
     case XLanguageId::kGerman:
       return u"Vollbild";
     case XLanguageId::kFrench:
@@ -660,7 +668,9 @@ const char16_t* LanguageRowLabel() {
     switch (CurrentLanguage()) {
       case XLanguageId::kItalian:
         return u"Lingua";
-      // No kJapanese case -- see ResolutionLabel's comment on why.
+      // See ResolutionLabel's comment on why this is safe.
+      case XLanguageId::kJapanese:
+        return u"言語";
       case XLanguageId::kGerman:
         return u"Sprache";
       case XLanguageId::kFrench:
@@ -720,7 +730,9 @@ const char16_t* GpuBackendLabel() {
     switch (CurrentLanguage()) {
       case XLanguageId::kItalian:
         return u"Backend GPU";
-      // No kJapanese case -- see ResolutionLabel's comment on why.
+      // See ResolutionLabel's comment on why this is safe.
+      case XLanguageId::kJapanese:
+        return u"GPUバックエンド";
       case XLanguageId::kGerman:
         return u"GPU-Backend";
       case XLanguageId::kFrench:
@@ -820,7 +832,9 @@ const char16_t* PresetLabel() {
   switch (CurrentLanguage()) {
     case XLanguageId::kItalian:
       return u"Preset";
-    // No kJapanese case -- see ResolutionLabel's comment on why.
+    // See ResolutionLabel's comment on why this is safe.
+    case XLanguageId::kJapanese:
+      return u"プリセット";
     case XLanguageId::kGerman:
       return u"Voreinstellung";
     case XLanguageId::kFrench:
@@ -846,7 +860,9 @@ const char16_t* CustomPromptLabel() {
   switch (CurrentLanguage()) {
     case XLanguageId::kItalian:
       return u"PERSONALIZZA";
-    // No kJapanese case -- see ResolutionLabel's comment on why.
+    // See ResolutionLabel's comment on why this is safe.
+    case XLanguageId::kJapanese:
+      return u"カスタマイズ";
     case XLanguageId::kGerman:
       return u"ANPASSEN";
     case XLanguageId::kFrench:

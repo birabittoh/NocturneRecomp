@@ -15,6 +15,7 @@
 #include <chrono>
 #include <cmath>
 #include <cstdint>
+#include <cstdio>
 #include <optional>
 #include <string>
 
@@ -28,6 +29,16 @@
 #include <rex/system/mod_storage.h>
 
 namespace nocturne {
+
+// Y position (in the front-end's 640-wide coordinate space) of the persistent
+// height/width percent readout on the "Change Screen Size" screen. Exposed as
+// cvars rather than fixed constants so the two labels can be nudged to taste
+// without a recompile -- see kHeightLabelY/kWidthLabelY below for the
+// defaults these start at.
+REXCVAR_DEFINE_INT32(stretch_height_label_y, 185, "Video",
+                      "Y position of the height percent readout on the Change Screen Size screen");
+REXCVAR_DEFINE_INT32(stretch_width_label_y, 275, "Video",
+                      "Y position of the width percent readout on the Change Screen Size screen");
 
 namespace {
 
@@ -123,6 +134,10 @@ constexpr uint32_t kWidgetYOffset = 8;
 // alpha in the high byte).
 constexpr uint32_t kPresetLabelColour = 0xFF000000u;
 
+// Opaque white, for the persistent height/width readout below -- same ARGB
+// order as kPresetLabelColour.
+constexpr uint32_t kPercentLabelColour = 0xFFFFFFFFu;
+
 // Where the preset name is drawn, in the front-end's own 640-wide coordinate
 // space (its help bar sits at y=423, its titles at y=110).
 constexpr int32_t kPresetLabelCentreX = 320;
@@ -141,6 +156,17 @@ constexpr uint32_t kTextScratchChars = 64;
 // right(x) = 232x/50 + 1048, bottom(y) = 54y/30 + 666 (at 720p; the
 // converter itself is resolution-independent, driven by the live
 // kStretchRectMax/MinAddr bounds below, not these constants).
+// PSX Default and 16:10 Default's x=1 (and 16:10 Default's y=1) are exact,
+// not floor leftovers, despite being the smallest non-zero value in their
+// array: they're the integer solutions that reproduce those two presets'
+// original mod-derived pixel targets (kPsxDefaultWidth/k1610DefaultWidth=
+// 1052, k1610DefaultHeight=667 in NocturneRecomp-Mods/src/graphics_settings/
+// mod_main.cpp) through this screen's truncating-integer-division converter
+// (confirmed against the guest's own sub_825BB2B0): right(1) = 232*1/50 +
+// 1048 = 1052 exactly, where right(0) = 1048 is 4px short; bottom(1) =
+// 54*1/30 + 666 = 667 exactly, where bottom(0) = 666 is 1px short. Kept at 1
+// rather than 0 to match the d-pad floor below -- that floor is about how
+// far hand adjustment can reach, not what the presets should be solved to.
 constexpr uint32_t kPresetCount = 7;
 constexpr uint32_t kPresetX[kPresetCount] = {1, 11, 1, 19, 38, 50, 50};
 constexpr uint32_t kPresetY[kPresetCount] = {30, 55, 1, 30, 55, 71, 56};
@@ -175,11 +201,14 @@ constexpr uint32_t kDpadDown = 3;
 //
 // A bound still exists, just a far looser one: the percentages feed integer
 // arithmetic in the converter and the profile they're saved to, and nothing
-// good comes of letting them run away. The floor stays at the vanilla 1 --
-// 0 collapses the rect and negatives invert it. The maximum is deliberately
-// above the tallest preset (16:10 Extreme, y=71), so every preset stays
-// reachable by hand.
-constexpr int32_t kStretchPercentMin = 1;
+// good comes of letting them run away. The floor is 0 (not the vanilla 1) --
+// 0 isn't a degenerate value, it's just the unadjusted default the percent
+// fields already start at before the player has touched anything, so the
+// floor has to admit it or the readout could show 0 but the d-pad could never
+// get back there. Negatives would invert the rect, so the floor stops at 0
+// rather than opening further. The maximum is deliberately above the tallest
+// preset (16:10 Extreme, y=71), so every preset stays reachable by hand.
+constexpr int32_t kStretchPercentMin = 0;
 constexpr int32_t kStretchPercentMax = 150;
 
 // The localized-string-id menu.set_widget_text_by_id_fn uses for "DEFAULT"
@@ -389,6 +418,76 @@ void SetPresetLabelText(PPCContext& ctx, uint8_t* base, const char* text) {
             static_cast<uint32_t>(kPresetLabelCentreX - width / 2));
   Write32BE(base, g_preset_label + kWidgetYOffset, static_cast<uint32_t>(kPresetLabelY));
   g_preset_label_shown = text != nullptr;
+}
+
+// Persistent height/width percent readout: unlike the preset-name toast
+// above, these stay on screen for as long as the stretch screen is open, so
+// the player always has an exact number to aim for while nudging the d-pad
+// rather than having to guess from the preview alone. Two plain-percentage
+// labels, height above width -- position alone says which is which, so
+// neither carries a "Height"/"Width" word (also sidesteps localizing them).
+struct PercentLabel {
+  uint32_t widget = 0;
+  uint32_t screen = 0;
+  bool shown = false;
+  // Y cvar this label's position tracks, read fresh on every reposition so a
+  // console tweak takes effect immediately rather than only on next open.
+  int32_t (*y_cvar)() = nullptr;
+};
+
+int32_t HeightLabelY() { return REXCVAR_GET(stretch_height_label_y); }
+int32_t WidthLabelY() { return REXCVAR_GET(stretch_width_label_y); }
+
+PercentLabel g_height_label{0, 0, false, &HeightLabelY};
+PercentLabel g_width_label{0, 0, false, &WidthLabelY};
+
+uint32_t EnsurePercentLabel(PPCContext& ctx, uint8_t* base, uint32_t screen, PercentLabel& label) {
+  if (label.widget != 0 && label.screen == screen) {
+    return label.widget;
+  }
+  if (!g_alloc_fn || !g_text_widget_ctor_fn || !g_set_text_fn) {
+    return 0;
+  }
+  const uint32_t memory = CallGuest(ctx, base, g_alloc_fn, kTextWidgetSize, 0);
+  if (!memory) {
+    return 0;
+  }
+  const uint32_t widget = CallGuest(ctx, base, g_text_widget_ctor_fn, memory, screen);
+  if (!widget) {
+    return 0;
+  }
+  if (g_set_text_colour_fn) {
+    CallGuest(ctx, base, g_set_text_colour_fn, widget, kPercentLabelColour);
+  }
+  label.widget = widget;
+  label.screen = screen;
+  return widget;
+}
+
+// Shows `percent` as a plain "NN%", centred, or blanks the label when `show`
+// is false -- same convention as SetPresetLabelText.
+void SetPercentLabelText(PPCContext& ctx, uint8_t* base, PercentLabel& label, bool show,
+                          int32_t percent) {
+  if (!label.widget || !g_set_text_fn) {
+    return;
+  }
+  char text[16];
+  if (show) {
+    std::snprintf(text, sizeof(text), "%d%%", percent);
+  } else {
+    text[0] = '\0';
+  }
+  const uint32_t staged = StagePresetName(ctx, base, text);
+  if (!staged) {
+    return;
+  }
+  CallGuest(ctx, base, g_set_text_fn, label.widget, staged);
+
+  const int32_t width = static_cast<int32_t>(CallGuest(ctx, base, g_text_width_fn, label.widget, 0));
+  Write32BE(base, label.widget + kWidgetXOffset,
+            static_cast<uint32_t>(kPresetLabelCentreX - width / 2));
+  Write32BE(base, label.widget + kWidgetYOffset, static_cast<uint32_t>(label.y_cvar()));
+  label.shown = show;
 }
 
 void PublishPresetApplied(const uint8_t* base) {
@@ -768,6 +867,20 @@ extern "C" void GraphicsSettings_StretchScreen(PPCContext& ctx, uint8_t* base) {
     ctx = saved;
   }
 
+  // Keep the persistent height/width readout in step with whatever the
+  // screen's percent fields ended up at this message -- a dpad nudge, a
+  // cycle, or just the screen having opened.
+  if (a1 != 0 && !leaving) {
+    const int32_t shown_x = static_cast<int32_t>(Read32BE(base, a1 + kStretchXOffset));
+    const int32_t shown_y = static_cast<int32_t>(Read32BE(base, a1 + kStretchYOffset));
+    if (EnsurePercentLabel(ctx, base, a1, g_height_label)) {
+      SetPercentLabelText(ctx, base, g_height_label, true, shown_y);
+    }
+    if (EnsurePercentLabel(ctx, base, a1, g_width_label)) {
+      SetPercentLabelText(ctx, base, g_width_label, true, shown_x);
+    }
+  }
+
   // Adopt whatever the player settled on -- the accepted value on A, or the
   // one the vanilla handler just restored from the profile on B. Latching
   // after the original has run is what makes that distinction free.
@@ -775,6 +888,12 @@ extern "C" void GraphicsSettings_StretchScreen(PPCContext& ctx, uint8_t* base) {
     g_screen_open.store(false, std::memory_order_release);
     if (g_preset_label_shown) {
       SetPresetLabelText(ctx, base, nullptr);
+    }
+    if (g_height_label.shown) {
+      SetPercentLabelText(ctx, base, g_height_label, false, 0);
+    }
+    if (g_width_label.shown) {
+      SetPercentLabelText(ctx, base, g_width_label, false, 0);
     }
     LatchCurrentRectForReassert(base);
 
