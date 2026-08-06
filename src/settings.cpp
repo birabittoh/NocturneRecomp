@@ -107,6 +107,46 @@ constexpr std::array<const char*, 10> kBasicCvarNames = {
 // whatever Resolution happens to be set to.
 constexpr int kMaxResolutionScale = 8;
 
+// Named resolution presets offered by DrawResolutionRow, ordered ascending.
+constexpr std::array<const char*, 4> kResolutionPresetsAscending = {"720p", "1080p", "1440p", "4K"};
+
+// Vertical pixel count of each named resolution preset.
+int ResolutionHeightFor(const char* option) {
+  std::string_view opt(option);
+  if (opt == "720p")
+    return 720;
+  if (opt == "1080p")
+    return 1080;
+  if (opt == "1440p")
+    return 1440;
+  if (opt == "4K")
+    return 2160;
+  return 720;
+}
+
+// Number of leading entries of kResolutionPresetsAscending that fit on the
+// display the settings window currently resides on -- offering a preset
+// taller than the desktop's own resolution just leaves the player with an
+// oversized window/fullscreen mode they can't fully see.
+// window->GetDesktopDisplayHeight() is routed through the SDK's Window
+// abstraction (SDL under the hood on every platform), so this works on
+// Windows, X11, and Wayland alike without any platform-specific code here.
+// A 0 result (no window yet, or the backend couldn't answer) means "assume
+// everything fits" -- fail open rather than hide presets over a query that
+// simply isn't available.
+int AllowedResolutionCount(rex::ui::Window* window) {
+  uint32_t display_height = window ? window->GetDesktopDisplayHeight() : 0;
+  if (display_height == 0)
+    return static_cast<int>(kResolutionPresetsAscending.size());
+  int count = 0;
+  for (const char* opt : kResolutionPresetsAscending) {
+    if (static_cast<uint32_t>(ResolutionHeightFor(opt)) > display_height)
+      break;
+    ++count;
+  }
+  return std::max(count, 1);
+}
+
 // audio_volume is stored (and applied to samples by the SDL audio driver) as
 // linear amplitude, but human loudness perception is roughly logarithmic --
 // a linear slider (amplitude == percent/100) would spend most of its travel
@@ -115,25 +155,9 @@ constexpr int kMaxResolutionScale = 8;
 // through a dB curve instead: -40dB at 0% (quiet enough to treat as silence
 // below) up to 0dB (full amplitude) at 100%, evenly spaced in dB rather than
 // in amplitude.
+// The conversions themselves are declared in settings.h and defined below,
+// outside this anonymous namespace, since native_options.cpp shares them.
 constexpr double kMinVolumeDb = -40.0;
-
-double VolumeAmplitudeFromPercent(int percent) {
-  if (percent <= 0)
-    return 0.0;
-  if (percent >= 100)
-    return 1.0;
-  double db = kMinVolumeDb * (100 - percent) / 100.0;
-  return std::pow(10.0, db / 20.0);
-}
-
-int VolumePercentFromAmplitude(double amplitude) {
-  if (amplitude <= 0.0)
-    return 0;
-  double db = 20.0 * std::log10(amplitude);
-  if (db <= kMinVolumeDb)
-    return 0;
-  return std::clamp(static_cast<int>(std::lround(100.0 - db * 100.0 / kMinVolumeDb)), 0, 100);
-}
 
 struct LanguageOption {
   const char* id;  // stringified XLanguage value, as stored by the cvar
@@ -464,10 +488,11 @@ class CuratedSettingsDialog : public rex::ui::ImGuiDialog {
     const auto* entry = rex::cvar::GetFlagInfo("resolution");
     if (!entry)
       return;
-    static constexpr std::array<const char*, 4> kOptions = {"720p", "1080p", "1440p", "4K"};
+    const auto& kOptions = kResolutionPresetsAscending;
+    int count = std::clamp(AllowedResolutionCount(window_), 1, static_cast<int>(kOptions.size()));
     std::string current = entry->getter();
     int cur_idx = 0;
-    for (int i = 0; i < static_cast<int>(kOptions.size()); ++i) {
+    for (int i = 0; i < count; ++i) {
       if (current == kOptions[i]) {
         cur_idx = i;
         break;
@@ -481,8 +506,7 @@ class CuratedSettingsDialog : public rex::ui::ImGuiDialog {
     int idx = cur_idx;
     // Format string is a fixed label, not a %d placeholder -- SliderInt just
     // displays it verbatim, same trick DrawRenderScaleRow uses for "50%" etc.
-    if (ImGui::SliderInt("##v", &idx, 0, static_cast<int>(kOptions.size()) - 1,
-                         kOptions[idx])) {
+    if (ImGui::SliderInt("##v", &idx, 0, count - 1, kOptions[idx])) {
       rex::cvar::SetFlagByName("resolution", kOptions[idx], /*persist=*/true);
       SaveBasic();
     }
@@ -783,6 +807,24 @@ class CuratedSettingsDialog : public rex::ui::ImGuiDialog {
 };
 
 }  // namespace
+
+double VolumeAmplitudeFromPercent(int percent) {
+  if (percent <= 0)
+    return 0.0;
+  if (percent >= 100)
+    return 1.0;
+  double db = kMinVolumeDb * (100 - percent) / 100.0;
+  return std::pow(10.0, db / 20.0);
+}
+
+int VolumePercentFromAmplitude(double amplitude) {
+  if (amplitude <= 0.0)
+    return 0;
+  double db = 20.0 * std::log10(amplitude);
+  if (db <= kMinVolumeDb)
+    return 0;
+  return std::clamp(static_cast<int>(std::lround(100.0 - db * 100.0 / kMinVolumeDb)), 0, 100);
+}
 
 void ApplySettingDefaults() {
   for (const auto& d : kGameDefaults) {

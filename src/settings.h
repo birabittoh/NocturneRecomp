@@ -29,6 +29,15 @@ class ModRegistry;
 
 namespace nocturne {
 
+// Perceptual mapping between the `audio_volume` cvar's linear amplitude
+// (0.0-1.0) and a displayed 0-100 percentage, evenly spaced in dB rather than
+// in amplitude (-40dB at 0%, 0dB at 100%). Shared with native_options.cpp so
+// the game's own Volume row and this overlay's slider are the same curve --
+// otherwise the two would disagree about what a given amplitude "is" and each
+// would yank the other's displayed value around.
+double VolumeAmplitudeFromPercent(int percent);
+int VolumePercentFromAmplitude(double amplitude);
+
 // Overrides the SDK's built-in cvar defaults with the game's own. Call once,
 // before rex::ReXApp::SetupEnvironment() (i.e. before any config file is
 // loaded), so a saved config or CLI/env override still takes precedence.

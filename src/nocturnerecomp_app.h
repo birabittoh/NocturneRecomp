@@ -36,6 +36,7 @@
 #include "frame_pacer.h"
 #include "fonts.generated.h"
 #include "graphics_settings.h"
+#include "native_options.h"
 #include "headless_gpu_bridge.h"
 #include "icon.generated.h"
 #include "native_command_processor.h"
@@ -211,6 +212,10 @@ class NocturnerecompApp : public rex::ReXApp {
     // Formerly the resolution_preset_native mod; moved in-app (see
     // graphics_settings.h) since it's a base feature, not optional content.
     nocturne::GetGraphicsSettings().Bind(runtime());
+
+    // Adds a Resolution row to the game's own settings screen, alongside its
+    // stock Graphics/Volume/Change Screen Size rows (see native_options.h).
+    nocturne::GetNativeOptions().Bind(runtime());
 
     // Steady internal-framerate pacer: drives the game's target_time clock at
     // exactly real-time from a dedicated steady-clock thread, so the PS1

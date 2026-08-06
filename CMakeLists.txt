@@ -102,6 +102,7 @@ set(NOCTURNERECOMP_SOURCES
     src/graphics_settings.cpp
     src/headless_gpu_bridge.cpp
     src/native_command_processor.cpp
+    src/native_options.cpp
     src/ppc_interpreter.cpp
     src/rando_xex.cpp
     src/room_presence.cpp
