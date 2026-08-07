@@ -16,6 +16,8 @@
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
+#include <cstring>
+#include <mutex>
 #include <optional>
 #include <string>
 
@@ -308,6 +310,20 @@ constexpr const char* kPresetAppliedEvent = "graphics_settings.preset_applied";
 // pending; GraphicsSettings_PerFrame takes it from here (see
 // ApplyRequestedPreset).
 std::atomic<int> g_requested_preset{-1};
+
+// Same deferral pattern as g_requested_preset above, for a custom (non-
+// catalog) width/height ratio requested by a mod via the
+// "graphics_settings.request_custom_ratio" event (see Bind()). A pair of
+// doubles doesn't fit the event payload's single f64 slot, so the mod packs
+// them into EventPayload.bytes, which the Subscribe callback copies out
+// synchronously (per ModRegistry::EventPayload's own doc comment, bytes isn't
+// valid after Publish() returns) into these mutex-guarded fields; the actual
+// apply happens later, from GraphicsSettings_PerFrame, which always has a
+// live base pointer.
+std::mutex g_custom_ratio_request_mutex;
+bool g_custom_ratio_request_pending = false;
+double g_custom_ratio_request_width = 0.0;
+double g_custom_ratio_request_height = 0.0;
 
 // The preset-name label drawn over the stretch screen, the screen it was
 // built for, and when it should blank itself again. It replaces an ImGui
@@ -730,6 +746,46 @@ void ApplyPendingCycle(PPCContext& ctx, uint8_t* base) {
   }
 }
 
+// Applies a hand-specified (non-catalog) width/height ratio -- shared by
+// ApplyRequestedPreset's Custom branch and ApplyPendingCustomRatioRequest
+// below, since a request can originate either from the native Preset row
+// re-selecting the already-known Custom entry, or from a mod requesting a
+// brand new ratio via "graphics_settings.request_custom_ratio".
+void ApplyCustomRatio(uint8_t* base, double width_ratio, double height_ratio) {
+  g_preset_index = kCustomIndex;
+  g_has_custom = true;
+  g_custom_width_ratio = width_ratio;
+  g_custom_height_ratio = height_ratio;
+  g_pending_restore_width_ratio = width_ratio;
+  g_pending_restore_height_ratio = height_ratio;
+  if (ApplyPendingRestore(base)) {
+    g_restoring.store(true, std::memory_order_release);
+    SavePresetRatios(base);
+  }
+}
+
+// Applies a custom ratio requested by a mod (see g_custom_ratio_request_*
+// above), if one is pending. Called every GraphicsSettings_PerFrame tick,
+// same as ApplyRequestedPreset -- both are cheap flag checks when nothing is
+// pending.
+void ApplyPendingCustomRatioRequest(uint8_t* base) {
+  bool pending = false;
+  double width_ratio = 0.0;
+  double height_ratio = 0.0;
+  {
+    std::lock_guard<std::mutex> lock(g_custom_ratio_request_mutex);
+    pending = g_custom_ratio_request_pending;
+    if (pending) {
+      width_ratio = g_custom_ratio_request_width;
+      height_ratio = g_custom_ratio_request_height;
+      g_custom_ratio_request_pending = false;
+    }
+  }
+  if (pending) {
+    ApplyCustomRatio(base, width_ratio, height_ratio);
+  }
+}
+
 // Applies a preset queued by RequestGraphicsPreset. Unlike ApplyPendingCycle
 // this doesn't go through a screen instance's percent fields -- there needn't
 // be one, since the request comes from the settings screen's own Preset row --
@@ -749,13 +805,7 @@ void ApplyRequestedPreset(PPCContext& ctx, uint8_t* base) {
     if (!g_has_custom) {
       return;
     }
-    g_preset_index = kCustomIndex;
-    g_pending_restore_width_ratio = g_custom_width_ratio;
-    g_pending_restore_height_ratio = g_custom_height_ratio;
-    if (ApplyPendingRestore(base)) {
-      g_restoring.store(true, std::memory_order_release);
-      SavePresetRatios(base);
-    }
+    ApplyCustomRatio(base, g_custom_width_ratio, g_custom_height_ratio);
     return;
   }
 
@@ -935,6 +985,7 @@ extern "C" void GraphicsSettings_PerFrame(PPCContext& ctx, uint8_t* base) {
   }
 
   ApplyRequestedPreset(ctx, base);
+  ApplyPendingCustomRatioRequest(base);
 
   // Blank the preset name once its moment is up. Doing it here rather than in
   // the screen's own handler is what makes it time out at all: that handler
@@ -1011,6 +1062,37 @@ void GraphicsSettings::Bind(rex::Runtime* runtime) {
   }
   auto* dispatcher = runtime_->function_dispatcher();
   g_mod_registry = runtime_->mod_registry();
+
+  // Lets mods (e.g. NocturneRecomp-Mods' graphics_settings overlay) request a
+  // stretch change instead of writing graphics.stretch_rect themselves --
+  // mirrors kPresetAppliedEvent's "publish the value, don't arbitrate who
+  // writes it" shape, just in the opposite direction: a mod publishes a
+  // request, this engine owns applying and reasserting it, so there's only
+  // ever one writer of the guest rect. See docs/making-mods.md.
+  if (g_mod_registry) {
+    g_mod_registry->Subscribe(
+        "graphics_settings.request_preset",
+        [](const rex::system::ModRegistry::EventPayload& payload) {
+          RequestGraphicsPreset(static_cast<int32_t>(payload.u64));
+        });
+    g_mod_registry->Subscribe(
+        "graphics_settings.request_custom_ratio",
+        [](const rex::system::ModRegistry::EventPayload& payload) {
+          struct CustomRatioPayload {
+            double width_ratio;
+            double height_ratio;
+          };
+          if (payload.bytes.size() != sizeof(CustomRatioPayload)) {
+            return;
+          }
+          CustomRatioPayload data;
+          std::memcpy(&data, payload.bytes.data(), sizeof(data));
+          std::lock_guard<std::mutex> lock(g_custom_ratio_request_mutex);
+          g_custom_ratio_request_width = data.width_ratio;
+          g_custom_ratio_request_height = data.height_ratio;
+          g_custom_ratio_request_pending = true;
+        });
+  }
 
   g_storage.emplace(runtime_->user_data_root() / "mods" / "graphics_settings.cfg");
   g_storage->Load();
