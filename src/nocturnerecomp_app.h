@@ -284,7 +284,21 @@ class NocturnerecompApp : public rex::ReXApp {
   // monospace option: look it up via ImGui::GetIO().Fonts->Fonts[0]. It must
   // be added before PT Serif: the SDK sets io.FontDefault to whichever font
   // is added last, and PT Serif is meant to be the UI's default font.
+  //
+  // PT Serif ships no CJK glyphs. ImGuiDrawer::Initialize (SDK) sets
+  // io.FontDefault to whichever font is *last* added across the SDK's own
+  // built-in fonts and this callback -- so if we add PT Serif at all while
+  // user_language is Japanese, it becomes the default and every Japanese
+  // string in the overlays renders as a row of "?????" tofu boxes. Skip
+  // adding any font here in that case, leaving the SDK's stock pixel font
+  // (ProggyTiny, already merged with msgothic.ttc's Japanese glyphs before
+  // this callback runs) as both Fonts[0] and the default.
   void OnConfigureFonts(ImFontAtlas* atlas) override {
+    constexpr uint32_t kXLanguageJapanese = 2;
+    if (REXCVAR_QUERY(uint32_t, user_language) == kXLanguageJapanese) {
+      return;
+    }
+
     atlas->AddFontDefault();
 
     ImFontConfig cfg;

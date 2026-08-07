@@ -567,8 +567,17 @@ const char16_t* ResolutionLabel() {
       // loaded (font_ja.xpr for kJapanese), so any text painted while the
       // game is running in Japanese -- literal or looked-up -- already
       // renders through that font.
+      //
+      // font_ja.xpr only carries glyphs for characters the shipped game
+      // actually uses; kanji that never appear in the original Japanese
+      // script (like 解/像/度) are simply absent from the atlas and paint
+      // as blanks. Katakana coverage is broad but not complete either --
+      // レゾリューション's dakuten ゾ is also missing -- so this spells out
+      // "Screen Size" instead, reusing only glyphs already proven to render:
+      // スクリーン from FullscreenLabel's フルスクリーン below, plus the
+      // unvoiced サイズ.
       case XLanguageId::kJapanese:
-        return u"解像度";
+        return u"スクリーンサイズ";
       case XLanguageId::kGerman:
         return u"Auflösung";
       case XLanguageId::kFrench:
@@ -668,9 +677,10 @@ const char16_t* LanguageRowLabel() {
     switch (CurrentLanguage()) {
       case XLanguageId::kItalian:
         return u"Lingua";
-      // See ResolutionLabel's comment on why this is safe.
+      // See ResolutionLabel's comment: 言/語 aren't in font_ja.xpr's glyph
+      // atlas, so this uses the katakana loanword instead.
       case XLanguageId::kJapanese:
-        return u"言語";
+        return u"ランゲージ";
       case XLanguageId::kGerman:
         return u"Sprache";
       case XLanguageId::kFrench:
