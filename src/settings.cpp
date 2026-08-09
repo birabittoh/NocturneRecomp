@@ -9,6 +9,7 @@
 #include <cstdlib>
 #include <string>
 #include <string_view>
+#include <unordered_map>
 #include <vector>
 
 #include <rex/cvar.h>
@@ -159,11 +160,6 @@ int AllowedResolutionCount(rex::ui::Window* window) {
 // outside this anonymous namespace, since native_options.cpp shares them.
 constexpr double kMinVolumeDb = -40.0;
 
-struct LanguageOption {
-  const char* id;  // stringified XLanguage value, as stored by the cvar
-  const char* label;
-};
-
 // XLanguage IDs per the Xbox 360 kernel's user_language cvar; note 10 is
 // intentionally absent (not a valid XLanguage).
 constexpr std::array kLanguageOptions = {
@@ -183,6 +179,57 @@ struct ModLanguageOption {
   std::string label;
 };
 std::vector<ModLanguageOption> g_mod_language_options;
+
+// Extra native-options string translations mods register via the
+// "settings.native_string" event (see RegisterNativeStringListener in
+// settings.h). Keyed by "<XLanguage id>:<key>"; owns its own UTF-16
+// storage, since the event's payload.bytes is only valid for the duration
+// of Publish().
+std::unordered_map<std::string, std::u16string> g_native_string_translations;
+
+// Decodes UTF-8 to UTF-16 (BMP code points as a single unit, astral ones as
+// a surrogate pair). Mod-published label text is expected to be valid
+// UTF-8; an invalid lead byte is skipped rather than corrupting the rest of
+// the string.
+std::u16string Utf8ToUtf16(std::string_view s) {
+  std::u16string out;
+  out.reserve(s.size());
+  size_t i = 0;
+  while (i < s.size()) {
+    const auto byte_at = [&](size_t offset) {
+      return static_cast<unsigned char>(s[i + offset]);
+    };
+    const unsigned char c0 = byte_at(0);
+    uint32_t cp;
+    size_t len;
+    if (c0 < 0x80) {
+      cp = c0;
+      len = 1;
+    } else if ((c0 & 0xE0) == 0xC0 && i + 1 < s.size()) {
+      cp = ((c0 & 0x1Fu) << 6) | (byte_at(1) & 0x3Fu);
+      len = 2;
+    } else if ((c0 & 0xF0) == 0xE0 && i + 2 < s.size()) {
+      cp = ((c0 & 0x0Fu) << 12) | ((byte_at(1) & 0x3Fu) << 6) | (byte_at(2) & 0x3Fu);
+      len = 3;
+    } else if ((c0 & 0xF8) == 0xF0 && i + 3 < s.size()) {
+      cp = ((c0 & 0x07u) << 18) | ((byte_at(1) & 0x3Fu) << 12) | ((byte_at(2) & 0x3Fu) << 6) |
+           (byte_at(3) & 0x3Fu);
+      len = 4;
+    } else {
+      ++i;
+      continue;
+    }
+    if (cp <= 0xFFFF) {
+      out.push_back(static_cast<char16_t>(cp));
+    } else if (cp <= 0x10FFFF) {
+      cp -= 0x10000;
+      out.push_back(static_cast<char16_t>(0xD800 + (cp >> 10)));
+      out.push_back(static_cast<char16_t>(0xDC00 + (cp & 0x3FFu)));
+    }
+    i += len;
+  }
+  return out;
+}
 
 bool IsKnownLanguageId(std::string_view id) {
   for (const auto& opt : kLanguageOptions) {
@@ -557,15 +604,7 @@ class CuratedSettingsDialog : public rex::ui::ImGuiDialog {
     if (!entry)
       return;
 
-    // Built-in options plus anything mods registered via the
-    // settings.language_option event (see RegisterLanguageOptionsListener).
-    // g_mod_language_options's strings outlive this call (only ever
-    // appended to, never cleared/reallocated-away during the app's
-    // lifetime), so c_str() pointers here stay valid for ImGui's use.
-    std::vector<LanguageOption> options(kLanguageOptions.begin(), kLanguageOptions.end());
-    for (const auto& mod_opt : g_mod_language_options) {
-      options.push_back({mod_opt.id.c_str(), mod_opt.label.c_str()});
-    }
+    std::vector<LanguageOption> options = GetLanguageOptions();
 
     std::string current = entry->getter();
     int cur_idx = 0;
@@ -863,6 +902,54 @@ void RegisterLanguageOptionsListener(rex::system::ModRegistry* registry) {
                          }
                          g_mod_language_options.push_back({std::move(id), std::move(label)});
                        });
+}
+
+std::vector<LanguageOption> GetLanguageOptions() {
+  // g_mod_language_options's strings outlive this call (only ever appended
+  // to, never cleared/reallocated-away during the app's lifetime), so
+  // c_str() pointers here stay valid for the caller's use.
+  std::vector<LanguageOption> options(kLanguageOptions.begin(), kLanguageOptions.end());
+  for (const auto& mod_opt : g_mod_language_options) {
+    options.push_back({mod_opt.id.c_str(), mod_opt.label.c_str()});
+  }
+  return options;
+}
+
+void RegisterNativeStringListener(rex::system::ModRegistry* registry) {
+  if (!registry)
+    return;
+  registry->Subscribe(
+      "settings.native_string", [](const rex::system::ModRegistry::EventPayload& payload) {
+        std::string_view kv(reinterpret_cast<const char*>(payload.bytes.data()),
+                             payload.bytes.size());
+        const size_t eq = kv.find('=');
+        if (eq == std::string_view::npos) {
+          REXLOG_WARN("[settings] ignoring malformed settings.native_string payload (no '=')");
+          return;
+        }
+        const std::string_view key = kv.substr(0, eq);
+        const std::string_view value = kv.substr(eq + 1);
+        if (key.empty() || value.empty()) {
+          REXLOG_WARN(
+              "[settings] ignoring settings.native_string payload with empty key or value");
+          return;
+        }
+        std::string map_key = std::to_string(payload.u64) + ":" + std::string(key);
+        if (g_native_string_translations.contains(map_key)) {
+          REXLOG_WARN(
+              "[settings] ignoring duplicate settings.native_string {} for language {} (already "
+              "registered)",
+              key, payload.u64);
+          return;
+        }
+        g_native_string_translations.emplace(std::move(map_key), Utf8ToUtf16(value));
+      });
+}
+
+const char16_t* FindNativeStringTranslation(uint32_t language_id, std::string_view key) {
+  const auto it =
+      g_native_string_translations.find(std::to_string(language_id) + ":" + std::string(key));
+  return it != g_native_string_translations.end() ? it->second.c_str() : nullptr;
 }
 
 std::unique_ptr<rex::ui::ImGuiDialog> CreateSettingsDialog(

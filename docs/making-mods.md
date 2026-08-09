@@ -47,10 +47,13 @@ See the `NocturneRecomp-Mods` repo's `src/` directory for some working examples.
 
 ## Code mods
 
-A code mod adds a `code = "<stem>"` key to `mod.toml` and ships a built DLL
-at `mods/<name>/code/<stem>.dll`. At startup the SDK loads that DLL through a
-versioned C ABI (`rex::system::IModPlugin`) and calls its lifecycle hooks
-alongside the game's own overlays.
+`code` in `mod.toml` is the mod's own stable identifier. Set it on every
+mod, ideally matching the folder name, whether or not the mod ships a DLL.
+When a mod does ship one, `code` also names it: a built DLL lives at
+`mods/<name>/code/<stem>.dll`, where `<stem>` is the `code` value. At
+startup the SDK loads that DLL through a versioned C ABI
+(`rex::system::IModPlugin`) and calls its lifecycle hooks alongside the
+game's own overlays.
 
 The project ships two builds: vanilla and title-update (TU), which relocates
 the whole image and shifts every guest address, and a single mod DLL has to
@@ -235,6 +238,25 @@ distribution from that repo's releases does) loads correctly with no
 flattening step needed. A locally-built, single-platform mod's flat
 `code/<stem>...` still works too.
 
+**Match the DLL's build config to the host you're loading it into.**
+`LoadModPlugin` refuses to load a mod DLL whose linked `rexruntime` doesn't
+match the running host's own build config, to avoid mapping a second copy of
+the runtime into the process (see `MismatchedRuntimeDependency` in the SDK's
+`mod_plugin_loader.cpp`). Shipped/released builds of this game (and
+`make_mods.py`'s default output) are **Release**, with no postfix:
+`code/<stem>.dll`. But `scripts/build.py` in *this* repo builds
+**RelWithDebInfo** by default (`--release` opts into an optimized Release
+build instead), see
+[Debugging with matching symbols](#debugging-with-matching-symbols-lldb)
+above. If you build a mod's SDK-linked DLL yourself against a locally-built
+RelWithDebInfo host, the loader expects the file itself named with an `rd`
+postfix: `code/<stem>rd.dll` (or `code/<platform>/<stem>rd.dll`), matching
+the `rexruntimerd.dll`/`.lib` the SDK's CMake config picks for that
+`CMAKE_BUILD_TYPE`. A `<stem>.dll` that actually links `rexruntimerd.dll` is
+rejected as a config mismatch rather than silently loaded, and a
+`<stem>rd.dll` is never looked for by a Release host, so pick the postfix
+that matches how you built it, not how you plan to distribute it.
+
 Prebuilt mods (all three platforms, already zipped one-per-mod) are
 attached to that repo's [releases](https://github.com/birabittoh/NocturneRecomp-Mods/releases)
 if you just want to install one rather than build it yourself.
@@ -402,6 +424,40 @@ language, it only adds the option to the dropdown so a mod that *does* add
 the actual translated text/assets can let the player select it. A duplicate
 id (already built in, or already published by an earlier-loaded mod) is
 dropped with a WARN log, same first-wins rule as `RegisterAddress`.
+
+The in-game native options screen (main menu or pause -> help & options ->
+settings, `src/native_options.cpp`) offers the same Language row, built from
+the same list, so a language added this way shows up there too, with no
+separate registration needed.
+
+**Translating the native options screen's own text**: most of that screen's
+rows are the base game's own, already localized by whatever `strings_<code>.bin`
+the language switch loads (see "Patching static game text/data" below), so
+there's nothing to do for those. A handful of rows (Resolution, Fullscreen, Language,
+GPU Backend, Preset, and the "Change Screen Size..." prompt) are ones
+NocturneRecomp itself appends, with their label text authored directly in
+`native_options.cpp` rather than read from the string table, and that text is
+only ever written in the base game's six languages. A mod adding a language
+that also wants those particular rows translated publishes one
+`"settings.native_string"` event per string, the same way as a language
+option:
+
+```cpp
+void OnCreateDialogs(rex::ui::ImGuiDrawer* drawer) override {
+  rex::system::ModRegistry::EventPayload payload;
+  payload.u64 = 9;  // XLanguage id this translation applies to
+  const char* kv = "resolution_label=Resolução";  // "key=value", UTF-8
+  payload.bytes = {reinterpret_cast<const uint8_t*>(kv), std::strlen(kv)};
+  runtime_->mod_registry()->Publish("settings.native_string", payload);
+}
+```
+
+See `native_options.cpp`'s `kNativeStringKey*` constants for the full list of
+keys (`resolution_label`, `fullscreen_label`, `fullscreen_off`,
+`fullscreen_on`, `language_label`, `gpu_backend_label`, `preset_label`,
+`custom_prompt_label`). A malformed payload (no `=`, or an empty key/value)
+is dropped with a WARN log; a duplicate (language id, key) pair keeps the
+first registration, same first-wins rule as the language dropdown event.
 
 **Keybind collisions**: `rex::ui::RegisterBind` auto-resolves collisions
 rather than silently shadowing one bind. If two mods both default to the

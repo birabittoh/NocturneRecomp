@@ -88,6 +88,7 @@
 #include <filesystem>
 #include <iterator>
 #include <string>
+#include <vector>
 
 #include "graphics_settings.h"
 #include "settings.h"
@@ -391,6 +392,31 @@ XLanguageId CurrentLanguage() {
   return static_cast<XLanguageId>(REXCVAR_QUERY(uint32_t, user_language));
 }
 
+// Keys a translating mod publishes via the "settings.native_string" event
+// (see settings.h's RegisterNativeStringListener) to override one of this
+// file's own synthesized strings. Rows the base game's string table already
+// covers (stock Graphics/Volume) aren't here -- they render correctly for
+// any language strings_<code>.bin supplies, with no help needed from this
+// mechanism.
+constexpr const char* kNativeStringKeyPresetLabel = "preset_label";
+constexpr const char* kNativeStringKeyCustomPromptLabel = "custom_prompt_label";
+constexpr const char* kNativeStringKeyResolutionLabel = "resolution_label";
+constexpr const char* kNativeStringKeyFullscreenLabel = "fullscreen_label";
+constexpr const char* kNativeStringKeyFullscreenOff = "fullscreen_off";
+constexpr const char* kNativeStringKeyFullscreenOn = "fullscreen_on";
+constexpr const char* kNativeStringKeyLanguageLabel = "language_label";
+constexpr const char* kNativeStringKeyGpuBackendLabel = "gpu_backend_label";
+
+// Prefers a mod-registered translation (see kNativeStringKey* above) for the
+// current language over the compiled-in `fallback`.
+const char16_t* TranslatedOr(const char* key, const char16_t* fallback) {
+  if (const char16_t* translated = nocturne::FindNativeStringTranslation(
+          static_cast<uint32_t>(CurrentLanguage()), key)) {
+    return translated;
+  }
+  return fallback;
+}
+
 // True once `name`'s cvar has actually been changed at runtime this session
 // and needs a relaunch to take effect -- the same source the ImGui settings
 // overlay's own "Some changes require a restart to take effect." banner
@@ -589,7 +615,8 @@ const char16_t* ResolutionLabel() {
         return u"Resolution";
     }
   }();
-  return AppendRestartMarker(base, CvarPendingRestart(kResolutionCvar));
+  return AppendRestartMarker(TranslatedOr(kNativeStringKeyResolutionLabel, base),
+                              CvarPendingRestart(kResolutionCvar));
 }
 
 int32_t GetResolutionIndex() {
@@ -622,26 +649,40 @@ void CommitResolutionIndex(int32_t index) {
 // `live`, same as Volume, and needs no "applies on next launch" caveat.
 constexpr const char* kFullscreenCvar = "fullscreen";
 constexpr std::array<const char*, 2> kFullscreenCvarValues = {"false", "true"};
-constexpr const char16_t* kFullscreenText[] = {u"Off", u"On"};
+// Populated by SyncFullscreenText, called every time the screen binds (see
+// `live_value_count`'s doc comment on CustomRow) so a translation a mod
+// registers after this row's already been read once still takes effect on
+// the next visit. `values` needs a fixed, compile-time-addressable buffer
+// (see CustomRow::values) -- this is that buffer's storage.
+std::array<const char16_t*, 2> g_fullscreen_values = {u"Off", u"On"};
+
+uint32_t SyncFullscreenText() {
+  g_fullscreen_values[0] = TranslatedOr(kNativeStringKeyFullscreenOff, u"Off");
+  g_fullscreen_values[1] = TranslatedOr(kNativeStringKeyFullscreenOn, u"On");
+  return static_cast<uint32_t>(g_fullscreen_values.size());
+}
 
 const char16_t* FullscreenLabel() {
-  switch (CurrentLanguage()) {
-    case XLanguageId::kItalian:
-      return u"Schermo intero";
-    // See ResolutionLabel's comment: literal text renders through the same
-    // language-selected font as looked-up text, so this is safe.
-    case XLanguageId::kJapanese:
-      return u"フルスクリーン";
-    case XLanguageId::kGerman:
-      return u"Vollbild";
-    case XLanguageId::kFrench:
-      return u"Plein écran";
-    case XLanguageId::kSpanish:
-      return u"Pantalla completa";
-    case XLanguageId::kEnglish:
-    default:
-      return u"Fullscreen";
-  }
+  const char16_t* base = [] {
+    switch (CurrentLanguage()) {
+      case XLanguageId::kItalian:
+        return u"Schermo intero";
+      // See ResolutionLabel's comment: literal text renders through the same
+      // language-selected font as looked-up text, so this is safe.
+      case XLanguageId::kJapanese:
+        return u"フルスクリーン";
+      case XLanguageId::kGerman:
+        return u"Vollbild";
+      case XLanguageId::kFrench:
+        return u"Plein écran";
+      case XLanguageId::kSpanish:
+        return u"Pantalla completa";
+      case XLanguageId::kEnglish:
+      default:
+        return u"Fullscreen";
+    }
+  }();
+  return TranslatedOr(kNativeStringKeyFullscreenLabel, base);
 }
 
 int32_t GetFullscreenIndex() {
@@ -668,9 +709,70 @@ void CommitFullscreenIndex(int32_t index) {
 // the next time this screen (or any other native_options row) is painted
 // after a relaunch.
 constexpr const char* kLanguageCvar = "user_language";
-constexpr std::array<const char*, 6> kLanguageCvarValues = {"1", "2", "3", "4", "5", "6"};
-constexpr const char16_t* kLanguageText[] = {u"English", u"Japanese", u"German",
-                                             u"French",  u"Spanish",  u"Italian"};
+
+// The row's `values` array must be a fixed, compile-time-addressable buffer
+// (see CustomRow::values), but the actual language *list* isn't known until
+// mods finish registering via settings.h's GetLanguageOptions -- the same
+// six built-in entries plus whatever mods appended to the curated overlay's
+// Language dropdown (see making-mods.md's "Adding a Language dropdown
+// entry"). So this row works like the Graphics Preset row's "Custom" tail
+// entry: a fixed-capacity array sized for well more than anyone's likely to
+// register, populated once lazily, with `live_value_count` (below) telling
+// the row how many of those slots are actually in use right now.
+constexpr uint32_t kMaxLanguageOptions = 32;
+
+// Populated once by EnsureLanguageOptionsBuilt(). Parallel arrays: index i's
+// id/label/UTF-16 text all describe the same option. The id and UTF-16
+// strings are owned here (reserved up front so push_back never reallocates
+// and invalidates the c_str() pointers g_language_values holds into them).
+std::vector<std::string> g_language_ids;
+std::vector<std::u16string> g_language_text_storage;
+std::array<const char16_t*, kMaxLanguageOptions> g_language_values{};
+uint32_t g_language_option_count = 0;
+bool g_language_options_built = false;
+
+// Mod-supplied labels are plain ASCII display names (see making-mods.md's
+// language-option example), so a byte-widening conversion is enough; there
+// is no font glyph coverage for anything beyond ASCII anyway (see
+// ResolutionLabel's comment on font_<lang>.xpr's limited atlas).
+std::u16string AsciiToUtf16(const std::string& s) {
+  std::u16string out;
+  out.reserve(s.size());
+  for (unsigned char c : s) {
+    out.push_back(static_cast<char16_t>(c));
+  }
+  return out;
+}
+
+void EnsureLanguageOptionsBuilt() {
+  if (g_language_options_built) {
+    return;
+  }
+  g_language_options_built = true;
+
+  const std::vector<nocturne::LanguageOption> options = nocturne::GetLanguageOptions();
+  g_language_option_count =
+      std::min<uint32_t>(static_cast<uint32_t>(options.size()), kMaxLanguageOptions);
+  if (options.size() > kMaxLanguageOptions) {
+    REXLOG_WARN(
+        "[native_options] {} language options registered, only the first {} fit the in-game "
+        "Language row",
+        options.size(), kMaxLanguageOptions);
+  }
+
+  g_language_ids.reserve(g_language_option_count);
+  g_language_text_storage.reserve(g_language_option_count);
+  for (uint32_t i = 0; i < g_language_option_count; ++i) {
+    g_language_ids.push_back(options[i].id);
+    g_language_text_storage.push_back(AsciiToUtf16(options[i].label));
+    g_language_values[i] = g_language_text_storage.back().c_str();
+  }
+}
+
+uint32_t LanguageOptionCount() {
+  EnsureLanguageOptionsBuilt();
+  return g_language_option_count;
+}
 
 const char16_t* LanguageRowLabel() {
   const char16_t* base = [] {
@@ -692,19 +794,31 @@ const char16_t* LanguageRowLabel() {
         return u"Language";
     }
   }();
-  return AppendRestartMarker(base, CvarPendingRestart(kLanguageCvar));
+  return AppendRestartMarker(TranslatedOr(kNativeStringKeyLanguageLabel, base),
+                              CvarPendingRestart(kLanguageCvar));
 }
 
 int32_t GetLanguageIndex() {
-  return std::clamp(static_cast<int32_t>(CurrentLanguage()) - 1, int32_t{0},
-                     static_cast<int32_t>(kLanguageCvarValues.size()) - 1);
+  EnsureLanguageOptionsBuilt();
+  const std::string current = rex::cvar::GetFlagByName(kLanguageCvar);
+  for (uint32_t i = 0; i < g_language_option_count; ++i) {
+    if (g_language_ids[i] == current) {
+      return static_cast<int32_t>(i);
+    }
+  }
+  // An id the row doesn't know (e.g. a mod-added language whose owning mod
+  // got disabled after the cvar was saved) falls back to the first entry
+  // rather than clamping to the last -- see native_options.cpp's history for
+  // why clamping to the top of the range is the wrong default here.
+  return 0;
 }
 
 void CommitLanguageIndex(int32_t index) {
-  if (index < 0 || index >= static_cast<int32_t>(kLanguageCvarValues.size())) {
+  EnsureLanguageOptionsBuilt();
+  if (index < 0 || static_cast<uint32_t>(index) >= g_language_option_count) {
     return;
   }
-  const char* value = kLanguageCvarValues[static_cast<size_t>(index)];
+  const std::string& value = g_language_ids[static_cast<uint32_t>(index)];
   if (rex::cvar::GetFlagByName(kLanguageCvar) == value) {
     return;
   }
@@ -754,7 +868,8 @@ const char16_t* GpuBackendLabel() {
         return u"GPU Backend";
     }
   }();
-  return AppendRestartMarker(base, CvarPendingRestart(kGpuBackendCvar));
+  return AppendRestartMarker(TranslatedOr(kNativeStringKeyGpuBackendLabel, base),
+                              CvarPendingRestart(kGpuBackendCvar));
 }
 
 int32_t GetGpuBackendIndex() {
@@ -839,22 +954,25 @@ void CommitMasterVolumeStep(int32_t step) {
 // this row is `live` -- the player sees each preset as they cycle onto it, one
 // frame later, and B puts the original back the same way.
 const char16_t* PresetLabel() {
-  switch (CurrentLanguage()) {
-    case XLanguageId::kItalian:
-      return u"Preset";
-    // See ResolutionLabel's comment on why this is safe.
-    case XLanguageId::kJapanese:
-      return u"プリセット";
-    case XLanguageId::kGerman:
-      return u"Voreinstellung";
-    case XLanguageId::kFrench:
-      return u"Préréglage";
-    case XLanguageId::kSpanish:
-      return u"Preajuste";
-    case XLanguageId::kEnglish:
-    default:
-      return u"Preset";
-  }
+  const char16_t* base = [] {
+    switch (CurrentLanguage()) {
+      case XLanguageId::kItalian:
+        return u"Preset";
+      // See ResolutionLabel's comment on why this is safe.
+      case XLanguageId::kJapanese:
+        return u"プリセット";
+      case XLanguageId::kGerman:
+        return u"Voreinstellung";
+      case XLanguageId::kFrench:
+        return u"Préréglage";
+      case XLanguageId::kSpanish:
+        return u"Preajuste";
+      case XLanguageId::kEnglish:
+      default:
+        return u"Preset";
+    }
+  }();
+  return TranslatedOr(kNativeStringKeyPresetLabel, base);
 }
 
 // The Y prompt's text. All caps to match the prompt bar's own strings (the
@@ -867,22 +985,25 @@ const char16_t* PresetLabel() {
 // re-read on every paint. That's fine here: `user_language` is restart-scoped,
 // so it cannot change between the build and the screen being shown.
 const char16_t* CustomPromptLabel() {
-  switch (CurrentLanguage()) {
-    case XLanguageId::kItalian:
-      return u"PERSONALIZZA";
-    // See ResolutionLabel's comment on why this is safe.
-    case XLanguageId::kJapanese:
-      return u"カスタマイズ";
-    case XLanguageId::kGerman:
-      return u"ANPASSEN";
-    case XLanguageId::kFrench:
-      return u"AJUSTER";
-    case XLanguageId::kSpanish:
-      return u"AJUSTAR";
-    case XLanguageId::kEnglish:
-    default:
-      return u"CUSTOMIZE";
-  }
+  const char16_t* base = [] {
+    switch (CurrentLanguage()) {
+      case XLanguageId::kItalian:
+        return u"PERSONALIZZA";
+      // See ResolutionLabel's comment on why this is safe.
+      case XLanguageId::kJapanese:
+        return u"カスタマイズ";
+      case XLanguageId::kGerman:
+        return u"ANPASSEN";
+      case XLanguageId::kFrench:
+        return u"AJUSTER";
+      case XLanguageId::kSpanish:
+        return u"AJUSTAR";
+      case XLanguageId::kEnglish:
+      default:
+        return u"CUSTOMIZE";
+    }
+  }();
+  return TranslatedOr(kNativeStringKeyCustomPromptLabel, base);
 }
 
 // --- Graphics (stock row 0, relabelled) -------------------------------------
@@ -961,8 +1082,13 @@ constexpr CustomRow kCustomRows[] = {
     {
         .list_row = kFullscreenRow,
         .label = &FullscreenLabel,
-        .values = kFullscreenText,
-        .value_count = static_cast<uint32_t>(std::size(kFullscreenText)),
+        .values = g_fullscreen_values.data(),
+        .value_count = static_cast<uint32_t>(g_fullscreen_values.size()),
+        // Count never actually changes; this is (ab)used purely for the
+        // "re-asked every bind" refresh timing to pick up a translation a
+        // mod registers after the row's already been read once. See
+        // SyncFullscreenText.
+        .live_value_count = &SyncFullscreenText,
         .get = &GetFullscreenIndex,
         .commit = &CommitFullscreenIndex,
         .live = true,
@@ -972,8 +1098,9 @@ constexpr CustomRow kCustomRows[] = {
         // restart-scoped.
         .list_row = kLanguageRow,
         .label = &LanguageRowLabel,
-        .values = kLanguageText,
-        .value_count = static_cast<uint32_t>(std::size(kLanguageText)),
+        .values = g_language_values.data(),
+        .value_count = kMaxLanguageOptions,
+        .live_value_count = &LanguageOptionCount,
         .get = &GetLanguageIndex,
         .commit = &CommitLanguageIndex,
         .live = true,

@@ -11,6 +11,8 @@
 
 #include <filesystem>
 #include <memory>
+#include <string_view>
+#include <vector>
 
 #include <rex/ui/imgui_dialog.h>
 
@@ -61,6 +63,56 @@ void ApplySettingDefaults();
 // by an earlier mod) are ignored with a warning, same first-wins rule as
 // RegisterAddress.
 void RegisterLanguageOptionsListener(rex::system::ModRegistry* registry);
+
+// One entry in the Language dropdown: `id` is the stringified XLanguage
+// value stored by the `user_language` cvar, `label` its display text.
+struct LanguageOption {
+  const char* id;
+  const char* label;
+};
+
+// The built-in six languages, followed by anything mods registered via
+// RegisterLanguageOptionsListener's event, in registration order. Rebuilt
+// fresh on every call (cheap: a handful of pointer-sized entries), so it's
+// always current regardless of when mods finish registering relative to the
+// caller. Shared by the curated settings overlay's own Language row and by
+// native_options.cpp's in-game equivalent, so both offer the same choices.
+std::vector<LanguageOption> GetLanguageOptions();
+
+// Subscribes to the "settings.native_string" mod-registry event, letting a
+// mod translate the native in-game options screen's own row text (see
+// native_options.cpp) into a language it added via
+// RegisterLanguageOptionsListener. Rows the base game's own string table
+// already covers (e.g. the stock Graphics/Volume rows) don't need this --
+// they render correctly for any language strings_<code>.bin supplies. This
+// is only for text native_options.cpp synthesizes itself: appended rows'
+// labels (Resolution, Fullscreen, Language, GPU Backend, ...) and a couple
+// of enumerated values (see native_options.cpp's kNativeStringKey*
+// constants for the full key list).
+//
+// A publishing mod calls, from its own IModPlugin::OnCreateDialogs, once per
+// string:
+//
+//   rex::system::ModRegistry::EventPayload payload;
+//   payload.u64 = 9;  // XLanguage id this translation applies to
+//   const char* kv = "resolution_label=Resolução";  // "key=value", plain
+//                                                     // ASCII or UTF-8
+//   payload.bytes = {reinterpret_cast<const uint8_t*>(kv), std::strlen(kv)};
+//   runtime->mod_registry()->Publish("settings.native_string", payload);
+//
+// Must be called after Runtime exists but before any mod's OnCreateDialogs
+// runs, same as RegisterLanguageOptionsListener. A malformed payload (no
+// '=', or an empty key/value) is ignored with a warning; a duplicate
+// (language id, key) pair keeps the first registration, same first-wins
+// rule as RegisterAddress.
+void RegisterNativeStringListener(rex::system::ModRegistry* registry);
+
+// Looks up a mod-published translation (see RegisterNativeStringListener)
+// for `key` in XLanguage `language_id`. Returns nullptr if none was
+// registered. The returned string is UTF-16, converted from the published
+// UTF-8 value; it is owned by the registry and valid for the process
+// lifetime.
+const char16_t* FindNativeStringTranslation(uint32_t language_id, std::string_view key);
 
 // Runs the GPU plugin / Vulkan device enumeration that CreateSettingsDialog's
 // dropdowns need, once, and caches the results for every dialog instance

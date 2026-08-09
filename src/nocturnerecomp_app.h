@@ -131,9 +131,10 @@ class NocturnerecompApp : public rex::ReXApp {
     // haven't loaded yet -- ConstructRuntime calls OnPostLoadXexImage, then
     // loads mod plugins and dispatches their OnCreateDialogs afterward (see
     // rex_app.cpp). This is the last point to subscribe before a mod's
-    // OnCreateDialogs might publish a "settings.language_option" event. See
-    // settings.h.
+    // OnCreateDialogs might publish a "settings.language_option" or
+    // "settings.native_string" event. See settings.h.
     nocturne::RegisterLanguageOptionsListener(runtime()->mod_registry());
+    nocturne::RegisterNativeStringListener(runtime()->mod_registry());
   }
 
   bool SetupEnvironment() override {
