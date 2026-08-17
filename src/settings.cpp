@@ -368,8 +368,14 @@ class CuratedSettingsDialog : public rex::ui::ImGuiDialog {
       if (dev_settings_overlay_) {
         dev_settings_overlay_.reset();
       } else {
+        // config_path here is where the SDK's dialog writes ("Save to
+        // config"), not where it reads from; cvars are already loaded from
+        // app_config_path_ at boot (see ReXApp::SetupEnvironment). Pointing
+        // saves at user_settings_path_ instead keeps <game>.toml read-only:
+        // it can still be hand-edited for dev-only setup, but nothing the
+        // running game does ever writes to it.
         dev_settings_overlay_ = std::make_unique<rex::ui::SettingsDialog>(
-            imgui_drawer(), app_config_path_, input_system_, "All Settings##rexdev");
+            imgui_drawer(), user_settings_path_, input_system_, "All Settings##rexdev");
       }
     }
 
@@ -405,7 +411,14 @@ class CuratedSettingsDialog : public rex::ui::ImGuiDialog {
   }
 
   void SaveBasic() { rex::cvar::SaveConfigSubset(user_settings_path_, BasicCvarNames()); }
-  void SaveAdvanced() { rex::cvar::SaveConfig(app_config_path_); }
+  // Advanced rows used to persist to app_config_path_ (<game>.toml). That
+  // file is now read-only from the game's own UI (the "All Settings..."
+  // browser saves to settings.toml too, see above); <game>.toml can still be
+  // hand-edited for dev-only setup, but nothing here writes to it anymore.
+  void SaveAdvanced() {
+    std::vector<std::string> names(kAdvancedCvarNames.begin(), kAdvancedCvarNames.end());
+    rex::cvar::SaveConfigSubset(user_settings_path_, names);
+  }
 
   // Game self-update (see rex::system::AutoUpdater), surfaced here rather
   // than the SDK's mod manager overlay (F1) since a player who never touches
