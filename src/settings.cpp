@@ -98,6 +98,10 @@ constexpr std::array kGameDefaults = {
 // the generic DrawCvarWidget path, but are still listed here so the generic
 // Reset-All / restart-tracking loops cover them; GetFlagInfo/ResetToDefault
 // etc. no-op harmlessly for "vulkan_device" on a build without Vulkan.
+//
+// host_timer_resolution_ms is absent here on purpose: 5ms is right for
+// everyone, so it gets no curated row. It is listed in kAdvancedCvarNames
+// instead, where the generic widget exposes it as the raw millisecond value.
 constexpr std::array<const char*, 10> kBasicCvarNames = {
     "fullscreen",  "resolution",    "resolution_scale", "user_name", "user_language",
     "gpu_backend", "vulkan_device", "gpu_plugin", "audio_mute", "audio_volume"};
@@ -245,10 +249,14 @@ bool IsKnownLanguageId(std::string_view id) {
 
 // cvars rendered generically in the collapsed Advanced section, persisted to
 // the app's normal cvar config (nocturnerecomp.toml).
-constexpr std::array<const char*, 8> kAdvancedCvarNames = {
+constexpr std::array<const char*, 9> kAdvancedCvarNames = {
     "post_process_shader_enabled",
     "post_process_shader_path",
     "frame_pacer_enabled",
+    // Windows only, so absent from the registry elsewhere; DrawAdvancedRow and
+    // the generic Reset-All / save loops no-op on a name that is not
+    // registered, so listing it unconditionally is safe.
+    "host_timer_resolution_ms",
     "shader_dump_enabled",
     "texture_dump_enabled",
     "texture_dump_format",

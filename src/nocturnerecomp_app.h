@@ -38,6 +38,7 @@
 #include "graphics_settings.h"
 #include "native_options.h"
 #include "headless_gpu_bridge.h"
+#include "host_timer_resolution.h"
 #include "icon.generated.h"
 #include "native_command_processor.h"
 #include "native_immediate_drawer.h"
@@ -103,10 +104,6 @@ class NocturnerecompApp : public rex::ReXApp {
     // on gpu_plugin being unset -- this is the documented entry point for
     // bringing your own renderer via OnCreateImmediateDrawer/OnPreLaunchModule.
     config.graphics = nullptr;
-
-#ifdef _WIN32
-    timeBeginPeriod(1);
-#endif
   }
 
   // Redirect the boot module to a randomizer-patched xex (rando_xex_name
@@ -150,6 +147,12 @@ class NocturnerecompApp : public rex::ReXApp {
     // are loaded last so they win over both.
     if (std::filesystem::exists(user_settings_path()))
       rex::cvar::LoadConfig(user_settings_path());
+
+    // Both config files are loaded by now, so the cvar holds the user's value.
+    // This used to be an unconditional timeBeginPeriod(1) in OnPreSetup; it has
+    // to run after the config load to be configurable at all, and the pacer
+    // does not sleep until well after this. See host_timer_resolution.h.
+    nocturne::ApplyHostTimerResolution();
 
     rex::system::GameDataSelectorSettings settings;
     settings.default_xex_sha256 = "26a58b074c5dd6185b77a8111a0012866d11cba674b4b0810d79dbf07ad68aa6";
@@ -324,9 +327,7 @@ class NocturnerecompApp : public rex::ReXApp {
     // down -- it dereferences runtime()->memory() every tick.
     nocturne::GetFramePacer().Stop();
     rex::discord_rpc::Stop();
-#ifdef _WIN32
-    timeEndPeriod(1);
-#endif
+    nocturne::ReleaseHostTimerResolution();
   }
 
   // Native renderer phase 2: called from SetupPresentation right after the

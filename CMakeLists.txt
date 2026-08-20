@@ -101,6 +101,7 @@ set(NOCTURNERECOMP_SOURCES
     src/frame_pacer.cpp
     src/graphics_settings.cpp
     src/headless_gpu_bridge.cpp
+    src/host_timer_resolution.cpp
     src/native_command_processor.cpp
     src/native_options.cpp
     src/ppc_interpreter.cpp
