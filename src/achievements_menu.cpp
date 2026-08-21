@@ -21,6 +21,8 @@
 
 #include "achievements_menu.h"
 
+#include "achievements_screen.h"
+
 #include <cstdint>
 #include <cstring>
 #include <string>
@@ -231,12 +233,24 @@ float AchievementsMenu::LeftStickY() {
 
 }  // namespace nocturne
 
-// ACH_SHOW_FN(...) -> XamShowAchievementsUI (SDK stub). Open our overlay and
-// pause the game, then run the original so the guest sees behavior identical to
-// the stub.
+// ACH_SHOW_FN(user=r3) -> XamShowAchievementsUI (SDK stub).
+//
+// First choice is the game's own achievements screen (achievements_screen.cpp):
+// a real front-end page, so the game handles the transition, the pause and the
+// input itself and none of the overlay machinery below is needed. That screen
+// is reached by hardcoded guest addresses like everything else here, so when it
+// could not be wired up this falls back to the SDK overlay -- which is also
+// still reachable directly through its keybind.
+//
+// Either way the original runs afterwards, so the guest sees behavior identical
+// to the stub.
 REX_HOOK_RAW(ACH_SHOW_FN) {
-  REXLOG_INFO("[achievements] guest opened Achievements UI -> opening overlay");
-  nocturne::Achievements().OpenFromGuest();
+  if (nocturne::GetAchievementsScreen().OpenFromGuest(ctx, base, ctx.r3.u32)) {
+    REXLOG_INFO("[achievements] guest opened Achievements UI -> native screen");
+  } else {
+    REXLOG_INFO("[achievements] guest opened Achievements UI -> opening overlay");
+    nocturne::Achievements().OpenFromGuest();
+  }
   ACH_IMP(ACH_SHOW_FN)(ctx, base);
 }
 

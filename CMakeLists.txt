@@ -96,7 +96,9 @@ set(NOCTURNERECOMP_SOURCES
     src/main.cpp
     src/nocturnerecomp_hooks.cpp
     src/accent_color.cpp
+    src/achievement_icons.cpp
     src/achievements_menu.cpp
+    src/achievements_screen.cpp
     src/fast_forward.cpp
     src/frame_pacer.cpp
     src/graphics_settings.cpp

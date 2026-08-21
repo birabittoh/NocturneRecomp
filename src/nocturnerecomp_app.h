@@ -32,6 +32,7 @@
 
 #include "accent_color.h"
 #include "achievements_menu.h"
+#include "achievements_screen.h"
 #include "fast_forward.h"
 #include "frame_pacer.h"
 #include "fonts.generated.h"
@@ -220,6 +221,12 @@ class NocturnerecompApp : public rex::ReXApp {
     // Adds a Resolution row to the game's own settings screen, alongside its
     // stock Graphics/Volume/Change Screen Size rows (see native_options.h).
     nocturne::GetNativeOptions().Bind(runtime());
+
+    // Points the Achievements menu entries at the game's own unused
+    // CScreenAchievement front-end page instead of the SDK overlay (see
+    // achievements_screen.h). Must come after NativeOptions::Bind: it leans on
+    // that file's pre-game watchdog suppression, which is only installed there.
+    nocturne::GetAchievementsScreen().Bind(runtime());
 
     // Steady internal-framerate pacer: drives the game's target_time clock at
     // exactly real-time from a dedicated steady-clock thread, so the PS1

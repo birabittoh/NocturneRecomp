@@ -1241,10 +1241,16 @@ std::array<uint32_t, 3> g_stock_prompts = {};
 uint32_t g_custom_prompt = 0;
 uint32_t g_custom_prompt_screen = 0;
 
-// True from the moment we open the stretch screen with no save loaded, until
-// we leave it again. Scopes both the watchdog suppression and the latch
-// cleanup in NativeOptions_PostEvent to exactly that window.
-bool g_pregame_stretch_screen = false;
+// The page we opened with no save loaded, from the moment we open it until we
+// leave it again, or 0 when we are not inside one. Scopes both the watchdog
+// suppression and the latch cleanup in NativeOptions_PostEvent to exactly that
+// window.
+//
+// Not stretch-screen-specific: any screen whose Activate clears the UI
+// manager's `mgr+332` settled flag trips the same pre-game watchdog, and
+// CScreenAchievement (page 15, see achievements_screen.cpp) does exactly what
+// the stretch screen's does. EnterPregameScreen is how that file arms this.
+uint32_t g_pregame_screen_page = 0;
 
 // Needed to resolve a widget's virtual "show" through its vtable at runtime
 // (see ShowWidget) -- the guest does the same dispatch, and there is no
@@ -1928,25 +1934,25 @@ extern "C" void NativeOptions_SettingsBuild(PPCContext& ctx, uint8_t* base) {
 // posting, so having swallowed its post once it stays disarmed -- this fires
 // exactly once per visit, not every frame.
 extern "C" void NativeOptions_PostEvent(PPCContext& ctx, uint8_t* base) {
-  if (ctx.r3.u32 == kEventClassPageSwitch && g_pregame_stretch_screen) {
+  if (ctx.r3.u32 == kEventClassPageSwitch && g_pregame_screen_page != 0) {
     const uint32_t manager = Read32BE(base, kUiManagerPtrAddr);
     const uint32_t current_page = manager ? Read32BE(base, manager + kCurrentPageOffset) : 0;
     const uint32_t latch = InGameLatchAddress(base);
 
-    if (static_cast<uint32_t>(ctx.lr) == kWatchdogPostLr && current_page == kResolutionPage) {
+    if (static_cast<uint32_t>(ctx.lr) == kWatchdogPostLr && current_page == g_pregame_screen_page) {
       if (latch) {
         Write8(base, latch, 1);
       }
       return;  // swallow it -- deliberately not forwarded to the original
     }
 
-    if (ctx.r5.u32 != kResolutionPage) {
+    if (ctx.r5.u32 != g_pregame_screen_page) {
       // Leaving the screen under our own steam (A/B/X). Its Activate raised
       // the latch unconditionally and nothing lowers it again, so without
       // this the front-end would keep believing a save was loaded -- and the
       // settings screen we are returning to would then try to exit to the
       // pause menu instead of the main menu.
-      g_pregame_stretch_screen = false;
+      g_pregame_screen_page = 0;
       if (latch) {
         Write8(base, latch, 0);
       }
@@ -2058,7 +2064,7 @@ extern "C" void NativeOptions_SettingsEvent(PPCContext& ctx, uint8_t* base) {
     if (message_class == kMsgClassButton && button == kButtonStretchScreen) {
       const uint32_t controller = Read32BE(base, message + kMsgController);
       const uint32_t latch = InGameLatchAddress(base);
-      g_pregame_stretch_screen = latch != 0 && Read8(base, latch) == 0;
+      g_pregame_screen_page = (latch != 0 && Read8(base, latch) == 0) ? kResolutionPage : 0;
       CallGuestPageSwitch(ctx, base, kResolutionPage, controller);
       ctx.r3.u32 = 1;
       return;
@@ -2164,6 +2170,8 @@ extern "C" void NativeOptions_SettingsEvent(PPCContext& ctx, uint8_t* base) {
 }
 
 }  // namespace
+
+void EnterPregameScreen(uint32_t page) { g_pregame_screen_page = page; }
 
 void NativeOptions::Bind(rex::Runtime* runtime) {
   runtime_ = runtime;

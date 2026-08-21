@@ -7,11 +7,28 @@
 // reverse-engineering the whole thing rests on.
 #pragma once
 
+#include <cstdint>
+
 namespace rex {
 class Runtime;
 }  // namespace rex
 
 namespace nocturne {
+
+// Arms this file's pre-game watchdog suppression for `page`, or disarms it when
+// `page` is 0.
+//
+// With no game running, the UI manager's per-frame update runs a watchdog that
+// yanks the front end back to the previous screen the frame after any screen
+// whose Activate clears the manager's "settled" flag (mgr+332) opens. The
+// stretch screen does that, and so does CScreenAchievement -- so both need the
+// same one-shot suppression, which NativeOptions_PostEvent owns because it
+// already overrides the single page-switch queue push every screen goes
+// through. See the comment on NativeOptions_PostEvent for the full rationale.
+//
+// Call from a guest thread just before posting the switch to `page`, and only
+// when no save is loaded; the suppression disarms itself on the way back out.
+void EnterPregameScreen(uint32_t page);
 
 class NativeOptions {
  public:
