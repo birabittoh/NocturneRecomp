@@ -19,11 +19,14 @@
 #include <algorithm>
 #include <cstdint>
 #include <string>
+#include <string_view>
 #include <vector>
 
 #include "achievement_icons.h"
 #include "native_options.h"
+#include "settings.h"
 
+#include <rex/cvar.h>
 #include <rex/logging.h>
 #include <rex/memory/utils.h>
 #include <rex/ppc/context.h>
@@ -442,6 +445,40 @@ uint32_t StageText(uint8_t* base, const std::string& text) {
   return g_text_scratch;
 }
 
+// Copies already-UTF-16 text (as returned by FindNativeStringTranslation) into
+// the shared guest scratch buffer and returns its guest address, or 0 if
+// there is no scratch. Unlike StageText this needs no UTF-8 decoding or font
+// folding -- a mod-supplied translation is expected to only use characters the
+// current language's font can already render, same assumption
+// native_options.cpp makes for its own row text.
+uint32_t StageTextU16(uint8_t* base, const char16_t* text) {
+  if (!g_text_scratch || !text) {
+    return 0;
+  }
+  uint32_t length = 0;
+  while (text[length] != u'\0' && length < kTextScratchChars - 1) {
+    rex::memory::store_and_swap<uint16_t>(base + g_text_scratch + length * 2,
+                                          static_cast<uint16_t>(text[length]));
+    ++length;
+  }
+  rex::memory::store_and_swap<uint16_t>(base + g_text_scratch + length * 2, 0);
+  return g_text_scratch;
+}
+
+// Mirrors settings.h's kNativeStringKey* convention for native_options.cpp's
+// own rows, but keyed per achievement id instead of a fixed name: a mod calls
+// RegisterNativeStringListener's "settings.native_string" event with one of
+// these as the key (id being the achievement's own AchievementInfo::id, not
+// its row index -- row order can change if the title ever adds one) to
+// override that one field for the achievement in a language it registered via
+// RegisterLanguageOptionsListener. Falls back to the XDBF string (whatever
+// language the title metadata carries) when nothing is registered.
+std::string AchievementNameKey(uint32_t id) { return "achv_name_" + std::to_string(id); }
+std::string AchievementDescriptionKey(uint32_t id) { return "achv_desc_" + std::to_string(id); }
+std::string AchievementLockedDescriptionKey(uint32_t id) {
+  return "achv_desc_locked_" + std::to_string(id);
+}
+
 // Stages a plain ASCII, NUL-terminated string for the guest. The image-bank
 // lookup takes a normal C string (the stock callers pass .rodata pointers), not
 // the UTF-16 the text setters want, so it gets its own buffer.
@@ -475,8 +512,16 @@ uint32_t CreateImage(PPCContext& ctx, uint8_t* base, uint32_t screen, uint32_t x
 // because none of it has an id: the achievement names and descriptions come
 // from the title's XDBF metadata (via the SDK), which the string tables know
 // nothing about. That also means this screen does not follow the in-game
-// Language setting the way the stock ones do -- the XDBF strings are whatever
-// language the title metadata carries. The heading is in the same boat.
+// Language setting the way the stock ones do by itself -- the XDBF strings
+// are whatever language the title metadata carries. A mod can still supply a
+// translation per achievement (see AchievementNameKey/AchievementDescriptionKey/
+// AchievementLockedDescriptionKey and SetTranslatableText below), the same
+// "settings.native_string" mechanism native_options.cpp uses for its own
+// synthesized row text; RefreshList prefers that over the XDBF string when
+// one is registered for the current language. The heading and Back prompt
+// are unaffected -- both are already string-table ids, so they follow
+// whatever strings_<code>.bin the current language loads with no help
+// needed here.
 uint32_t CreateText(PPCContext& ctx, uint8_t* base, uint32_t screen, uint32_t x, uint32_t y,
                     float scale) {
   const uint32_t memory = CallGuest(ctx, base, g_alloc_fn, kTextWidgetSize);
@@ -497,6 +542,23 @@ void SetText(PPCContext& ctx, uint8_t* base, uint32_t widget, const std::string&
   if (widget) {
     CallGuest(ctx, base, g_text_set_text_fn, widget, StageText(base, text));
   }
+}
+
+// Sets a text widget's contents, preferring a mod-registered translation for
+// the current language over `fallback` (the XDBF string). `key` identifies
+// which field this is (see AchievementNameKey/AchievementDescriptionKey/
+// AchievementLockedDescriptionKey).
+void SetTranslatableText(PPCContext& ctx, uint8_t* base, uint32_t widget, const std::string& key,
+                         const std::string& fallback) {
+  if (!widget) {
+    return;
+  }
+  const uint32_t language_id = REXCVAR_QUERY(uint32_t, user_language);
+  if (const char16_t* translated = FindNativeStringTranslation(language_id, key)) {
+    CallGuest(ctx, base, g_text_set_text_fn, widget, StageTextU16(base, translated));
+    return;
+  }
+  SetText(ctx, base, widget, fallback);
 }
 
 // Adds the "Back" prompt for B. Only one prompt, so it is positioned directly
@@ -702,14 +764,20 @@ void RefreshList(PPCContext& ctx, uint8_t* base) {
     const bool unlocked = ks && ks->achievements().IsUnlocked(info.id);
     const RowWidgets& row = g_rows[i];
 
-    SetText(ctx, base, row.name, info.label);
+    SetTranslatableText(ctx, base, row.name, AchievementNameKey(info.id), info.label);
     // A locked achievement shows its "unachieved" blurb when the title provides
     // one -- that is exactly what that field is for, and some of them are
-    // deliberately vaguer than the real description.
-    const std::string& blurb = (!unlocked && !info.unachieved_description.empty())
-                                   ? info.unachieved_description
-                                   : info.description;
-    SetText(ctx, base, row.description, blurb);
+    // deliberately vaguer than the real description. A mod's translation
+    // follows the same split: AchievementLockedDescriptionKey only applies
+    // while locked, and only when the XDBF title itself has an unachieved
+    // blurb to begin with -- a language that didn't bother translating the
+    // vague version isn't missing anything, it falls through to the regular
+    // description key like every other locked achievement without one.
+    const bool use_locked_blurb = !unlocked && !info.unachieved_description.empty();
+    const std::string& blurb = use_locked_blurb ? info.unachieved_description : info.description;
+    const std::string blurb_key = use_locked_blurb ? AchievementLockedDescriptionKey(info.id)
+                                                    : AchievementDescriptionKey(info.id);
+    SetTranslatableText(ctx, base, row.description, blurb_key, blurb);
 
     if (row.icon) {
       CallGuest(ctx, base, g_image_set_tint_fn, row.icon,
