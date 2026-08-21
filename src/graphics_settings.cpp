@@ -17,6 +17,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
+#include <filesystem>
 #include <mutex>
 #include <optional>
 #include <string>
@@ -41,6 +42,13 @@ REXCVAR_DEFINE_INT32(stretch_height_label_y, 185, "Video",
                       "Y position of the height percent readout on the Change Screen Size screen");
 REXCVAR_DEFINE_INT32(stretch_width_label_y, 275, "Video",
                       "Y position of the width percent readout on the Change Screen Size screen");
+
+// Original/Enhanced graphics style. False (Original) by default -- the style
+// used to have no persistence path at all (see below), so it always reset to
+// whatever the game's own save data happened to say ("Enhanced") on every
+// launch; this is the first time it has a real default of its own.
+REXCVAR_DEFINE_BOOL(graphics_style_enhanced, false, "Video",
+                     "Use the Enhanced graphics style (off = Original)");
 
 namespace {
 
@@ -96,6 +104,7 @@ constexpr uint32_t kStretchPercentToRectFnAddr = 0x825BB4B0u;
 constexpr uint32_t kStretchWidgetRepositionFnAddr = 0x825AB4B0u;
 constexpr uint32_t kFixedTimestepTickFnAddr = 0x8258B5B0u;
 constexpr uint32_t kSetWidgetTextByIdFnAddr = 0x825CFE68u;
+constexpr uint32_t kAppSingletonPtrAddr = 0x82E4F5C8u;
 #else
 constexpr uint32_t kStretchRectAddr = 0x82882C68u;
 constexpr uint32_t kStretchRectMaxAddr = 0x82882C98u;
@@ -106,7 +115,30 @@ constexpr uint32_t kStretchPercentToRectFnAddr = 0x825BB2B0u;
 constexpr uint32_t kStretchWidgetRepositionFnAddr = 0x825AB2B0u;
 constexpr uint32_t kFixedTimestepTickFnAddr = 0x8258B3B8u;
 constexpr uint32_t kSetWidgetTextByIdFnAddr = 0x825CFC68u;
+constexpr uint32_t kAppSingletonPtrAddr = 0x82E4F808u;
 #endif
+
+// Chain the applied graphics-style byte and its menu-selection mirror are
+// found through: app_singleton_ptr -> (+2296) settings_base -> (+4) data_ptr,
+// then the style entry lives at 180 * (base_index + 21) + data_ptr + 28,
+// with the applied byte at +2 (0 = Original, non-zero = Enhanced) and the
+// menu mirror at data_ptr + 4548. Reverse-engineered by
+// NocturneRecomp-Mods/src/graphics_settings (see that mod's header comment
+// and ResolveStyleChain) -- reused here now that persistence and the single
+// live writer both move into the native engine, the same way
+// graphics.stretch_rect's ownership did.
+constexpr uint32_t kStyleSettingsBaseOffset = 2296;
+constexpr uint32_t kStyleDataPtrOffset = 4;
+constexpr uint32_t kStyleBaseIndexOffset = 4348;
+constexpr uint32_t kStyleEntryStride = 180;
+constexpr uint32_t kStyleEntryIndexBias = 21;
+constexpr uint32_t kStyleEntryBaseOffset = 28;
+constexpr uint32_t kStyleEntryByteOffset = 2;
+constexpr uint32_t kStyleMenuMirrorOffset = 4548;
+// Sanity bound on base_index before it's multiplied into a write address --
+// mirrors the mod's own kMaxSettingsEntryIndex guard against aiming a byte
+// write at garbage read before the settings system has initialized.
+constexpr uint32_t kMaxStyleEntryIndex = 4096;
 
 // The plain text widget the screens use for headings, and the calls that make
 // one -- all taken from the settings screen's own builder (sub_825B4650),
@@ -340,6 +372,41 @@ PPCFunc* g_text_width_fn = nullptr;
 PPCFunc* g_set_text_colour_fn = nullptr;
 uint32_t g_text_scratch = 0;
 
+// Path settings.cpp's curated dialog also writes to (settings.toml), cached
+// once in Bind() so a style change picked up outside that dialog (the native
+// in-game toggle, or a mod's request event) can still be persisted -- same
+// pattern as native_options.cpp's own g_user_settings_path/SaveToUserSettings.
+std::filesystem::path g_style_user_settings_path;
+
+// The graphics style this engine is the single writer of. Reasserted every
+// GraphicsSettings_PerFrame tick, indefinitely -- exactly like
+// g_pending_restore_width_ratio/g_restoring above, and for the same reason:
+// a one-shot or time-bounded restore can still lose the race against the
+// game's own settings/save-data init, which can run an unpredictable amount
+// of time after boot (see g_restoring's comment; the former
+// mods_src/graphics_settings TryRestoreStyle hit exactly this with a bounded
+// ~10s reassert). Seeded from the persisted cvar in Bind() and updated
+// whenever the player picks a value in the native menu (detected as a
+// passive read-diff in ReassertStyle -- see that function's comment for why
+// this doesn't hook the row handler itself) or a mod requests one
+// (graphics_settings.request_style) -- either path re-persists too, so the
+// two never disagree.
+//
+// ReassertStyle writes/reads this directly on the guest thread (the same
+// thread GraphicsSettings_PerFrame runs on -- sequential, not concurrent).
+// Anything off the guest thread (a mod's ImGui overlay via the request
+// event, the curated settings dialog on the UI thread) instead goes through
+// g_requested_style/RequestGraphicsStyle below, the same deferred-request
+// pattern g_requested_preset already uses -- plain g_pending_style and
+// SaveStyleCvar's file write aren't safe to touch from two threads at once.
+uint8_t g_pending_style = 0;
+bool g_style_restore_logged = false;
+std::atomic<int> g_requested_style{-1};
+// True once ReassertStyle has read the chain at least once -- guards its
+// passive diff-detection so a not-yet-initialized live byte (read before the
+// chain settles) never gets misread as the player having picked something.
+bool g_style_chain_seen = false;
+
 int64_t NowMs() {
   return std::chrono::duration_cast<std::chrono::milliseconds>(
              std::chrono::steady_clock::now().time_since_epoch())
@@ -504,6 +571,126 @@ void SetPercentLabelText(PPCContext& ctx, uint8_t* base, PercentLabel& label, bo
             static_cast<uint32_t>(kPresetLabelCentreX - width / 2));
   Write32BE(base, label.widget + kWidgetYOffset, static_cast<uint32_t>(label.y_cvar()));
   label.shown = show;
+}
+
+// Walks app_singleton_ptr -> settings_base -> data_ptr -> entry_addr (see
+// the chain constants above) and returns the applied-byte and menu-mirror
+// guest addresses. false before the settings system has initialized (any
+// pointer in the chain reads 0) or if base_index looks like uninitialized
+// garbage.
+bool ResolveStyleAddrs(const uint8_t* base, uint32_t* style_addr, uint32_t* menu_addr) {
+  uint32_t singleton = Read32BE(base, kAppSingletonPtrAddr);
+  if (singleton == 0) {
+    return false;
+  }
+  uint32_t settings_base = Read32BE(base, singleton + kStyleSettingsBaseOffset);
+  if (settings_base == 0) {
+    return false;
+  }
+  uint32_t data_ptr = Read32BE(base, settings_base + kStyleDataPtrOffset);
+  if (data_ptr == 0) {
+    return false;
+  }
+  uint32_t base_index = Read32BE(base, data_ptr + kStyleBaseIndexOffset);
+  if (base_index > kMaxStyleEntryIndex) {
+    return false;
+  }
+  *style_addr = kStyleEntryStride * (base_index + kStyleEntryIndexBias) + data_ptr +
+                kStyleEntryBaseOffset + kStyleEntryByteOffset;
+  *menu_addr = data_ptr + kStyleMenuMirrorOffset;
+  return true;
+}
+
+// Persists the current graphics-style cvar to the same settings.toml the
+// curated dialog's Basic section writes -- so a change made through the
+// native in-game toggle or a mod's request event survives a restart exactly
+// like one made through that dialog's own row would.
+void SaveStyleCvar() {
+  if (g_style_user_settings_path.empty()) {
+    return;
+  }
+  rex::cvar::SaveConfigSubset(g_style_user_settings_path, {"graphics_style_enhanced"});
+}
+
+// Points the reassert engine at a new value and persists it -- shared by the
+// native dispatcher hook (adopting whatever the player just picked) and the
+// mod request handler (adopting whatever a mod just asked for).
+void LatchStyle(bool enhanced) {
+  g_pending_style = enhanced ? 1 : 0;
+  rex::cvar::SetFlagByName("graphics_style_enhanced", enhanced ? "true" : "false",
+                           /*persist=*/true);
+  SaveStyleCvar();
+}
+
+// Writes g_pending_style into both guest addresses if the chain resolves,
+// after first (a) adopting any external change to the graphics_style_enhanced
+// cvar itself (e.g. the SDK's generic "All Settings..." cvar browser, or the
+// console -- anything that doesn't go through RequestGraphicsStyle), (b)
+// adopting a change the player just made through the native in-game toggle,
+// detected as a plain read-compare against the value this function itself
+// last wrote, and (c) applying any explicit request queued off the guest
+// thread (RequestGraphicsStyle, or the mod's "graphics_settings.request_style"
+// event) -- (c) wins over (b) if both land the same frame, since it's a more
+// specific signal than "the byte changed underneath us".
+//
+// The read-compare in (a) is deliberately passive rather than hooking the
+// row handler that performs the native toggle: that handler's guest address
+// is shared by every row on this settings screen, not just style (see
+// NocturneRecomp-Mods/src/game_symbols/mod_main.cpp's
+// kOptionsMenuDispatcherFnAddr comment), was only confirmed via static RE,
+// and an earlier attempt at wrapping it here produced the game's own
+// "unable to write profile" error -- almost certainly from interfering with
+// whatever else that shared dispatcher does on Accept (profile/save-data
+// commits for the settings screen as a whole, not just this one row). A
+// read-only diff carries none of that risk.
+//
+// Called unconditionally from GraphicsSettings_PerFrame -- see g_pending_
+// style's comment for why the write itself can't be bounded or one-shot.
+void ReassertStyle(uint8_t* base) {
+  // Adopt any external cvar change too -- not just the request queue below.
+  // The curated dialog and the mod both go through RequestGraphicsStyle, but
+  // the SDK's own generic "All Settings..." cvar browser (opened from the
+  // curated dialog) writes graphics_style_enhanced directly via
+  // rex::cvar::SetFlagByName, with no way to route through that queue. A
+  // plain compare against the cvar's own current value catches that (and
+  // any other future path that sets the cvar directly, e.g. the console)
+  // the same way the guest-side read-diff below catches the native menu.
+  uint8_t cvar_style = REXCVAR_GET(graphics_style_enhanced) ? 1 : 0;
+  if (cvar_style != g_pending_style) {
+    g_pending_style = cvar_style;
+  }
+
+  uint32_t style_addr = 0;
+  uint32_t menu_addr = 0;
+  if (!ResolveStyleAddrs(base, &style_addr, &menu_addr)) {
+    // The chain can legitimately relocate (e.g. a different settings-table
+    // index once a different save slot is active) -- treat a lost chain as
+    // "never seen" so re-resolving it doesn't diff a fresh, unrelated live
+    // byte against a stale g_pending_style and misread it as a player pick.
+    g_style_chain_seen = false;
+    return;
+  }
+
+  if (g_style_chain_seen) {
+    uint8_t live = base[style_addr];
+    if (live != g_pending_style) {
+      LatchStyle(live != 0);
+    }
+  }
+  g_style_chain_seen = true;
+
+  int requested = g_requested_style.exchange(-1, std::memory_order_acq_rel);
+  if (requested >= 0) {
+    LatchStyle(requested != 0);
+  }
+
+  base[style_addr] = g_pending_style;
+  base[menu_addr] = g_pending_style;
+  if (!g_style_restore_logged) {
+    g_style_restore_logged = true;
+    REXLOG_INFO("[graphics_settings] applying graphics style (enhanced={})",
+                g_pending_style != 0);
+  }
 }
 
 void PublishPresetApplied(const uint8_t* base) {
@@ -984,6 +1171,8 @@ extern "C" void GraphicsSettings_PerFrame(PPCContext& ctx, uint8_t* base) {
     ApplyPendingRestore(base);
   }
 
+  ReassertStyle(base);
+
   ApplyRequestedPreset(ctx, base);
   ApplyPendingCustomRatioRequest(base);
 
@@ -1045,6 +1234,10 @@ uint32_t GraphicsPresetChoiceCount() {
 
 int32_t GetGraphicsPresetIndex() { return static_cast<int32_t>(g_preset_index); }
 
+void RequestGraphicsStyle(bool enhanced) {
+  g_requested_style.store(enhanced ? 1 : 0, std::memory_order_release);
+}
+
 void RequestGraphicsPreset(int32_t index) {
   if (index < 0 || index >= static_cast<int32_t>(GraphicsPresetChoiceCount())) {
     return;
@@ -1092,7 +1285,20 @@ void GraphicsSettings::Bind(rex::Runtime* runtime) {
           g_custom_ratio_request_height = data.height_ratio;
           g_custom_ratio_request_pending = true;
         });
+    // Same "publish the request, engine owns the write" shape as the two
+    // subscriptions above -- lets NocturneRecomp-Mods' graphics_settings
+    // overlay ask for a style without writing graphics.stretch_rect's sibling
+    // guest bytes itself, which used to race this engine's own reassert once
+    // both existed. u64 != 0 means Enhanced.
+    g_mod_registry->Subscribe(
+        "graphics_settings.request_style",
+        [](const rex::system::ModRegistry::EventPayload& payload) {
+          g_requested_style.store(payload.u64 != 0 ? 1 : 0, std::memory_order_release);
+        });
   }
+
+  g_style_user_settings_path = runtime_->user_data_root() / "settings.toml";
+  g_pending_style = REXCVAR_GET(graphics_style_enhanced) ? 1 : 0;
 
   g_storage.emplace(runtime_->user_data_root() / "mods" / "graphics_settings.cfg");
   g_storage->Load();

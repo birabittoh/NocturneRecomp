@@ -3,6 +3,8 @@
 
 #include "settings.h"
 
+#include "graphics_settings.h"
+
 #include <algorithm>
 #include <array>
 #include <cmath>
@@ -102,9 +104,10 @@ constexpr std::array kGameDefaults = {
 // host_timer_resolution_ms is absent here on purpose: 5ms is right for
 // everyone, so it gets no curated row. It is listed in kAdvancedCvarNames
 // instead, where the generic widget exposes it as the raw millisecond value.
-constexpr std::array<const char*, 10> kBasicCvarNames = {
-    "fullscreen",  "resolution",    "resolution_scale", "user_name", "user_language",
-    "gpu_backend", "vulkan_device", "gpu_plugin", "audio_mute", "audio_volume"};
+constexpr std::array<const char*, 11> kBasicCvarNames = {
+    "fullscreen",           "resolution", "resolution_scale", "user_name",  "user_language",
+    "gpu_backend",          "vulkan_device", "gpu_plugin", "audio_mute", "audio_volume",
+    "graphics_style_enhanced"};
 
 // The SDK's resolution_scale is an integer EDRAM/draw supersampling factor
 // (range 1-8), independent of the display resolution -- it's an absolute
@@ -321,6 +324,7 @@ class CuratedSettingsDialog : public rex::ui::ImGuiDialog {
     DrawFullscreenRow();
     DrawResolutionRow();
     DrawRenderScaleRow();
+    DrawGraphicsStyleRow();
     DrawAudioMuteRow();
     DrawAudioVolumeRow();
     DrawUserNameRow();
@@ -603,6 +607,26 @@ class CuratedSettingsDialog : public rex::ui::ImGuiDialog {
     if (changed) {
       rex::cvar::SetFlagByName("resolution_scale", std::to_string(idx), /*persist=*/true);
       SaveBasic();
+    }
+    ImGui::PopID();
+  }
+
+  void DrawGraphicsStyleRow() {
+    const auto* entry = rex::cvar::GetFlagInfo("graphics_style_enhanced");
+    if (!entry)
+      return;
+    ImGui::TextUnformatted("Enhanced Graphics");
+    ImGui::SameLine(180.0f);
+    ImGui::PushID("graphics_style_enhanced");
+    bool enhanced = entry->getter() == "true";
+    // rex::ui::ToggleSwitch directly rather than DrawCvarWidget's generic
+    // bool path: that one calls rex::cvar::SetFlagByName itself, which --
+    // unlike this row -- doesn't apply the change to guest memory or persist
+    // it (see RequestGraphicsStyle's doc comment). ToggleSwitch matches the
+    // pill-toggle look DrawCvarWidget uses for every other Boolean row
+    // (Mute Audio, Fullscreen, ...) without going through its own apply path.
+    if (rex::ui::ToggleSwitch("##v", &enhanced)) {
+      RequestGraphicsStyle(enhanced);
     }
     ImGui::PopID();
   }

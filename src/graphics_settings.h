@@ -68,4 +68,11 @@ int32_t GetGraphicsPresetIndex();
 // deferred to GraphicsSettings_PerFrame rather than done here.
 void RequestGraphicsPreset(int32_t index);
 
+// Requests the Original/Enhanced graphics style. Safe to call from any
+// thread -- deferred to the next GraphicsSettings_PerFrame tick, same as
+// RequestGraphicsPreset above. Persists to settings.toml once applied, and
+// becomes the value reasserted into guest memory every frame from then on
+// (see graphics_settings.cpp's g_pending_style).
+void RequestGraphicsStyle(bool enhanced);
+
 }  // namespace nocturne
