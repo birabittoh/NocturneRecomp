@@ -189,9 +189,9 @@ constexpr float kTitleScale = 0.95f;
 // description beside that.
 constexpr uint32_t kFirstRowY = 84;
 constexpr uint32_t kRowSpacing = 27;
-constexpr uint32_t kIconX = 16;
+constexpr int32_t kIconX = -4;
 constexpr uint32_t kIconSize = 22;
-constexpr uint32_t kNameX = 44;
+constexpr uint32_t kNameX = 24;
 constexpr uint32_t kDescriptionX = 210;
 constexpr float kNameScale = 0.70f;
 constexpr float kDescriptionScale = 0.58f;
@@ -730,7 +730,7 @@ void BuildList(PPCContext& ctx, uint8_t* base, uint32_t screen) {
 
     RowWidgets& row = g_rows[i];
     if (image) {
-      row.icon = CreateImage(ctx, base, screen, kIconX, y, image);
+      row.icon = CreateImage(ctx, base, screen, static_cast<uint32_t>(kIconX), y, image);
     }
     if (row.icon) {
       const uint32_t w =
@@ -739,8 +739,8 @@ void BuildList(PPCContext& ctx, uint8_t* base, uint32_t screen) {
           rex::memory::load_and_swap<uint32_t>(base + row.icon + kImageHeightOffset);
       REXLOG_INFO("[achievements_screen] {} -> image {:08X} ({}x{})", image_name, image, w, h);
       // Scale whatever the art actually is into a square icon box.
-      CallGuest(ctx, base, g_image_set_rect_fn, row.icon, kIconX, y, kIconX + kIconSize,
-                y + kIconSize);
+      CallGuest(ctx, base, g_image_set_rect_fn, row.icon, static_cast<uint32_t>(kIconX), y,
+                static_cast<uint32_t>(kIconX + static_cast<int32_t>(kIconSize)), y + kIconSize);
     } else {
       REXLOG_INFO("[achievements_screen] {} not present in the guest image bank", image_name);
     }
