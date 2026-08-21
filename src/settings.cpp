@@ -104,16 +104,9 @@ constexpr std::array kGameDefaults = {
 // host_timer_resolution_ms is absent here on purpose: 5ms is right for
 // everyone, so it gets no curated row. It is listed in kAdvancedCvarNames
 // instead, where the generic widget exposes it as the raw millisecond value.
-constexpr std::array<const char*, 11> kBasicCvarNames = {
-    "fullscreen",           "resolution", "resolution_scale", "user_name",  "user_language",
-    "gpu_backend",          "vulkan_device", "gpu_plugin", "audio_mute", "audio_volume",
-    "graphics_style_enhanced"};
-
-// The SDK's resolution_scale is an integer EDRAM/draw supersampling factor
-// (range 1-8), independent of the display resolution -- it's an absolute
-// multiplier on the base render target, not a percentage of "native" for
-// whatever Resolution happens to be set to.
-constexpr int kMaxResolutionScale = 8;
+constexpr std::array<const char*, 10> kBasicCvarNames = {
+    "fullscreen",  "resolution",    "user_name",  "user_language", "gpu_backend",
+    "vulkan_device", "gpu_plugin", "audio_mute", "audio_volume", "graphics_style_enhanced"};
 
 // Named resolution presets offered by DrawResolutionRow, ordered ascending.
 constexpr std::array<const char*, 4> kResolutionPresetsAscending = {"720p", "1080p", "1440p", "4K"};
@@ -323,7 +316,6 @@ class CuratedSettingsDialog : public rex::ui::ImGuiDialog {
 
     DrawFullscreenRow();
     DrawResolutionRow();
-    DrawRenderScaleRow();
     DrawGraphicsStyleRow();
     DrawAudioMuteRow();
     DrawAudioVolumeRow();
@@ -529,10 +521,9 @@ class CuratedSettingsDialog : public rex::ui::ImGuiDialog {
 
   // audio_volume is a Double cvar (0.0-1.0 linear amplitude, applied directly
   // to samples by the SDL audio driver); DrawCvarWidget's generic Double path
-  // is a plain InputDouble box, not a slider, so this draws its own row the
-  // same way DrawRenderScaleRow does for resolution_scale -- displaying and
-  // editing a perceptually-spaced percentage (see VolumeAmplitudeFromPercent)
-  // rather than the raw amplitude directly.
+  // is a plain InputDouble box, not a slider, so this draws its own row
+  // instead, displaying and editing a perceptually-spaced percentage (see
+  // VolumeAmplitudeFromPercent) rather than the raw amplitude directly.
   void DrawAudioVolumeRow() {
     const auto* entry = rex::cvar::GetFlagInfo("audio_volume");
     if (!entry)
@@ -577,35 +568,9 @@ class CuratedSettingsDialog : public rex::ui::ImGuiDialog {
     ImGui::PushID("resolution");
     int idx = cur_idx;
     // Format string is a fixed label, not a %d placeholder -- SliderInt just
-    // displays it verbatim, same trick DrawRenderScaleRow uses for "50%" etc.
+    // displays it verbatim.
     if (ImGui::SliderInt("##v", &idx, 0, count - 1, kOptions[idx])) {
       rex::cvar::SetFlagByName("resolution", kOptions[idx], /*persist=*/true);
-      SaveBasic();
-    }
-    ImGui::PopID();
-  }
-
-  // resolution_scale is an integer cvar (range 1-kMaxResolutionScale), a
-  // plain EDRAM/draw supersampling factor entirely independent of the
-  // Resolution cvar -- it no longer expresses itself as a percentage of the
-  // current display resolution.
-  void DrawRenderScaleRow() {
-    const auto* scale_entry = rex::cvar::GetFlagInfo("resolution_scale");
-    if (!scale_entry)
-      return;
-
-    int current_scale = std::atoi(scale_entry->getter().c_str());
-    int idx = std::clamp(current_scale, 1, kMaxResolutionScale);
-
-    ImGui::PushID("render_scale_percent");
-
-    ImGui::TextUnformatted("Render Scale");
-    ImGui::SameLine(180.0f);
-    ImGui::SetNextItemWidth(160.0f);
-    bool changed = ImGui::SliderInt("##v", &idx, 1, kMaxResolutionScale, "%dx");
-
-    if (changed) {
-      rex::cvar::SetFlagByName("resolution_scale", std::to_string(idx), /*persist=*/true);
       SaveBasic();
     }
     ImGui::PopID();
