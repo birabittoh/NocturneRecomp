@@ -75,6 +75,7 @@ namespace {
 #ifdef NOCTURNE_TU
 constexpr uint32_t kScreenEventFnAddr = 0x825B70D0u;     // (screen, message)
 constexpr uint32_t kScreenActivateFnAddr = 0x825B7200u;  // (screen, arg1)
+constexpr uint32_t kScreenUpdateFnAddr = 0x825B7440u;    // (screen)
 constexpr uint32_t kPostEventFnAddr = 0x825CEAE8u;       // (class, arg1, page, controller)
 constexpr uint32_t kAllocFnAddr = 0x82576B28u;           // (size) -> pointer
 constexpr uint32_t kImageCtorFnAddr = 0x825D0E48u;       // (mem, parent, x, y, image)
@@ -101,6 +102,7 @@ constexpr uint32_t kBGlyphNameAddr = 0x82202300u;
 #else
 constexpr uint32_t kScreenEventFnAddr = 0x825B6ED0u;     // (screen, message)
 constexpr uint32_t kScreenActivateFnAddr = 0x825B7000u;  // (screen, arg1)
+constexpr uint32_t kScreenUpdateFnAddr = 0x825B7240u;    // (screen)
 constexpr uint32_t kPostEventFnAddr = 0x825CE8E8u;       // (class, arg1, page, controller)
 constexpr uint32_t kAllocFnAddr = 0x82576950u;           // (size) -> pointer
 constexpr uint32_t kImageCtorFnAddr = 0x825D0C48u;       // (mem, parent, x, y, image)
@@ -247,6 +249,7 @@ constexpr uint32_t kButtonCancel = 5;
 
 PPCFunc* g_original_screen_event_fn = nullptr;
 PPCFunc* g_original_screen_activate_fn = nullptr;
+PPCFunc* g_original_screen_update_fn = nullptr;
 PPCFunc* g_post_event_fn = nullptr;
 PPCFunc* g_alloc_fn = nullptr;
 PPCFunc* g_image_ctor_fn = nullptr;
@@ -852,6 +855,33 @@ extern "C" void AchievementsScreen_ScreenActivate(PPCContext& ctx, uint8_t* base
   RefreshList(ctx, base);
 }
 
+// CScreenAchievement's per-frame update (vtable slot 7). Suppressed entirely
+// while we are the ones showing the screen.
+//
+// The stock body is a dismissal timer and nothing else: with no game running
+// (app+28 == 0) it ticks a counter at screen+552 (zeroed by Activate and
+// DeActivate), and once that reaches 200 frames it clears the app's "UI is
+// up" flag and plays UI sound 1 (sub_825D18D8), the same cancel sound B makes.
+// That was written as a one-shot for a screen that, on real hardware, nothing
+// ever navigated to: the counter keeps climbing past 200 and nothing else
+// closes the screen, so from the 200th frame on it fires the sound *every
+// frame*. That is the buzz that starts ~3.3 seconds after the list appears.
+//
+// Opened from the pause menu it never triggers, because a game is running and
+// app+28 is set, which skips the whole block; that is why the bug only ever
+// showed up on the main-menu route.
+//
+// Skipping the original is safe because the timer is all it does. This screen
+// is dismissed by B (see AchievementsScreen_ScreenEvent), not by a timeout.
+extern "C" void AchievementsScreen_ScreenUpdate(PPCContext& ctx, uint8_t* base) {
+  if (g_return_page) {
+    return;
+  }
+  if (g_original_screen_update_fn) {
+    g_original_screen_update_fn(ctx, base);
+  }
+}
+
 AchievementsScreen& GetAchievementsScreen() {
   static AchievementsScreen instance;
   return instance;
@@ -942,6 +972,14 @@ void AchievementsScreen::Bind(rex::Runtime* runtime) {
     REXLOG_WARN("[achievements_screen] OverrideFunction failed for {:08X} (screen activate); the "
                 "screen will open empty",
                 kScreenActivateFnAddr);
+  }
+
+  if (!dispatcher->OverrideFunction(kScreenUpdateFnAddr, &AchievementsScreen_ScreenUpdate,
+                                    &g_original_screen_update_fn)) {
+    REXLOG_WARN("[achievements_screen] OverrideFunction failed for {:08X} (screen update); the "
+                "screen's stock dismissal timer will buzz the cancel sound every frame after "
+                "~3 seconds",
+                kScreenUpdateFnAddr);
   }
 }
 
