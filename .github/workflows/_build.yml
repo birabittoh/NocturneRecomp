@@ -39,17 +39,14 @@ jobs:
           - platform: windows-x64
             runner: windows-latest
             sdk_dir: win-amd64
-            artifact_suffix: windows-x64
 
           - platform: linux-x64
             runner: ubuntu-latest
             sdk_dir: linux-amd64
-            artifact_suffix: linux-x64
 
           - platform: linux-arm64
             runner: ubuntu-24.04-arm
             sdk_dir: linux-arm64
-            artifact_suffix: linux-arm64
 
     steps:
       - name: Checkout
@@ -142,9 +139,9 @@ jobs:
         shell: bash
         run: |
           if [ "${{ inputs.publish_mode }}" = "artifact" ]; then
-            out="${{ inputs.artifact_name }}-${{ matrix.artifact_suffix }}"
+            out="${{ inputs.artifact_name }}-${{ matrix.platform }}"
           else
-            out="nocturnerecomp-${{ inputs.tag }}-${{ matrix.artifact_suffix }}"
+            out="nocturnerecomp-${{ inputs.tag }}-${{ matrix.platform }}"
           fi
           python scripts/build.py --package "${out}"
 
@@ -152,7 +149,7 @@ jobs:
         if: inputs.publish_mode == 'artifact'
         uses: actions/upload-artifact@v4
         with:
-          name: ${{ inputs.artifact_name }}-${{ matrix.artifact_suffix }}
+          name: ${{ inputs.artifact_name }}-${{ matrix.platform }}
           path: pkg/
           if-no-files-found: error
 
@@ -172,9 +169,9 @@ jobs:
         shell: bash
         run: |
           if [ "${{ inputs.publish_mode }}" = "artifact" ]; then
-            out="${{ inputs.artifact_name }}-tu-${{ matrix.artifact_suffix }}"
+            out="${{ inputs.artifact_name }}-tu-${{ matrix.platform }}"
           else
-            out="nocturnerecomp-tu-${{ inputs.tag }}-${{ matrix.artifact_suffix }}"
+            out="nocturnerecomp-tu-${{ inputs.tag }}-${{ matrix.platform }}"
           fi
           python scripts/build.py --package "${out}"
 
@@ -182,7 +179,7 @@ jobs:
         if: inputs.publish_mode == 'artifact'
         uses: actions/upload-artifact@v4
         with:
-          name: ${{ inputs.artifact_name }}-tu-${{ matrix.artifact_suffix }}
+          name: ${{ inputs.artifact_name }}-tu-${{ matrix.platform }}
           path: pkg/
           if-no-files-found: error
 
