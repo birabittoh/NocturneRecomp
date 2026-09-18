@@ -91,7 +91,8 @@ class NocturnerecompApp : public rex::ReXApp {
     // the SDK. A NOCTURNE_TU build must only ever be offered another TU
     // build (never a vanilla one, and vice versa) since the two patch
     // different base addresses so the asset name itself encodes which
-    // variant this binary is.
+    // variant this binary is. {platform} is the SDK's own naming (win-amd64
+    // etc.), which is what the CI matrix publishes.
 #ifdef NOCTURNE_TU
     config.update_asset_format = "nocturnerecomp-tu-{tag}-{platform}";
 #else

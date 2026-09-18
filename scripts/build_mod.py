@@ -984,7 +984,7 @@ def build_and_install(mod_id: str, src_dir: Path, build_type: str, install_dir: 
     # "<stem>.dll". Naming it wrong is silently fatal: the loader logs a
     # failure and none of this mod's patches ever run.
     suffix = "rd" if build_type == "RelWithDebInfo" else ""
-    code_dir = install_dir / "code" / "windows-x64"
+    code_dir = install_dir / "code" / "win-amd64"
     code_dir.mkdir(parents=True, exist_ok=True)
     for ext in ("dll", "pdb"):
         built = build_dir / f"{mod_id}.{ext}"
@@ -1002,9 +1002,9 @@ def build_and_install(mod_id: str, src_dir: Path, build_type: str, install_dir: 
     # docs/making-mods.md: "platform" is written by build tooling, not read
     # by it -- a fresh manifest leaves it empty, and after a successful build
     # it's (re)set to whichever platform(s) install_dir/code/ actually ships
-    # a binary for. Here that's always just windows-x64, since this script
+    # a binary for. Here that's always just win-amd64, since this script
     # only ever invokes a local (host) compiler.
-    set_platform(install_dir / "mod.toml", "windows-x64")
+    set_platform(install_dir / "mod.toml", "win-amd64")
     print(f"Installed mod to {install_dir}")
 
 
