@@ -2206,13 +2206,12 @@ void NativeOptions::Bind(rex::Runtime* runtime) {
 
   // GPU Backend is the last row in the table, so deciding it out here -- once,
   // rather than per screen-open -- and folding it into g_active_row_count
-  // before any hook runs is enough to make it disappear cleanly when the
-  // active GPU plugin doesn't offer a choice.
-  g_gpu_backend_row_available =
-      rex::system::QuerySupportedBackends(rex::cvar::GetFlagByName("gpu_plugin")).size() > 1;
-  if (!g_gpu_backend_row_available) {
-    --g_active_row_count;
-  }
+  // before any hook runs is enough to make it disappear cleanly. The native
+  // renderer loads no GPU plugin, so there is no backend to choose between, and
+  // asking the plugin loader would dlopen a plugin only to read its list (which
+  // can deadlock against another thread's first log call under the loader lock).
+  g_gpu_backend_row_available = false;
+  --g_active_row_count;
 
   if (!dispatcher->OverrideFunction(kListSetupFnAddr, &NativeOptions_ListSetup,
                                     &g_original_list_setup_fn)) {

@@ -50,7 +50,7 @@ struct DefaultValue {
 constexpr std::array kGameDefaults = {
     DefaultValue{"user_name", "Player"},
     DefaultValue{"user_language", "1"},
-    DefaultValue{"gpu_plugin", "xenos"},
+    DefaultValue{"gpu_plugin", ""},
     DefaultValue{"gpu_backend", "any"},
     DefaultValue{"fullscreen", "false"},
     DefaultValue{"resolution", "720p"},
