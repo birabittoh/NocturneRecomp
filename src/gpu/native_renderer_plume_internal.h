@@ -1,8 +1,9 @@
 // nocturnerecomp - ReXGlue Recompiled Project
 //
 // Shared between the translation units that speak Plume: the backend that owns
-// the device and the swap chain (native_renderer_plume.cpp) and the overlay
-// drawer that records into its command list (native_renderer_overlay.cpp).
+// the device and the swap chain (native_renderer_plume.cpp), and the guest draw
+// path (native_renderer_draw.cpp) and overlay drawer
+// (native_renderer_overlay.cpp) that record into its command list.
 //
 // Not included anywhere else. Plume pulls in d3d12.h and windows.h, and the
 // point of the public headers is to keep that out of the guest-facing code.
@@ -62,5 +63,28 @@ plume::RenderFormat PlumeSwapChainFormat();
 
 // Which slot the frame currently being recorded owns, in [0, kFramesInFlight).
 uint32_t PlumeFrameSlot();
+
+// The command list of the frame being recorded, begun on first use, or null
+// before the backend is up. Guest draws record into it as they arrive; the
+// present appends the composite and the overlays and submits it.
+plume::RenderCommandList* PlumeFrameCommands();
+
+// Counts the frames whose command list has begun, so a recorder can tell that
+// a new frame (and its slot's resources) started since it last looked.
+uint64_t PlumeFrameSerial();
+
+// native_renderer_draw.cpp's half of the present: draw the image the guest
+// last resolved into `framebuffer`, a swap chain image of the given size, in
+// the frame's command list. Clears to a placeholder colour while there is
+// none.
+void CompositeGuestImage(plume::RenderCommandList* commands,
+                         const plume::RenderFramebuffer* framebuffer, uint32_t width,
+                         uint32_t height);
+
+// The frame that last used `slot` has finished on the GPU.
+void GuestFrameRetired(uint32_t slot);
+
+// Release everything the draw path created. Before the device goes.
+void ShutdownGuestDraw();
 
 }  // namespace nocturne

@@ -243,6 +243,7 @@ set(NOCTURNERECOMP_SOURCES
     src/gpu/guest_shaders.cpp
     src/gpu/native_renderer.cpp
     src/gpu/native_renderer_d3d.cpp
+    src/gpu/native_renderer_draw.cpp
     src/gpu/native_renderer_overlay.cpp
     src/gpu/native_renderer_plume.cpp
     ${NOCTURNE_FONTS_HEADER}
@@ -282,6 +283,12 @@ plume_compile_vertex_shader(nocturnerecomp
     "${CMAKE_SOURCE_DIR}/src/shaders/imgui.vert.hlsl" "imguiVert" "VSMain")
 plume_compile_pixel_shader(nocturnerecomp
     "${CMAKE_SOURCE_DIR}/src/shaders/imgui.frag.hlsl" "imguiFrag" "PSMain")
+
+# The present blit, which scales the guest's image into the window.
+plume_compile_vertex_shader(nocturnerecomp
+    "${CMAKE_SOURCE_DIR}/src/shaders/blit.vert.hlsl" "blitVert" "VSMain")
+plume_compile_pixel_shader(nocturnerecomp
+    "${CMAKE_SOURCE_DIR}/src/shaders/blit.frag.hlsl" "blitFrag" "PSMain")
 
 # Title-update builds: the achievements bridge hooks the game's XAM thunks by
 # their hardcoded vanilla guest addresses (sub_825D8028 etc.). The title update

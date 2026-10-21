@@ -73,6 +73,11 @@ struct FrameSlot {
 FrameSlot g_slots[kFramesInFlight];
 uint32_t g_slot = 0;
 
+// Whether the current slot's command list has begun. It begins on the first
+// guest draw of the frame, or at the present when the frame drew nothing.
+bool g_recording = false;
+uint64_t g_frame_serial = 0;
+
 PlumeBackend g_backend;
 std::atomic<bool> g_ready{false};
 
@@ -205,6 +210,19 @@ RenderShaderFormat PlumeShaderFormat() {
 RenderFormat PlumeSwapChainFormat() { return kSwapChainFormat; }
 
 uint32_t PlumeFrameSlot() { return g_slot; }
+
+RenderCommandList* PlumeFrameCommands() {
+  if (!g_ready.load(std::memory_order_acquire))
+    return nullptr;
+  if (!g_recording) {
+    g_slots[g_slot].command_list->begin();
+    g_recording = true;
+    ++g_frame_serial;
+  }
+  return g_slots[g_slot].command_list.get();
+}
+
+uint64_t PlumeFrameSerial() { return g_frame_serial; }
 
 void PlumeSetOverlayDrawer(rex::ui::UIDrawer* drawer) { g_overlay = drawer; }
 
@@ -342,23 +360,27 @@ void PlumePresentFrame() {
     ApplyResize();
   }
 
+  // The guest's draws are already recorded into this slot's command list, so
+  // from here on the frame is always submitted, presented or not: its slot's
+  // resources are only recycled once its fence has been waited on.
+  FrameSlot& slot = g_slots[g_slot];
+  RenderCommandList* commands = PlumeFrameCommands();
+
   // A minimised window has a zero sized swap chain and nothing to present to.
-  if (g_backend.swap_chain->isEmpty() || g_backend.framebuffers.empty())
-    return;
+  bool presenting = !g_backend.swap_chain->isEmpty() && !g_backend.framebuffers.empty();
 
   // Bounds how far ahead of the display the frame loop may run. `Present(0, 0)`
   // does not block, so without this the queue would fill to the buffer count and
   // every frame would carry that much added input lag.
-  if (g_present_wait) {
+  if (presenting && g_present_wait) {
     if (g_present_debt > 0)
       --g_present_debt;
     else
       g_backend.swap_chain->wait();
   }
 
-  FrameSlot& slot = g_slots[g_slot];
   uint32_t image = 0;
-  if (!g_backend.swap_chain->acquireTexture(slot.acquire_semaphore.get(), &image)) {
+  if (presenting && !g_backend.swap_chain->acquireTexture(slot.acquire_semaphore.get(), &image)) {
     // Usually means the swap chain went out of date between the check above and
     // here; the next frame's resize picks it up.
     if (++g_acquire_failures == 1) {
@@ -368,68 +390,68 @@ void PlumePresentFrame() {
     }
     g_resize_pending.store(true, std::memory_order_release);
     OwePresentWait();
-    return;
-  }
-  if (image >= g_backend.framebuffers.size()) {
+    presenting = false;
+  } else if (presenting && image >= g_backend.framebuffers.size()) {
     OwePresentWait();
-    return;
+    presenting = false;
   }
 
-  RenderTexture* backbuffer = g_backend.swap_chain->getTexture(image);
-  RenderCommandList* commands = slot.command_list.get();
-  const uint32_t width = g_backend.swap_chain->getWidth();
-  const uint32_t height = g_backend.swap_chain->getHeight();
+  if (presenting) {
+    RenderTexture* backbuffer = g_backend.swap_chain->getTexture(image);
+    const uint32_t width = g_backend.swap_chain->getWidth();
+    const uint32_t height = g_backend.swap_chain->getHeight();
 
-  commands->begin();
-  commands->barriers(RenderBarrierStage::GRAPHICS,
-                     RenderTextureBarrier(backbuffer, RenderTextureLayout::COLOR_WRITE));
-  commands->setFramebuffer(g_backend.framebuffers[image].get());
-  commands->setViewports(RenderViewport(0.0f, 0.0f, float(width), float(height)));
-  commands->setScissors(RenderRect(0, 0, int32_t(width), int32_t(height)));
+    commands->barriers(RenderBarrierStage::GRAPHICS,
+                       RenderTextureBarrier(backbuffer, RenderTextureLayout::COLOR_WRITE));
+    CompositeGuestImage(commands, g_backend.framebuffers[image].get(), width, height);
+    commands->setViewports(RenderViewport(0.0f, 0.0f, float(width), float(height)));
+    commands->setScissors(RenderRect(0, 0, int32_t(width), int32_t(height)));
 
-  // Not black: a black clear is indistinguishable from the no-backend case, and
-  // being able to tell "Plume is presenting, nothing is drawn yet" from "no
-  // window output at all" on sight is worth keeping while the draw path is new.
-  commands->clearColor(0, RenderColor(0.05f, 0.06f, 0.10f, 1.0f));
+    // The SDK's overlays record straight into this frame. There is no presenter
+    // and no separate UI pass in detached mode: the drawer is handed the live
+    // command list through the draw context and draws into the image we are
+    // about to present.
+    if (g_overlay != nullptr) {
+      PlumeUIDrawContext context(width, height, commands, kSwapChainFormat);
+      g_overlay->Draw(context);
+    }
 
-  // The SDK's overlays record straight into this frame. There is no presenter
-  // and no separate UI pass in detached mode: the drawer is handed the live
-  // command list through the draw context and draws into the image we are about
-  // to present.
-  if (g_overlay != nullptr) {
-    PlumeUIDrawContext context(width, height, commands, kSwapChainFormat);
-    g_overlay->Draw(context);
+    commands->barriers(RenderBarrierStage::NONE,
+                       RenderTextureBarrier(backbuffer, RenderTextureLayout::PRESENT));
   }
-
-  commands->barriers(RenderBarrierStage::NONE,
-                     RenderTextureBarrier(backbuffer, RenderTextureLayout::PRESENT));
   commands->end();
+  g_recording = false;
 
   const RenderCommandList* submit = commands;
-  RenderCommandSemaphore* wait = slot.acquire_semaphore.get();
-  RenderCommandSemaphore* signal = g_backend.release_semaphores[image].get();
-  g_backend.queue->executeCommandLists(&submit, 1, &wait, 1, &signal, 1, slot.fence.get());
-  slot.submitted = true;
+  if (presenting) {
+    RenderCommandSemaphore* wait = slot.acquire_semaphore.get();
+    RenderCommandSemaphore* signal = g_backend.release_semaphores[image].get();
+    g_backend.queue->executeCommandLists(&submit, 1, &wait, 1, &signal, 1, slot.fence.get());
 
-  // A failed Present does not top the frame latency semaphore back up either, so
-  // it owes the same debt an early return does.
-  if (!g_backend.swap_chain->present(image, &signal, 1)) {
-    OwePresentWait();
-    if (++g_present_failures == 1) {
-      REXLOG_WARN(
-          "native_renderer: Plume present failed, 0x{:08X} (device removed reason 0x{:08X}); the "
-          "swap chain may be out of date",
-          uint32_t(g_backend.swap_chain->getLastError()),
-          uint32_t(g_backend.swap_chain->getDeviceRemovedReason()));
+    // A failed Present does not top the frame latency semaphore back up either,
+    // so it owes the same debt an early return does.
+    if (!g_backend.swap_chain->present(image, &signal, 1)) {
+      OwePresentWait();
+      if (++g_present_failures == 1) {
+        REXLOG_WARN(
+            "native_renderer: Plume present failed, 0x{:08X} (device removed reason 0x{:08X}); "
+            "the swap chain may be out of date",
+            uint32_t(g_backend.swap_chain->getLastError()),
+            uint32_t(g_backend.swap_chain->getDeviceRemovedReason()));
+      }
+      g_resize_pending.store(true, std::memory_order_release);
     }
-    g_resize_pending.store(true, std::memory_order_release);
+  } else {
+    g_backend.queue->executeCommandLists(&submit, 1, nullptr, 0, nullptr, 0, slot.fence.get());
   }
+  slot.submitted = true;
 
   // Do not wait for the frame just submitted. It runs on the GPU while the CPU
   // records the next one; the only thing waited on is the frame
   // kFramesInFlight back, which by now has had a full frame to finish.
   g_slot = (g_slot + 1) % kFramesInFlight;
   WaitForSlot(g_slots[g_slot]);
+  GuestFrameRetired(g_slot);
 
   if (++g_frames_presented % 600 == 0) {
     REXLOG_DEBUG(
@@ -455,6 +477,7 @@ void ShutdownPlumeBackend() {
     WaitForAllSlots();
   if (g_backend.swap_chain && g_present_wait)
     g_backend.swap_chain->wait();
+  ShutdownGuestDraw();
 
   g_backend.framebuffers.clear();
   g_backend.release_semaphores.clear();

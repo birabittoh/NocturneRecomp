@@ -7,7 +7,8 @@
 // first (via __imp__<name>) so the device object keeps its shadows of every
 // register the renderer reads back, then observes the call.
 //
-// Nothing here consumes the command buffer the guest writes packets into. The
+// Nothing here consumes the command buffer the guest writes packets into: the
+// draws are replayed from the device's shadows (native_renderer_draw.cpp). The
 // waits that assume a GPU is draining it are the only thing that has to be
 // short-circuited.
 
@@ -22,6 +23,7 @@
 
 #include "guest_shaders.h"
 #include "native_renderer.h"
+#include "native_renderer_draw.h"
 #include "native_renderer_plume.h"
 
 // The recompiled bodies the hooks below wrap. The strong REX_HOOK_RAW
@@ -181,6 +183,8 @@ void FlushInline(uint8_t* base) {
   }
   if (g_stats.frame >= 300 && g_stats.frame < 302)
     TraceDraw(base, g_inline);
+  nocturne::GuestDrawInline(base, {g_inline.device, g_inline.prim, g_inline.count, g_inline.stride,
+                                   g_inline.data});
 }
 
 REX_HOOK_RAW(D3DDevice__BeginVertices) {
@@ -195,6 +199,7 @@ REX_HOOK_RAW(D3DDevice__BeginVertices) {
 REX_HOOK_RAW(D3DDevice__EndVertices) {
   ++g_stats.end_vertices;
   __imp__D3DDevice__EndVertices(ctx, base);
+  FlushInline(base);
 }
 
 REX_HOOK_RAW(D3DDevice__Resolve) {
@@ -203,12 +208,19 @@ REX_HOOK_RAW(D3DDevice__Resolve) {
   if (g_stats.frame >= 300 && g_stats.frame < 302) {
     const uint32_t dev = ctx.r3.u32;
     const uint32_t rt = U32(base, dev + 0x2f80);
+    const uint32_t cc = ctx.r10.u32;
     REXLOG_INFO("resolve flags={:X} src={:08X} dest={:08X} point={:08X} r8={:X} r9={:X} rt0={:08X} "
-                "rt0 size={:08X} pitch={:08X}",
+                "rt0 size={:08X} pitch={:08X} clear={:08X} ({} {} {} {})",
                 ctx.r4.u32, ctx.r5.u32, ctx.r6.u32, ctx.r7.u32, ctx.r8.u32, ctx.r9.u32, rt,
-                rt ? U32(base, rt + 36) : 0, rt ? U32(base, rt + 24) : 0);
+                rt ? U32(base, rt + 36) : 0, rt ? U32(base, rt + 24) : 0, cc,
+                cc ? F32(base, cc) : 0.0f, cc ? F32(base, cc + 4) : 0.0f,
+                cc ? F32(base, cc + 8) : 0.0f, cc ? F32(base, cc + 12) : 0.0f);
   }
+  // (device, flags, source rect, destination texture, destination point,
+  // level, slice, clear colour, ...).
+  const uint32_t dev = ctx.r3.u32, flags = ctx.r4.u32, clear_color = ctx.r10.u32;
   __imp__D3DDevice__Resolve(ctx, base);
+  nocturne::GuestResolve(base, dev, flags, clear_color);
 }
 
 REX_HOOK_RAW(D3DDevice__SetRenderTarget) {
@@ -243,9 +255,9 @@ REX_HOOK_RAW(D3DDevice__SetPixelShader) {
 // The guest's final frame boundary: (device, ...). Present the host frame once
 // the guest's own swap has run.
 REX_HOOK_RAW(D3DDevice__Swap) {
+  FlushInline(base);
   __imp__D3DDevice__Swap(ctx, base);
 
-  FlushInline(base);
   if (++g_stats.frame % 120 == 0) {
     REXLOG_INFO(
         "d3d: frame {} draws={} indexed={} immediate={} end={} resolves={} rt={} tex={} vs={} ps={}",

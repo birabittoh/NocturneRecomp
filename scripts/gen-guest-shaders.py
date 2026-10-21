@@ -111,6 +111,8 @@ struct VSOutput {
 VSOutput main(VSInput input) {
     VSOutput output = (VSOutput)0;
     output.out_position = float4(input.in_position0.xy - 0.5f, 0.0f, 1.0f);
+    output.out_position.xy = output.out_position.xy * xe_screen_transform.xy
+                             + xe_screen_transform.zw;
     output.out_p80 = float4(input.in_texcoord0.xy * c[2].xy, 0.0f, 0.0f);
     output.out_p81 = input.in_texcoord1;
     output.out_p160 = c[1];
@@ -149,6 +151,43 @@ float4 main(PSInput input) : SV_Target0 {
     return out_color;
 }
 """
+
+
+# The guest's viewport transform, applied by every vertex shader in the pack.
+#
+# The hardware maps a position to the render target through PA_CL_VTE_CNTL and
+# the PA_CL_VPORT_* scale and offset, and this title turns those off for its 2D
+# draws (ATG::Font sets D3DRS_VIEWPORTENABLE to FALSE, and the sprite path
+# writes pixel positions with zero vertex constants), so its positions are
+# render target pixels rather than clip space. The host rasteriser always
+# applies a viewport to clip space, so the guest's transform and the pixel to
+# clip mapping are folded into one multiply-add per draw:
+#
+#     clip.xy = position.xy * scale + position.w * offset
+#
+# which is right whether the guest transform is enabled or not. The runtime
+# builds it from the register shadows (ScreenTransform in
+# src/gpu/native_renderer_draw.cpp). b5 has to agree with the pipeline layout.
+SCREEN_TRANSFORM_CB = """\
+cbuffer XeScreenTransform : register(b5, space2) { float4 xe_screen_transform; };
+
+"""
+SCREEN_TRANSFORM = """\
+    output.out_position.xy = out_position.xy * xe_screen_transform.xy
+                             + out_position.w * xe_screen_transform.zw;
+"""
+
+
+def add_screen_transform(text):
+    """Declare the transform and apply it to a translated vertex shader's
+    position export, after everything else the shader does to it."""
+    marker = "struct VSInput {"
+    store = "    output.out_position = out_position;\n"
+    if text.count(marker) != 1 or text.count(store) != 1:
+        raise SystemExit("vertex shader layout changed; cannot place the "
+                         "screen transform")
+    text = text.replace(marker, SCREEN_TRANSFORM_CB + marker)
+    return text.replace(store, store + SCREEN_TRANSFORM)
 
 
 def vertex_fetch_dwords(header):
@@ -283,7 +322,10 @@ def translate(shaders, hlsl_dir, skipped):
     out = []
     for shader, emitted in decoded:
         emitted.interpolator_layout = layout
-        text = emitted.emit(shader.name).encode("utf-8")
+        text = emitted.emit(shader.name)
+        if shader.kind == "vs":
+            text = add_screen_transform(text)
+        text = text.encode("utf-8")
         entry = Translated(shader, emitted)
         entry.source = os.path.join(hlsl_dir, shader.name + ".hlsl")
         write_if_different(entry.source, text)
@@ -312,6 +354,8 @@ def port_font(entries, layout, hlsl_dir, kind, key, inputs, texture_mask,
     # body declares its own.
     preamble = preamble[:preamble.find("Texture2D ")] \
         if "Texture2D " in preamble else preamble
+    # A translated vertex shader's preamble already ends in the screen
+    # transform's cbuffer (add_screen_transform), which the body uses.
     slot = 1 + max(e.slot for e in entries if e.kind == kind)
     name = "%s_%03d" % (kind, slot)
     entry = Translated.ported(kind, slot, name, key, inputs, [80, 81, 160],
