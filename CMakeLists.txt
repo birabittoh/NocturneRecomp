@@ -73,6 +73,11 @@ plume_shaders_init()
 
 # DXIL is Windows-only; SPIR-V is built everywhere, since Plume reaches Vulkan
 # on every platform.
+if(WIN32)
+    set(NOCTURNE_SHADER_FORMATS "dxil,spirv")
+else()
+    set(NOCTURNE_SHADER_FORMATS "spirv")
+endif()
 
 # Project version: the nearest reachable `vX.Y.Z` git tag, not an exact
 # match -- a dev build sitting on commits after v1.2.2 already contains
@@ -156,6 +161,45 @@ add_custom_command(
     VERBATIM
 )
 
+# The guest shader pack: translate the shader files in assets/MEDIA with
+# KryptonRecomp, compile them with DXC, and pack the results. The generator also
+# writes a `.S` that `.incbin`s the pack into read-only data, so there is no
+# loose file to deploy (see src/gpu/guest_shaders.h).
+set(NOCTURNE_GUEST_SHADER_DIR ${CMAKE_BINARY_DIR}/guest_shaders)
+set(NOCTURNE_GUEST_SHADER_PACK ${CMAKE_BINARY_DIR}/guest_shaders.bin)
+set(NOCTURNE_GUEST_SHADER_PACK_ASM ${CMAKE_BINARY_DIR}/guest_shaders.bin.S)
+if(NOT CMAKE_ASM_COMPILER)
+    set(CMAKE_ASM_COMPILER ${CMAKE_CXX_COMPILER})
+endif()
+enable_language(ASM)
+if(PLUME_DXC_LIB_DIR)
+    set(NOCTURNE_DXC_LIB_ARG --dxc-lib-dir ${PLUME_DXC_LIB_DIR})
+else()
+    set(NOCTURNE_DXC_LIB_ARG "")
+endif()
+file(GLOB NOCTURNE_GUEST_SHADER_FILES CONFIGURE_DEPENDS
+    ${CMAKE_SOURCE_DIR}/assets/MEDIA/*.xvu ${CMAKE_SOURCE_DIR}/assets/MEDIA/*.xpu)
+add_custom_command(
+    OUTPUT ${NOCTURNE_GUEST_SHADER_PACK} ${NOCTURNE_GUEST_SHADER_PACK_ASM}
+    COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/scripts/gen-guest-shaders.py
+        --media ${CMAKE_SOURCE_DIR}/assets/MEDIA
+        --out ${NOCTURNE_GUEST_SHADER_DIR}
+        --pack ${NOCTURNE_GUEST_SHADER_PACK}
+        --pack-asm ${NOCTURNE_GUEST_SHADER_PACK_ASM}
+        --dxc ${PLUME_DXC_EXECUTABLE}
+        ${NOCTURNE_DXC_LIB_ARG}
+        --formats ${NOCTURNE_SHADER_FORMATS}
+    DEPENDS
+        ${CMAKE_SOURCE_DIR}/scripts/gen-guest-shaders.py
+        ${CMAKE_SOURCE_DIR}/ext/KryptonRecomp/shader_build.py
+        ${CMAKE_SOURCE_DIR}/ext/KryptonRecomp/shader_extract.py
+        ${CMAKE_SOURCE_DIR}/ext/KryptonRecomp/xenos_hlsl.py
+        ${CMAKE_SOURCE_DIR}/ext/KryptonRecomp/xenos_ucode.py
+        ${NOCTURNE_GUEST_SHADER_FILES}
+    COMMENT "Translating and compiling the guest's shaders"
+    VERBATIM
+)
+
 # On Windows, also embed the same icon as the .exe's own resource (Explorer,
 # taskbar before the window opens, Alt-Tab), separate from the in-window icon
 # applied at runtime via Window::SetIcon (see nocturnerecomp_app.h). The .rc
@@ -196,6 +240,7 @@ set(NOCTURNERECOMP_SOURCES
     src/room_presence.cpp
     src/settings.cpp
     src/xbox_live.cpp
+    src/gpu/guest_shaders.cpp
     src/gpu/native_renderer.cpp
     src/gpu/native_renderer_d3d.cpp
     src/gpu/native_renderer_overlay.cpp
@@ -203,6 +248,8 @@ set(NOCTURNERECOMP_SOURCES
     ${NOCTURNE_FONTS_HEADER}
     ${NOCTURNE_GLYPHS_HEADER}
     ${NOCTURNE_ICON_HEADER}
+    ${CMAKE_SOURCE_DIR}/ext/KryptonRecomp/guest_shader_pack.cpp
+    ${NOCTURNE_GUEST_SHADER_PACK_ASM}
     ${GENERATED_SOURCES}
 )
 
@@ -219,7 +266,10 @@ endif()
 rexglue_setup_target(nocturnerecomp)
 
 target_link_libraries(nocturnerecomp PRIVATE plume)
-target_include_directories(nocturnerecomp PRIVATE src/gpu)
+target_include_directories(nocturnerecomp PRIVATE src/gpu ext/KryptonRecomp)
+# The `.S` only names the pack; the pack itself must exist before it assembles.
+set_source_files_properties(${NOCTURNE_GUEST_SHADER_PACK_ASM} PROPERTIES
+    OBJECT_DEPENDS ${NOCTURNE_GUEST_SHADER_PACK})
 if(WIN32)
     # Plume's CMake does not link the D3D12 import library itself, leaving
     # D3D12CreateDevice and D3D12SerializeRootSignature to the consumer.

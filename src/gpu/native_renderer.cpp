@@ -4,6 +4,8 @@
 
 #include "native_renderer.h"
 
+#include "guest_shaders.h"
+
 #include <rex/logging.h>
 #include <rex/ui/window.h>
 
@@ -33,6 +35,9 @@ void InitNativeRenderer(rex::ui::Window* window) {
   if (initialized)
     return;
   initialized = true;
+
+  if (!LoadGuestShaders())
+    REXLOG_ERROR("native renderer: the embedded guest shader pack did not load");
 
   // The window exists and is ours to render into. The SDK presents nothing in
   // this mode and draws no overlays until it is handed a drawer.

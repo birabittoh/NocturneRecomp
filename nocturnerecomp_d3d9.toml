@@ -15,3 +15,36 @@
 "0x82534378" = { name = "D3DDevice__Swap", evidence = "verified: calls VdGetSystemCommandBuffer-derived command buffer setup then VdSwap (import thunk 0x8287870C, its only caller), uploads the swap parameters and brackets the frame throttle with ThrottleWait_Begin/Poll/End" }
 "0x8252F840" = { name = "D3DDevice__ThrottleWait_Poll", evidence = "verified: the loop condition of Swap's frame throttle (spin while the frame counter at device+0x3f38 runs more than 14 ahead of device+0x3f40), between ThrottleWait_Begin 0x8252F608 and End 0x8252F638" }
 "0x82525D40" = { name = "D3DDevice__BlockUntilGpuIdle", evidence = "matched to Eternal Sonata's 0x82264BE8 at 0.57 similarity" }
+
+# ----------------------------------------------------------------------------
+# Draw, state and resource entry points. Each was reached by fuzzy matching the
+# corresponding Eternal Sonata function and then decompiling the candidate; the
+# evidence field says what the decompile showed. The device object offsets the
+# bodies use are the same as ES's (texture fetch constants at +1024, float
+# constant shadows at +1792/+5888, register groups at +10240/+10316/+10400/
+# +10420), but the bound-object slots differ: render targets are device+12160+
+# 4*index (index 0..3, so +0x2f80), depth stencil +12176, vertex shader +12416,
+# pixel shader +12412, index buffer +12156 (0x2f7c), stream sources through
+# SetStreamSource's table.
+# ----------------------------------------------------------------------------
+"0x82520340" = { name = "D3DDevice__DrawVertices", evidence = "verified: (dev, primType, startVertex, vertexCount) flushes every dirty group (0x4000/0x4400 constants, 0x2200/0x2180/0x2000/0x2100 context registers, 0x4900 booleans), writes VGT_INDX_OFFSET 0x2102 = startVertex and a DRAW_INDX packet 0xC0012201 with the count in the high halfword" }
+"0x82520730" = { name = "D3DDevice__DrawIndexedVertices", evidence = "verified: (dev, primType, baseVertex, startIndex, indexCount) same flush, then a DRAW_INDX packet 0xC0032201 whose index address is the bound index buffer (device+0x2f7c) data pointer at +0x18 plus startIndex*2, or *4 when bit 31 of the buffer's first dword is set" }
+"0x8251F818" = { name = "D3DDevice__BeginVertices", evidence = "verified: (dev, primType, vertexCount, stride) flushes dirty state, reserves vertexCount*stride/4 dwords in the command buffer and returns the write pointer; the draw packet is emitted with an immediate vertex fetch constant" }
+"0x8251C508" = { name = "D3DDevice__SetStreamSource", evidence = "verified: (dev, stream, vb, offset, stride) writes the vertex fetch constant from the buffer header (+0x18 address, +0x1c size) at device+0x674+8*(17-stream) region and the buffer pointer at device+4*(stream+0xbe5), stride>>2 into a byte at device+0x2fd8+stream, dirtying 0x80000 when it changed" }
+"0x8251C6B0" = { name = "D3DDevice__SetIndices", evidence = "verified: stores the argument at device+0x2f7c after releasing the previous index buffer" }
+"0x82512FB0" = { name = "D3DDevice__SetVertexShader", evidence = "verified: stores the shader at device+0x3080, dirties 0x80000 and applies the shader container's register patch list at shader+0x368 to the context shadows" }
+"0x82512CB0" = { name = "D3DDevice__SetPixelShader", evidence = "verified: stores the shader at device+0x307c, dirties 0x120000 and applies the container's register patch list at shader+0x28" }
+"0x82512708" = { name = "D3DDevice__SetVertexShaderConstantF", evidence = "verified: cache touches the source then copies into the vertex constant shadow, ORing the dirty mask argument into device+0" }
+"0x82512810" = { name = "D3DDevice__SetPixelShaderConstantF", evidence = "verified: identical to the vertex setter but ORs the dirty mask into device+8" }
+"0x825240B0" = { name = "D3DDevice__SetTexture", evidence = "verified: (dev, sampler, texture, dirtyBit) copies the texture header's six dword fetch constant (+0x1c..+0x30) into device+0x400+0x18*sampler, remapping the base and mip addresses, and records the texture at device+4*(sampler+0xbfa)" }
+"0x8251D040" = { name = "D3DDevice__SetViewport", evidence = "verified: unpacks a {x,y,w,h,minZ,maxZ} block into the float setter 0x8251CDC8" }
+"0x8251D178" = { name = "D3DDevice__SetRenderTarget", evidence = "verified: (dev, index, surface) stores the surface at device+4*(index+0xbe0), copies its info word (+0x1c) into the RB_COLOR_INFO shadow and dirties the render target group" }
+"0x8251D4B0" = { name = "D3DDevice__SetDepthStencilSurface", evidence = "verified: stores the surface at device+0x2f90, copies +0x1c/+0x20 into the depth info shadows and rewrites RB_DEPTHCONTROL bits" }
+"0x8253D2B8" = { name = "D3DDevice__Resolve", evidence = "verified: (flags, srcRect, destTexture, destPoint, ...) decodes the destination texture's fetch constant (+0x1c..+0x30), flushes dirty state and emits the resolve rect list draw (0x54800 with 0xC0003600) plus RB_COPY registers 0x2318..0x231b" }
+"0x82523D48" = { name = "D3DDevice__CreateTexture", evidence = "verified: allocates a 0x34 byte header and the base/mip physical blocks, fills the fetch constant through 0x825230F8 and patches the base address at +0x20 and mip address at +0x30" }
+"0x82523E68" = { name = "D3DDevice__CreateRenderTarget", evidence = "verified: 0x30 byte surface header filled by 0x82523408, format at +0x28 low 6 bits" }
+"0x8251EAF0" = { name = "D3DDevice__CreateVertexBuffer", evidence = "verified: 0x20 byte header, physical block address in +0x18 (or 3), size in +0x1c" }
+"0x8251ED20" = { name = "D3DDevice__CreateIndexBuffer", evidence = "verified: like the vertex buffer variant with the format argument shifted into bit 31 of the first dword" }
+"0x8251E550" = { name = "D3DResource__Lock", evidence = "verified: shared lock body, flushes the CPU cache range of the resource's data and waits through 0x825252C8 when the GPU still owns it" }
+"0x8251EA20" = { name = "D3DResource__Release", evidence = "verified: interlocked decrement of the refcount at +4, recursing into the child at +24 for type 4 resources, then destroy 0x8251E368" }
+"0x8251FCB0" = { name = "D3DDevice__EndVertices", evidence = "verified: closes every BeginVertices block, setting the command buffer write pointer device+0x30 from the saved end pointer at device+0x3314; called from the game's D3D wrapper after the vertices are written" }
