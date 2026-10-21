@@ -5,12 +5,74 @@
 # SDK boilerplate lives in generated/rexglue.cmake.
 
 cmake_minimum_required(VERSION 3.25)
-project(nocturnerecomp LANGUAGES CXX)
+# C is here only for the embedded shader blobs: Plume's shader helper emits each
+# compiled blob as a .c byte array, and CMake needs a C compiler to build them.
+project(nocturnerecomp LANGUAGES CXX C)
 
 set(CMAKE_CXX_STANDARD 23)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 include(generated/rexglue.cmake)
+
+# Plume, the RHI the native renderer is built on (see src/gpu/native_renderer.h).
+# It is a low level interface over D3D12, Vulkan and Metal that does no shader
+# compilation of its own, which is what makes it the right fit here: the guest's
+# shaders are translated offline by KryptonRecomp rather than at runtime. Both
+# live under ext/ as submodules so local and CI builds use the same revisions.
+set(NOCTURNE_PLUME_DIR "${CMAKE_SOURCE_DIR}/ext/plume")
+if(NOT EXISTS "${NOCTURNE_PLUME_DIR}/plume_render_interface.h")
+    message(FATAL_ERROR
+        "Plume submodule is missing. Run: git submodule update --init --recursive")
+endif()
+# ReXGlue owns this project's SDL window. Have Plume create its Vulkan surface
+# from that SDL_Window directly instead of asking the host to expose raw X11
+# handles, which Window::GetNativeWindowHandle() does not represent.
+if(UNIX AND NOT APPLE AND NOT ANDROID)
+    set(PLUME_SDL3_VULKAN_ENABLED ON CACHE BOOL "Enable SDL3 Vulkan integration" FORCE)
+endif()
+add_subdirectory("${NOCTURNE_PLUME_DIR}" "${CMAKE_BINARY_DIR}/plume" EXCLUDE_FROM_ALL)
+
+# Plume's D3D12 backend returns D3D12_HEAP_TYPE_GPU_UPLOAD from its heap type
+# mapping without guarding it, so it only builds against a Windows SDK new
+# enough to declare it (10.0.26100+). Supply the one missing enumerator, but
+# only after checking it is actually missing. 5 is the value the Agility SDK
+# assigns it; nothing here requests a GPU upload heap, so it only has to compile.
+if(WIN32)
+    include(CheckCXXSourceCompiles)
+    set(CMAKE_REQUIRED_QUIET ON)
+    check_cxx_source_compiles(
+        "#include <d3d12.h>\nint main() { return D3D12_HEAP_TYPE_GPU_UPLOAD; }"
+        NOCTURNE_HAVE_D3D12_GPU_UPLOAD_HEAP)
+    unset(CMAKE_REQUIRED_QUIET)
+    if(NOT NOCTURNE_HAVE_D3D12_GPU_UPLOAD_HEAP)
+        message(STATUS "nocturnerecomp - Windows SDK predates D3D12_HEAP_TYPE_GPU_UPLOAD, shimming it for Plume")
+        target_compile_definitions(plume PRIVATE
+            "D3D12_HEAP_TYPE_GPU_UPLOAD=((D3D12_HEAP_TYPE)5)")
+    endif()
+endif()
+
+# The D3D12 debug layer, opt in with -DNOCTURNE_D3D12_DEBUG_LAYER=ON. Plume only
+# enables it when NDEBUG is off, which this project's default build is not.
+option(NOCTURNE_D3D12_DEBUG_LAYER "Enable Plume's D3D12 debug layer" OFF)
+if(WIN32 AND NOCTURNE_D3D12_DEBUG_LAYER)
+    target_compile_definitions(plume PRIVATE
+        D3D12_DEBUG_LAYER_ENABLED
+        D3D12_DEBUG_LAYER_BREAK_ON_ERROR=false
+        D3D12_DEBUG_LAYER_BREAK_ON_WARNING=false
+        D3D12_DEBUG_LAYER_SUPRESS_SAMPLE_POSITIONS_ERROR)
+endif()
+
+# Plume's shader helper fetches a DXC build (the Windows SDK's has no SPIR-V
+# backend). NOCTURNE_DXC_SOURCE_DIR points FetchContent at an existing checkout
+# of that repository instead, for offline builds.
+if(DEFINED ENV{NOCTURNE_DXC_SOURCE_DIR} AND NOT FETCHCONTENT_SOURCE_DIR_PLUME_DXC)
+    set(FETCHCONTENT_SOURCE_DIR_PLUME_DXC "$ENV{NOCTURNE_DXC_SOURCE_DIR}")
+endif()
+include(${NOCTURNE_PLUME_DIR}/examples/cmake/PlumeShaders.cmake)
+plume_shaders_init()
+
+# DXIL is Windows-only; SPIR-V is built everywhere, since Plume reaches Vulkan
+# on every platform.
 
 # Project version: the nearest reachable `vX.Y.Z` git tag, not an exact
 # match -- a dev build sitting on commits after v1.2.2 already contains
@@ -134,6 +196,10 @@ set(NOCTURNERECOMP_SOURCES
     src/room_presence.cpp
     src/settings.cpp
     src/xbox_live.cpp
+    src/gpu/native_renderer.cpp
+    src/gpu/native_renderer_d3d.cpp
+    src/gpu/native_renderer_overlay.cpp
+    src/gpu/native_renderer_plume.cpp
     ${NOCTURNE_FONTS_HEADER}
     ${NOCTURNE_GLYPHS_HEADER}
     ${NOCTURNE_ICON_HEADER}
@@ -151,6 +217,21 @@ else()
 endif()
 
 rexglue_setup_target(nocturnerecomp)
+
+target_link_libraries(nocturnerecomp PRIVATE plume)
+target_include_directories(nocturnerecomp PRIVATE src/gpu)
+if(WIN32)
+    # Plume's CMake does not link the D3D12 import library itself, leaving
+    # D3D12CreateDevice and D3D12SerializeRootSignature to the consumer.
+    target_link_libraries(nocturnerecomp PRIVATE d3d12)
+endif()
+
+# Overlay shaders. Plume compiles nothing at runtime, so these are built ahead
+# of time to DXIL and SPIR-V and embedded as byte arrays.
+plume_compile_vertex_shader(nocturnerecomp
+    "${CMAKE_SOURCE_DIR}/src/shaders/imgui.vert.hlsl" "imguiVert" "VSMain")
+plume_compile_pixel_shader(nocturnerecomp
+    "${CMAKE_SOURCE_DIR}/src/shaders/imgui.frag.hlsl" "imguiFrag" "PSMain")
 
 # Title-update builds: the achievements bridge hooks the game's XAM thunks by
 # their hardcoded vanilla guest addresses (sub_825D8028 etc.). The title update

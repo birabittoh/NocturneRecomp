@@ -11,4 +11,5 @@ file_path = "assets/default.xex"
 out_directory_path = "generated"
 includes = [
   "nocturnerecomp_config.toml",
+  "nocturnerecomp_d3d9.toml",
 ]

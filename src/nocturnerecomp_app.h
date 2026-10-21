@@ -40,6 +40,9 @@
 #include "native_options.h"
 #include "host_timer_resolution.h"
 #include "icon.generated.h"
+#include "native_renderer.h"
+#include "native_renderer_overlay.h"
+#include "native_renderer_plume.h"
 #include "rando_xex.h"
 #include "room_presence.h"
 #include "settings.h"
@@ -93,7 +96,11 @@ class NocturnerecompApp : public rex::ReXApp {
     // Explicitly go headless (no xenos/graphics backend) rather than relying
     // on gpu_plugin being unset -- this is the documented entry point for
     // bringing your own renderer via OnCreateImmediateDrawer/OnPreLaunchModule.
+    // The gpu_plugin cvar can still be set by an older config file or the
+    // defaults in settings.cpp; clearing it here is what stops the SDK loading
+    // a Xenos plugin next to (and on top of) the native renderer.
     config.graphics = nullptr;
+    config.gpu_plugin.clear();
   }
 
   // Redirect the boot module to a randomizer-patched xex (rando_xex_name
@@ -232,6 +239,10 @@ class NocturnerecompApp : public rex::ReXApp {
     // time scalar. Gated via the frame_pacer_enabled cvar.
     nocturne::GetFramePacer().Bind(runtime());
 
+    // The renderer loads no GPU plugin, so the SDK's per guest frame callback
+    // (which drives the mod registry's tick) never fires; the swap hook does it.
+    nocturne::SetGuestFrameCallback([this] { runtime()->mod_registry()->DispatchTick(); });
+
     // Feed the F3 debug overlay's "Guest FPS" readout. RegisterTick fires once
     // per guest frame on GPU swap (command-processor thread); the counter is
     // polled from the UI thread each time the overlay redraws to derive an
@@ -312,7 +323,33 @@ class NocturnerecompApp : public rex::ReXApp {
     rex::ui::ApplyAccentTheme(style, kDefaultAccentColor);
   }
 
+  // Detached overlay mode: with no GPU plugin the SDK creates no presenter and
+  // asks the app for a drawer instead. Returning null would leave the window
+  // without F3/F4 and every other overlay. See native_renderer_overlay.h.
+  std::unique_ptr<rex::ui::ImmediateDrawer> OnCreateImmediateDrawer() override {
+    return nocturne::CreatePlumeImmediateDrawer();
+  }
+
+  // Stand up the Plume device and swap chain on the game window. The window
+  // exists by now and the guest has not started, so no D3D call can arrive
+  // ahead of the backend. Swap chain creation goes through the UI thread.
+  void OnPreLaunchModule() override {
+    nocturne::PlumeSetOverlayDrawer(imgui_drawer());
+    window()->app_context().CallInUIThreadSynchronous(
+        [this] { nocturne::InitNativeRenderer(window()); });
+  }
+
+  // The host swap chain follows the window. Only records the request: this
+  // arrives on the UI thread, and every other swap chain call happens on the
+  // guest thread at present time.
+  void OnWindowPixelSizeChanged(uint32_t pixel_width, uint32_t pixel_height) override {
+    nocturne::PlumeNotifyResize(pixel_width, pixel_height);
+  }
+
   void OnShutdown() override {
+    // Tear the host renderer down before the window goes away.
+    nocturne::ShutdownPlumeBackend();
+
     // Stop the pacer thread before the runtime (and its guest memory) tears
     // down -- it dereferences runtime()->memory() every tick.
     nocturne::GetFramePacer().Stop();

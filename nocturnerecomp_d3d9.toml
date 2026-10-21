@@ -1,0 +1,17 @@
+[functions]
+
+# ############################################################################
+# Direct3D 9 (Xbox 360 static lib). Located by mapping EternalSonataReprise's
+# config/d3d9.toml onto this binary with Ghidra's cross-binary fuzzy matcher
+# and then decompiling each result; the library is the same XDK build, so its
+# device object layout matches (dirty masks at device+0..32, vertex float
+# constant shadow at +1792, pixel at +5888, register groups at +10240, +10316,
+# +10400, +10420). Only entries confirmed against the decompile are named.
+#
+# Addresses 0x825252C8 and 0x82524330 (the fence waits) are handled by the
+# midasm hooks in nocturnerecomp_config.toml.
+# ############################################################################
+
+"0x82534378" = { name = "D3DDevice__Swap", evidence = "verified: calls VdGetSystemCommandBuffer-derived command buffer setup then VdSwap (import thunk 0x8287870C, its only caller), uploads the swap parameters and brackets the frame throttle with ThrottleWait_Begin/Poll/End" }
+"0x8252F840" = { name = "D3DDevice__ThrottleWait_Poll", evidence = "verified: the loop condition of Swap's frame throttle (spin while the frame counter at device+0x3f38 runs more than 14 ahead of device+0x3f40), between ThrottleWait_Begin 0x8252F608 and End 0x8252F638" }
+"0x82525D40" = { name = "D3DDevice__BlockUntilGpuIdle", evidence = "matched to Eternal Sonata's 0x82264BE8 at 0.57 similarity" }
