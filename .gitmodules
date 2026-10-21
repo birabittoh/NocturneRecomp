@@ -1,0 +1,6 @@
+[submodule "ext/KryptonRecomp"]
+	path = ext/KryptonRecomp
+	url = https://github.com/birabittoh/KryptonRecomp.git
+[submodule "ext/plume"]
+	path = ext/plume
+	url = https://github.com/birabittoh/plume.git
