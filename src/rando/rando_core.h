@@ -7,6 +7,8 @@
 #include <string>
 #include <vector>
 
+#include "rando.h"
+
 namespace nocturne::rando::detail {
 
 // The path to pass to XB_Randomize: it opens the buffer set by SetMemoryXex
@@ -24,5 +26,9 @@ std::string TakeSpoilers();
 // Seeds the calling thread's rand() state; call on the thread that runs
 // XB_Randomize, before it.
 void SeedGeneratorRng(uint32_t seed);
+
+// Runs the core functions behind `enhancements` against the buffer set by
+// SetMemoryXex. Caller holds the core.
+void WriteEnhancements(const Enhancements& enhancements);
 
 }  // namespace nocturne::rando::detail

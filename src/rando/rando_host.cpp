@@ -473,6 +473,32 @@ std::shared_ptr<const Result> Generate(const std::filesystem::path& base_xex,
   return result;
 }
 
+std::shared_ptr<const PatchSet> ComposeWorld(const BaseXex& base, const PatchSet* seed,
+                                             const Enhancements& enhancements,
+                                             std::string* error) {
+  std::vector<uint8_t> patched = base.file;
+  if (seed) {
+    for (const auto& run : seed->runs) {
+      std::copy(run.bytes.begin(), run.bytes.end(),
+                patched.begin() + (run.guest - base.image_base + base.header_size));
+    }
+  }
+  if (!enhancements.Empty()) {
+    std::lock_guard core_lock(g_core_mutex);
+    detail::SetMemoryXex(&patched, base.mapped_end);
+    detail::WriteEnhancements(enhancements);
+    const bool out_of_range = detail::MemoryXexOutOfRange();
+    detail::SetMemoryXex(nullptr, 0);
+    if (out_of_range) {
+      if (error) {
+        *error = "An enhancement wrote outside the mapped part of default.xex.";
+      }
+      return nullptr;
+    }
+  }
+  return std::make_shared<PatchSet>(DiffBase(base, patched));
+}
+
 Generator& Generator::Get() {
   static Generator instance;
   return instance;

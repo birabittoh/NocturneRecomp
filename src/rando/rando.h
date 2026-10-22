@@ -121,6 +121,44 @@ struct Result {
 std::shared_ptr<const Result> Generate(const std::filesystem::path& base_xex,
                                        const Options& options, std::string* error);
 
+// The core's standalone patches (fixes and quality-of-life changes a seed
+// applies on top of its randomization), offered on their own: they apply to
+// the vanilla game and on top of any seed. Each is one core function, so the
+// bytes are exactly upstream's.
+enum class Enhancement : int {
+  kFastWarps,          // XB_ApplyFastWarps
+  kAntiFreeze,         // XB_ApplyAntiFreeze
+  kRemoveClockStatue,  // XB_RemoveClockStatue
+  kBoostDropRates,     // the XB_BoostDropRates half of XB_DoDropsRando
+  kDeathOnVacation,    // XB_ApplyDeathOnVacation (Bounty Hunter / Hitman)
+  kSkipMariaAlchemy,   // XB_RemoveMariaAlchemyMeeting
+  kOuterWallElevator,  // XB_FixOuterWallElevator
+  kScyllaSoftlock,     // XB_FixScyllaSoftlock
+  kBridgeInput,        // XB_PatchBridgeInput
+  kCatacombsEscape,    // XB_PatchMines
+  kReverseLibraryCard, // XB_ApplyReverseLibraryCardPatch (Expedition)
+  kClearFile,          // XB_PatchClearFile
+  kCount,
+};
+
+struct Enhancements {
+  uint32_t flags = 0;        // bit (1 << Enhancement)
+  int wing_smash_color = 0;  // 0: the game's own; 1-8: upstream's WS_COLORS
+
+  bool Has(Enhancement e) const { return flags & (1u << static_cast<int>(e)); }
+  bool Empty() const { return !flags && !wing_smash_color; }
+  bool operator==(const Enhancements&) const = default;
+};
+
+inline constexpr int kWingSmashColorCount = 8;
+
+// The world to put in guest memory: `seed` (null: vanilla) with
+// `enhancements` written over it, as one PatchSet against the base image.
+// Shares the core with Generate.
+std::shared_ptr<const PatchSet> ComposeWorld(const BaseXex& base, const PatchSet* seed,
+                                             const Enhancements& enhancements,
+                                             std::string* error);
+
 enum class Status { kIdle, kRunning, kDone, kFailed, kAborted };
 
 class Generator {

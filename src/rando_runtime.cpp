@@ -21,6 +21,7 @@
 
 #include "generated/nocturnerecomp_init.h"
 
+#include "enhancements.h"
 #include "game_state.h"
 #include "ppc_interpreter.h"
 
@@ -185,26 +186,40 @@ void RandoRuntime::Bind(rex::Runtime* runtime, const std::filesystem::path& game
 
   // The New Game seed from the last run: also the world a save made before
   // per-slot binding expects. Regenerate it (well under a second) and apply
-  // it before any guest code runs.
-  if (!std::filesystem::exists(active_path_, ec)) {
+  // it before any guest code runs. The enhancements go in with it.
+  const bool has_seed = std::filesystem::exists(active_path_, ec);
+  if (!state().supported) {
+    if (has_seed) {
+      const std::string message = "Couldn't restore the active seed: " +
+                                  state().unsupported_reason;
+      REXLOG_WARN("[rando] {}", message);
+      std::lock_guard lock(mutex_);
+      state_.message = message;
+    }
     return;
   }
+  std::lock_guard apply_lock(apply_mutex_);
   auto fail = [&](const std::string& message) {
     REXLOG_WARN("[rando] {} -- booting the vanilla game", message);
+    ApplyVanilla();
     std::lock_guard lock(mutex_);
     state_.message = message + " Booted the vanilla game.";
   };
-  if (!state().supported) {
-    fail("Couldn't restore the active seed: " + state().unsupported_reason);
+  std::string error;
+  if (!has_seed) {
+    if (!Apply(nullptr, &error)) {
+      REXLOG_WARN("[rando] couldn't apply the enhancements: {}", error);
+      failed_enhancements_ = CurrentEnhancements();
+      std::lock_guard lock(mutex_);
+      state_.message = "Couldn't apply the enhancements: " + error;
+    }
     return;
   }
-  std::string error;
   auto seed = LoadSeedFile(active_path_, &error);
   if (!seed) {
     fail(error);
     return;
   }
-  std::lock_guard apply_lock(apply_mutex_);
   if (!Apply(seed, &error)) {
     fail("Couldn't apply the active seed: " + error);
     return;
@@ -283,14 +298,20 @@ std::filesystem::path RandoRuntime::SlotPath(const std::string& slot) const {
 }
 
 bool RandoRuntime::ApplyWorld(std::shared_ptr<const rando::Result> seed, std::string* error) {
-  if (seed == state().active) {
-    return true;
-  }
-  if (!seed) {
-    Revert();
+  const State current = state();
+  if (seed == current.active && CurrentEnhancements() == current.enhancements) {
     return true;
   }
   return Apply(std::move(seed), error);
+}
+
+void RandoRuntime::ApplyVanilla() {
+  std::string error;
+  if (!Apply(nullptr, &error)) {
+    REXLOG_WARN("[rando] couldn't apply the enhancements: {}", error);
+    failed_enhancements_ = CurrentEnhancements();
+    Revert();
+  }
 }
 
 void RandoRuntime::OnSaveRead(const std::string& slot) { last_read_slot_ = slot; }
@@ -317,7 +338,7 @@ void RandoRuntime::OnSaveLoading() {
   std::string error;
   if (!ApplyWorld(seed, &error)) {
     message = "Couldn't apply this save's seed: " + error + " Playing the vanilla game.";
-    Revert();
+    ApplyVanilla();
   }
   REXLOG_INFO("[rando] loading save {}: {}", slot,
               state().active ? "seed \"" + state().active->options.seed + "\"" : "vanilla");
@@ -375,7 +396,7 @@ void RandoRuntime::Tick() {
     std::lock_guard apply_lock(apply_mutex_);
     if (!ApplyWorld(new_game, &error)) {
       REXLOG_WARN("[rando] couldn't restore the New Game seed: {}", error);
-      Revert();
+      ApplyVanilla();
       std::lock_guard lock(mutex_);
       state_.new_game.reset();
       state_.message = "Couldn't restore the New Game seed: " + error;
@@ -388,6 +409,23 @@ void RandoRuntime::Tick() {
     state_.message.clear();
   }
   was_front_end_ = front_end;
+
+  // An enhancement was switched in the settings: rewrite the world in memory,
+  // at the title only, like a seed.
+  const State current = state();
+  const rando::Enhancements wanted = CurrentEnhancements();
+  if (front_end && current.supported && !current.request_pending &&
+      wanted != current.enhancements) {
+    std::string error;
+    std::lock_guard apply_lock(apply_mutex_);
+    // A set that failed was reported once; wait for another change.
+    if (failed_enhancements_ != wanted && !Apply(current.active, &error)) {
+      REXLOG_WARN("[rando] couldn't apply the enhancements: {}", error);
+      failed_enhancements_ = wanted;
+      std::lock_guard lock(mutex_);
+      state_.message = "Couldn't apply the enhancements: " + error;
+    }
+  }
 
   Request request;
   std::shared_ptr<const rando::Result> seed;
@@ -419,7 +457,7 @@ void RandoRuntime::Tick() {
   } else {
     {
       std::lock_guard apply_lock(apply_mutex_);
-      Revert();
+      ApplyVanilla();
     }
     std::error_code ec;
     std::filesystem::remove(active_path_, ec);
@@ -433,9 +471,24 @@ void RandoRuntime::Tick() {
 }
 
 bool RandoRuntime::Apply(std::shared_ptr<const rando::Result> seed, std::string* error) {
+  const rando::Enhancements enhancements = CurrentEnhancements();
+  if (!seed && (enhancements.Empty() || !state().supported)) {
+    // Enhancements need the image the randomizer's offsets are for.
+    Revert();
+    return true;
+  }
   if (!base_) {
     base_ = rando::LoadBaseXex(base_xex_, error);
     if (!base_) {
+      return false;
+    }
+  }
+  std::shared_ptr<const rando::PatchSet> patches;
+  if (enhancements.Empty()) {
+    patches = std::shared_ptr<const rando::PatchSet>(seed, &seed->patches);
+  } else {
+    patches = rando::ComposeWorld(*base_, seed ? &seed->patches : nullptr, enhancements, error);
+    if (!patches) {
       return false;
     }
   }
@@ -445,9 +498,9 @@ bool RandoRuntime::Apply(std::shared_ptr<const rando::Result> seed, std::string*
   const uint32_t code_end = REX_CODE_BASE + REX_CODE_SIZE;
   const uint32_t image_end = base_->image_base +
                              static_cast<uint32_t>(base_->file.size() - base_->header_size);
-  for (const auto& run : seed->patches.runs) {
+  for (const auto& run : patches->runs) {
     if (run.guest < base_->image_base || run.guest + run.bytes.size() > image_end) {
-      *error = "the seed patches outside the game image";
+      *error = "the patches reach outside the game image";
       return false;
     }
   }
@@ -457,7 +510,7 @@ bool RandoRuntime::Apply(std::shared_ptr<const rando::Result> seed, std::string*
   // Data: write every run. Live memory should still hold the base image;
   // anything else means the game changed it, and is worth knowing about.
   size_t live_mismatches = 0;
-  for (const auto& run : seed->patches.runs) {
+  for (const auto& run : patches->runs) {
     const uint8_t* host = memory->TranslateVirtual<const uint8_t*>(run.guest);
     if (std::memcmp(host, run.base.data(), run.base.size()) != 0 && live_mismatches++ < 8) {
       REXLOG_WARN("[rando] live memory at {:08X} ({} bytes) isn't the base image", run.guest,
@@ -475,7 +528,7 @@ bool RandoRuntime::Apply(std::shared_ptr<const rando::Result> seed, std::string*
   std::set<size_t> changed;  // indices into `starts`
   std::vector<CaveRegion> caves;
   constexpr uint32_t kCaveMergeGap = 32;
-  for (const auto& run : seed->patches.runs) {
+  for (const auto& run : patches->runs) {
     const uint32_t run_end = run.guest + static_cast<uint32_t>(run.bytes.size());
     for (uint32_t a = run.guest; a < run_end; ++a) {
       if (a < code_start || a >= code_end || run.bytes[a - run.guest] == run.base[a - run.guest]) {
@@ -543,12 +596,16 @@ bool RandoRuntime::Apply(std::shared_ptr<const rando::Result> seed, std::string*
     g_overrides.emplace_back(start, original);
   }
 
-  REXLOG_INFO("[rando] applied seed \"{}\": {} runs, {} bytes, {} function(s) interpreted, {} "
-              "inactive, {} cave(s), {} run(s) where live memory wasn't the base image",
-              seed->options.seed, seed->patches.runs.size(), seed->patches.ByteCount(),
-              g_overrides.size(), inactive, caves.size(), live_mismatches);
+  REXLOG_INFO("[rando] applied {} with enhancements {:03X}/{}: {} runs, {} bytes, {} "
+              "function(s) interpreted, {} inactive, {} cave(s), {} run(s) where live memory "
+              "wasn't the base image",
+              seed ? "seed \"" + seed->options.seed + "\"" : "the vanilla game",
+              enhancements.flags, enhancements.wing_smash_color, patches->runs.size(),
+              patches->ByteCount(), g_overrides.size(), inactive, caves.size(), live_mismatches);
+  applied_ = std::move(patches);
   std::lock_guard lock(mutex_);
   state_.active = std::move(seed);
+  state_.enhancements = enhancements;
   state_.inactive_code_patches = inactive;
   return true;
 }
@@ -564,27 +621,28 @@ void RandoRuntime::Revert() {
     g_cave_regions.clear();
   }
 
-  std::shared_ptr<const rando::Result> active;
   {
     std::lock_guard lock(mutex_);
-    active = std::exchange(state_.active, nullptr);
+    state_.active.reset();
+    state_.enhancements = {};
     state_.inactive_code_patches = 0;
   }
-  if (!active) {
+  const auto applied = std::exchange(applied_, nullptr);
+  if (!applied) {
     return;
   }
   auto* memory = runtime_->memory();
   size_t live_mismatches = 0;
-  for (const auto& run : active->patches.runs) {
+  for (const auto& run : applied->runs) {
     const uint8_t* host = memory->TranslateVirtual<const uint8_t*>(run.guest);
     if (std::memcmp(host, run.bytes.data(), run.bytes.size()) != 0 && live_mismatches++ < 8) {
-      REXLOG_WARN("[rando] live memory at {:08X} ({} bytes) changed since the seed was applied",
+      REXLOG_WARN("[rando] live memory at {:08X} ({} bytes) changed since it was patched",
                   run.guest, run.bytes.size());
     }
     WriteGuest(memory, run.guest, run.base.data(), run.base.size());
   }
-  REXLOG_INFO("[rando] reverted seed \"{}\" ({} run(s) had changed in play)",
-              active->options.seed, live_mismatches);
+  REXLOG_INFO("[rando] back to the base image ({} run(s) had changed in play)",
+              live_mismatches);
 }
 
 RandoRuntime& GetRandoRuntime() {

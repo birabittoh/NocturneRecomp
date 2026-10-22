@@ -39,6 +39,12 @@
 // the guest thread just before the game unpacks the save, whatever seed is
 // chosen for New Game; back at the title screen the New Game seed returns.
 // Saves with no record (made before this existed) load as vanilla.
+//
+// The enhancements (src/enhancements.h) are written over whichever world is
+// in memory, vanilla or seed, so what guest memory holds is always one
+// composed PatchSet (rando::ComposeWorld). They are game settings, not part
+// of a seed or a save: a change made while a game runs waits for the title
+// screen, like a seed.
 #pragma once
 
 #include <cstddef>
@@ -46,6 +52,7 @@
 #include <filesystem>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -82,6 +89,8 @@ class RandoRuntime {
     std::string unsupported_reason;
     bool request_pending = false;
     std::shared_ptr<const rando::Result> active;  // in guest memory now; null: vanilla
+    // Enhancements in guest memory now, over `active`.
+    rando::Enhancements enhancements;
     // What New Game gets (the overlay's choice); null: vanilla. Differs
     // from `active` only while a save bound to another world is loaded.
     std::shared_ptr<const rando::Result> new_game;
@@ -103,9 +112,15 @@ class RandoRuntime {
   void Tick();
   // Callers hold apply_mutex_: the tick and the save hooks can run on
   // different threads.
+  // Puts `seed` (null: vanilla) with the current enhancements in memory.
   bool Apply(std::shared_ptr<const rando::Result> seed, std::string* error);
+  // Back to the base image: no seed and no enhancements.
   void Revert();
+  // Apply, unless that world is already in memory.
   bool ApplyWorld(std::shared_ptr<const rando::Result> seed, std::string* error);
+  // The vanilla game with the enhancements, or the bare base image if even
+  // that fails.
+  void ApplyVanilla();
 
   // Seed files: options plus "hash=", or "vanilla=1". Loading regenerates
   // the seed (cached) and refuses it if the hash no longer matches.
@@ -125,6 +140,10 @@ class RandoRuntime {
   std::mutex apply_mutex_;
   std::vector<std::shared_ptr<const rando::Result>> seed_cache_;  // under apply_mutex_
   std::string last_read_slot_;  // guest thread
+  // What guest memory holds over the base image; null: nothing.
+  std::shared_ptr<const rando::PatchSet> applied_;  // under apply_mutex_
+  // The enhancements that last failed to apply; not retried until they change.
+  std::optional<rando::Enhancements> failed_enhancements_;  // under apply_mutex_
   bool was_front_end_ = false;  // tick
 
   mutable std::mutex mutex_;

@@ -3,7 +3,9 @@
 
 #include "settings.h"
 
+#include "enhancements.h"
 #include "graphics_settings.h"
+#include "rando_runtime.h"
 
 #include <algorithm>
 #include <array>
@@ -264,32 +266,16 @@ class CuratedSettingsDialog : public rex::ui::ImGuiDialog {
       ImGui::Separator();
     }
 
-    DrawUpdateSection();
-
-    DrawFullscreenRow();
-    DrawVsyncRow();
-    DrawGraphicsStyleRow();
-    DrawAudioMuteRow();
-    DrawAudioVolumeRow();
-    DrawUserNameRow();
-    DrawLanguageRow();
-    // The native renderer reads both: gpu_backend picks D3D12 or Vulkan (only
-    // Windows has the choice) and vulkan_device the adapter when Vulkan is in use.
-#ifdef _WIN32
-    DrawGpuBackendRow();
-#endif
-#if REX_HAS_VULKAN
-#ifdef _WIN32
-    if (rex::cvar::GetFlagByName("gpu_backend") == "vulkan")
-#endif
-      DrawVulkanDeviceRow();
-#endif
-
-    ImGui::Separator();
-    if (ImGui::CollapsingHeader("Advanced")) {
-      for (const char* name : kAdvancedCvarNames) {
-        DrawAdvancedRow(name);
+    if (ImGui::BeginTabBar("##settings_tabs")) {
+      if (ImGui::BeginTabItem("General")) {
+        DrawGeneralTab();
+        ImGui::EndTabItem();
       }
+      if (ImGui::BeginTabItem("Enhancements")) {
+        DrawEnhancementsTab();
+        ImGui::EndTabItem();
+      }
+      ImGui::EndTabBar();
     }
 
     ImGui::Separator();
@@ -300,8 +286,12 @@ class CuratedSettingsDialog : public rex::ui::ImGuiDialog {
       for (const char* name : kAdvancedCvarNames) {
         rex::cvar::ResetToDefault(name);
       }
+      for (const auto& name : EnhancementCvarNames()) {
+        rex::cvar::ResetToDefault(name);
+      }
       SaveBasic();
       SaveAdvanced();
+      SaveEnhancements();
     }
     ImGui::SameLine();
     // Opens the SDK's own full cvar browser (the same one bind_settings/F4
@@ -360,7 +350,104 @@ class CuratedSettingsDialog : public rex::ui::ImGuiDialog {
     return false;
   }
 
+  void DrawGeneralTab() {
+    DrawUpdateSection();
+
+    DrawFullscreenRow();
+    DrawVsyncRow();
+    DrawGraphicsStyleRow();
+    DrawAudioMuteRow();
+    DrawAudioVolumeRow();
+    DrawUserNameRow();
+    DrawLanguageRow();
+    // The native renderer reads both: gpu_backend picks D3D12 or Vulkan (only
+    // Windows has the choice) and vulkan_device the adapter when Vulkan is in use.
+#ifdef _WIN32
+    DrawGpuBackendRow();
+#endif
+#if REX_HAS_VULKAN
+#ifdef _WIN32
+    if (rex::cvar::GetFlagByName("gpu_backend") == "vulkan")
+#endif
+      DrawVulkanDeviceRow();
+#endif
+
+    ImGui::Separator();
+    if (ImGui::CollapsingHeader("Advanced")) {
+      for (const char* name : kAdvancedCvarNames) {
+        DrawAdvancedRow(name);
+      }
+    }
+  }
+
+  // The randomizer core's standalone patches (see enhancements.h). The
+  // runtime picks a change up at the title screen, so this tab only edits
+  // the cvars.
+  void DrawEnhancementsTab() {
+    const auto runtime = GetRandoRuntime().state();
+    const float wrap_width = 400.0f;
+    ImGui::PushTextWrapPos(ImGui::GetCursorPosX() + wrap_width);
+    ImGui::TextUnformatted(
+        "Fixes and tweaks from MottZilla's SOTN_XB_RANDO randomizer. They apply to the vanilla "
+        "game and on top of randomizer seeds.");
+    if (!runtime.supported) {
+      ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 0.85f, 0.2f, 1.0f));
+      ImGui::TextUnformatted(runtime.unsupported_reason.c_str());
+      ImGui::PopStyleColor();
+    } else if (CurrentEnhancements() != runtime.enhancements) {
+      ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 0.85f, 0.2f, 1.0f));
+      ImGui::TextUnformatted(GetRandoRuntime().InFrontEnd()
+                                 ? "Applying..."
+                                 : "Changes take effect at the title screen.");
+      ImGui::PopStyleColor();
+    }
+    ImGui::PopTextWrapPos();
+    ImGui::Separator();
+
+    ImGui::BeginDisabled(!runtime.supported);
+    for (const auto& e : EnhancementList()) {
+      const auto* entry = rex::cvar::GetFlagInfo(e.cvar);
+      if (!entry) {
+        continue;
+      }
+      ImGui::PushID(e.cvar);
+      bool on = entry->getter() == "true";
+      if (rex::ui::ToggleSwitch("##v", &on)) {
+        rex::cvar::SetFlagByName(e.cvar, on ? "true" : "false", /*persist=*/true);
+        SaveEnhancements();
+      }
+      ImGui::SameLine();
+      ImGui::TextUnformatted(e.label);
+      ImGui::PushTextWrapPos(ImGui::GetCursorPosX() + wrap_width);
+      ImGui::TextDisabled("%s", e.description);
+      if (runtime.active && e.in_seed && e.in_seed(runtime.active->options)) {
+        ImGui::TextDisabled("Always on with the active randomizer seed.");
+      }
+      ImGui::PopTextWrapPos();
+      ImGui::PopID();
+    }
+
+    ImGui::Spacing();
+    ImGui::TextUnformatted("Wing Smash Trail Color");
+    ImGui::SameLine(180.0f);
+    ImGui::SetNextItemWidth(160.0f);
+    int color = CurrentEnhancements().wing_smash_color;
+    if (ImGui::BeginCombo("##wing_smash_color", WingSmashColorName(color))) {
+      for (int i = 0; i <= rando::kWingSmashColorCount; ++i) {
+        if (ImGui::Selectable(WingSmashColorName(i), i == color) && i != color) {
+          rex::cvar::SetFlagByName(kWingSmashColorCvar, std::to_string(i), /*persist=*/true);
+          SaveEnhancements();
+        }
+      }
+      ImGui::EndCombo();
+    }
+    ImGui::EndDisabled();
+  }
+
   void SaveBasic() { rex::cvar::SaveConfigSubset(user_settings_path_, BasicCvarNames()); }
+  void SaveEnhancements() {
+    rex::cvar::SaveConfigSubset(user_settings_path_, EnhancementCvarNames());
+  }
   // Advanced rows used to persist to app_config_path_ (<game>.toml). That
   // file is now read-only from the game's own UI (the "All Settings..."
   // browser saves to settings.toml too, see above); <game>.toml can still be

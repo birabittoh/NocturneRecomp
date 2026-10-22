@@ -188,3 +188,46 @@ void RandoSrand(unsigned seed) { g_rand_state = seed; }
 #define srand(seed) nocturne::rando::detail::RandoSrand(seed)
 
 #include "xb_rando.cpp"
+
+namespace nocturne::rando::detail {
+
+void WriteEnhancements(const Enhancements& e) {
+  fXEX = fopen(kMemoryXexPath, "r+b");
+  if (!fXEX) {
+    return;
+  }
+  // The two that check their option themselves.
+  const int fast_warps = XB_FastWarps, anti_freeze = XB_AntiFreeze;
+  XB_FastWarps = XB_AntiFreeze = 1;
+  if (e.Has(Enhancement::kFastWarps)) XB_ApplyFastWarps();
+  if (e.Has(Enhancement::kAntiFreeze)) XB_ApplyAntiFreeze();
+  XB_FastWarps = fast_warps;
+  XB_AntiFreeze = anti_freeze;
+
+  if (e.Has(Enhancement::kRemoveClockStatue)) XB_RemoveClockStatue();
+  if (e.Has(Enhancement::kBoostDropRates)) {
+    // What XB_DoDropsRando writes for XB_BoostDropRates, without the drops.
+    for (int i = 0; i < 398; ++i) {
+      fseek(fXEX, OFS_ENEMYDEFS + (i * 0x24) + 0x1A, SEEK_SET);
+      XB_Write_u16_be(16);
+      XB_Write_u16_be(32);
+    }
+  }
+  if (e.Has(Enhancement::kDeathOnVacation)) XB_ApplyDeathOnVacation();
+  if (e.Has(Enhancement::kSkipMariaAlchemy)) XB_RemoveMariaAlchemyMeeting();
+  if (e.Has(Enhancement::kOuterWallElevator)) XB_FixOuterWallElevator();
+  if (e.Has(Enhancement::kScyllaSoftlock)) XB_FixScyllaSoftlock();
+  if (e.Has(Enhancement::kBridgeInput)) XB_PatchBridgeInput();
+  if (e.Has(Enhancement::kCatacombsEscape)) XB_PatchMines();
+  if (e.Has(Enhancement::kReverseLibraryCard)) XB_ApplyReverseLibraryCardPatch();
+  if (e.Has(Enhancement::kClearFile)) XB_PatchClearFile();
+  if (e.wing_smash_color >= 1 && e.wing_smash_color <= kWingSmashColorCount) {
+    // XB_RandomizeWingSmashTrail with the color chosen instead of rolled.
+    fseek(fXEX, 0xDEB73C, SEEK_SET);
+    XB_Write_u16_be(WS_COLORS[e.wing_smash_color - 1]);
+  }
+  fclose(fXEX);
+  fXEX = NULL;
+}
+
+}  // namespace nocturne::rando::detail

@@ -237,6 +237,7 @@ set(NOCTURNERECOMP_SOURCES
     src/player_inspector.cpp
     src/player_status.cpp
     src/ppc_interpreter.cpp
+    src/enhancements.cpp
     src/rando_menu.cpp
     src/rando_runtime.cpp
     src/rando/rando_core.cpp
