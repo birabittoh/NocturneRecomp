@@ -15,9 +15,13 @@
 #include <rex/hook.h>
 #include <rex/logging.h>
 
+#include <rex/chrono/clock.h>
+
 #include <atomic>
+#include <chrono>
 #include <cstring>
 #include <string>
+#include <thread>
 
 #include "generated/nocturnerecomp_init.h"
 
@@ -262,6 +266,24 @@ REX_HOOK_RAW(D3DDevice__SetPixelShader) {
   nocturne::FindGuestPixelShader(base, shader);
 }
 
+// The game's simulation is tied to the frame rate, and with no GPU vblank to
+// pace Swap nothing stops it from running at the display rate. Hold the guest
+// thread to 60 frames per second (scaled by the fast-forward time scalar).
+static void LimitFrameRate() {
+  using Clock = std::chrono::steady_clock;
+  static Clock::time_point next{};
+  double scalar = rex::chrono::Clock::guest_time_scalar();
+  if (!(scalar > 0.0)) scalar = 1.0;
+  const auto period = std::chrono::duration_cast<Clock::duration>(
+      std::chrono::duration<double>(1.0 / (60.0 * scalar)));
+  const auto now = Clock::now();
+  if (next == Clock::time_point{} || now - next > period * 4) {
+    next = now;  // first frame, or a hitch: don't try to catch up
+  }
+  next += period;
+  if (next > now) std::this_thread::sleep_until(next);
+}
+
 // The guest's final frame boundary: (device, ...). Present the host frame once
 // the guest's own swap has run.
 REX_HOOK_RAW(D3DDevice__Swap) {
@@ -278,6 +300,7 @@ REX_HOOK_RAW(D3DDevice__Swap) {
   }
   nocturne::PlumePresentFrame();
   nocturne::NotifyGuestFrame();
+  LimitFrameRate();
 }
 
 // Swap brackets its frame throttle (spin while the submitted counter runs more
