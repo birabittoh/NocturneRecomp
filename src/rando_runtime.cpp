@@ -471,8 +471,12 @@ void RandoRuntime::Tick() {
 }
 
 bool RandoRuntime::Apply(std::shared_ptr<const rando::Result> seed, std::string* error) {
+  // The settings' enhancements, recorded as applied; the ones written are
+  // those the seed doesn't already have or clash with.
   const rando::Enhancements enhancements = CurrentEnhancements();
-  if (!seed && (enhancements.Empty() || !state().supported)) {
+  const rando::Enhancements written =
+      EffectiveEnhancements(enhancements, seed ? &seed->options : nullptr);
+  if (!seed && (written.Empty() || !state().supported)) {
     // Enhancements need the image the randomizer's offsets are for.
     Revert();
     return true;
@@ -484,10 +488,10 @@ bool RandoRuntime::Apply(std::shared_ptr<const rando::Result> seed, std::string*
     }
   }
   std::shared_ptr<const rando::PatchSet> patches;
-  if (enhancements.Empty()) {
+  if (written.Empty()) {
     patches = std::shared_ptr<const rando::PatchSet>(seed, &seed->patches);
   } else {
-    patches = rando::ComposeWorld(*base_, seed ? &seed->patches : nullptr, enhancements, error);
+    patches = rando::ComposeWorld(*base_, seed ? &seed->patches : nullptr, written, error);
     if (!patches) {
       return false;
     }
@@ -596,11 +600,12 @@ bool RandoRuntime::Apply(std::shared_ptr<const rando::Result> seed, std::string*
     g_overrides.emplace_back(start, original);
   }
 
-  REXLOG_INFO("[rando] applied {} with enhancements {:03X}/{}: {} runs, {} bytes, {} "
+  REXLOG_INFO("[rando] applied {} with enhancements {:05X}/{}/{:08X}/{}: {} runs, {} bytes, {} "
               "function(s) interpreted, {} inactive, {} cave(s), {} run(s) where live memory "
               "wasn't the base image",
               seed ? "seed \"" + seed->options.seed + "\"" : "the vanilla game",
-              enhancements.flags, enhancements.wing_smash_color, patches->runs.size(),
+              written.flags, written.wing_smash_color, written.alchemy_vats,
+              static_cast<int>(written.game_mode), patches->runs.size(),
               patches->ByteCount(), g_overrides.size(), inactive, caves.size(), live_mismatches);
   applied_ = std::move(patches);
   std::lock_guard lock(mutex_);

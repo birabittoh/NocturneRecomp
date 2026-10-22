@@ -138,15 +138,40 @@ enum class Enhancement : int {
   kCatacombsEscape,    // XB_PatchMines
   kReverseLibraryCard, // XB_ApplyReverseLibraryCardPatch (Expedition)
   kClearFile,          // XB_PatchClearFile
+  kMapTracker,         // XB_ApplyMapTrackerPatch with the "Guarded" location set
+  // Patches XB_PresetWrites applies for some presets.
+  kClockRoomDoor,      // XB_PATCHCLOCKROOMOPEN (every preset but Bingo)
+  kKeyItemsStay,       // entity 0xA doesn't expire (every preset but Bingo)
+  kFreeJewelOfOpen,    // the shop relic's price (every preset)
+  kCheapDuplicator,    // XB_RandomizeShopItems' "500K slot" price
+  kInfiniteItems,      // Glitch / NoLogic "Infinite Usage"
+  kSkipMariaSilverRing,// Glitch / NoLogic "Remove Silver Ring Maria Cutscene"
+  kDemonCardDoor,      // Bounty Hunter "Open Demon Card Switch Door"
+  kCount,
+};
+
+// The gameplay patches of a preset (its XB_Apply*Patches), without the
+// preset's seed. They share one code cave, so one at a time.
+enum class GameMode : int {
+  kNormal,
+  kBatMaster,  // XB_ApplyBatMasterPatches
+  kLegDay,     // XB_ApplyLegDayPatches
+  kRichter,    // XB_ApplyRichterPatches
   kCount,
 };
 
 struct Enhancements {
   uint32_t flags = 0;        // bit (1 << Enhancement)
   int wing_smash_color = 0;  // 0: the game's own; 1-8: upstream's WS_COLORS
+  // XB_RandomizeAlchemyVats with its rand() seeded from this; 0: off.
+  uint32_t alchemy_vats = 0;
+  GameMode game_mode = GameMode::kNormal;
 
   bool Has(Enhancement e) const { return flags & (1u << static_cast<int>(e)); }
-  bool Empty() const { return !flags && !wing_smash_color; }
+  void Clear(Enhancement e) { flags &= ~(1u << static_cast<int>(e)); }
+  bool Empty() const {
+    return !flags && !wing_smash_color && !alchemy_vats && game_mode == GameMode::kNormal;
+  }
   bool operator==(const Enhancements&) const = default;
 };
 
@@ -154,7 +179,9 @@ inline constexpr int kWingSmashColorCount = 8;
 
 // The world to put in guest memory: `seed` (null: vanilla) with
 // `enhancements` written over it, as one PatchSet against the base image.
-// Shares the core with Generate.
+// Shares the core with Generate. The caller leaves out enhancements the seed
+// already has or that clash with it (see EffectiveEnhancements in
+// src/enhancements.h).
 std::shared_ptr<const PatchSet> ComposeWorld(const BaseXex& base, const PatchSet* seed,
                                              const Enhancements& enhancements,
                                              std::string* error);

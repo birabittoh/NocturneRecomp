@@ -10,6 +10,7 @@
 #include <algorithm>
 #include <array>
 #include <cmath>
+#include <random>
 #include <cstdlib>
 #include <string>
 #include <string_view>
@@ -405,10 +406,14 @@ class CuratedSettingsDialog : public rex::ui::ImGuiDialog {
     ImGui::Separator();
 
     ImGui::BeginDisabled(!runtime.supported);
+    const rando::Options* seed = runtime.active ? &runtime.active->options : nullptr;
     for (const auto& e : EnhancementList()) {
       const auto* entry = rex::cvar::GetFlagInfo(e.cvar);
       if (!entry) {
         continue;
+      }
+      if (e.section) {
+        ImGui::SeparatorText(e.section);
       }
       ImGui::PushID(e.cvar);
       bool on = entry->getter() == "true";
@@ -418,20 +423,34 @@ class CuratedSettingsDialog : public rex::ui::ImGuiDialog {
       }
       ImGui::SameLine();
       ImGui::TextUnformatted(e.label);
-      ImGui::PushTextWrapPos(ImGui::GetCursorPosX() + wrap_width);
-      ImGui::TextDisabled("%s", e.description);
-      if (runtime.active && e.in_seed && e.in_seed(runtime.active->options)) {
-        ImGui::TextDisabled("Always on with the active randomizer seed.");
-      }
-      ImGui::PopTextWrapPos();
+      DrawEnhancementNotes(e.description, seed ? e.seed_use(*seed) : SeedUse::kNone, wrap_width);
       ImGui::PopID();
     }
+
+    const rando::Enhancements current = CurrentEnhancements();
+    ImGui::SeparatorText("Cosmetic");
+    ImGui::PushID(kAlchemyVatsCvar);
+    bool shuffle_vats = current.alchemy_vats != 0;
+    if (rex::ui::ToggleSwitch("##v", &shuffle_vats)) {
+      SetAlchemyVatsShuffle(shuffle_vats ? NewShuffleSeed() : 0);
+    }
+    ImGui::SameLine();
+    ImGui::TextUnformatted("Shuffle Alchemy Lab Vats");
+    if (shuffle_vats) {
+      ImGui::SameLine();
+      if (ImGui::SmallButton("Reshuffle")) {
+        SetAlchemyVatsShuffle(NewShuffleSeed());
+      }
+    }
+    DrawEnhancementNotes("Shuffles the sub-weapons in the Alchemy Laboratory vats.",
+                         seed ? AlchemyVatsSeedUse(*seed) : SeedUse::kNone, wrap_width);
+    ImGui::PopID();
 
     ImGui::Spacing();
     ImGui::TextUnformatted("Wing Smash Trail Color");
     ImGui::SameLine(180.0f);
     ImGui::SetNextItemWidth(160.0f);
-    int color = CurrentEnhancements().wing_smash_color;
+    const int color = current.wing_smash_color;
     if (ImGui::BeginCombo("##wing_smash_color", WingSmashColorName(color))) {
       for (int i = 0; i <= rando::kWingSmashColorCount; ++i) {
         if (ImGui::Selectable(WingSmashColorName(i), i == color) && i != color) {
@@ -441,7 +460,58 @@ class CuratedSettingsDialog : public rex::ui::ImGuiDialog {
       }
       ImGui::EndCombo();
     }
+
+    ImGui::SeparatorText("Game mode");
+    ImGui::TextUnformatted("Mode");
+    ImGui::SameLine(180.0f);
+    ImGui::SetNextItemWidth(160.0f);
+    const rando::GameMode mode = current.game_mode;
+    if (ImGui::BeginCombo("##game_mode", GameModeName(mode))) {
+      for (int i = 0; i < static_cast<int>(rando::GameMode::kCount); ++i) {
+        const auto m = static_cast<rando::GameMode>(i);
+        if (ImGui::Selectable(GameModeName(m), m == mode) && m != mode) {
+          rex::cvar::SetFlagByName(kGameModeCvar, std::to_string(i), /*persist=*/true);
+          SaveEnhancements();
+        }
+      }
+      ImGui::EndCombo();
+    }
+    DrawEnhancementNotes(GameModeDescription(mode),
+                         seed ? GameModeSeedUse(*seed, mode) : SeedUse::kNone, wrap_width);
+    if (mode != rando::GameMode::kNormal) {
+      ImGui::PushTextWrapPos(ImGui::GetCursorPosX() + wrap_width);
+      ImGui::TextDisabled("A mode changes the game's rules: start a new game to play it.");
+      ImGui::PopTextWrapPos();
+    }
     ImGui::EndDisabled();
+  }
+
+  // An enhancement's description and what the active seed does about it.
+  static void DrawEnhancementNotes(const char* description, SeedUse use, float wrap_width) {
+    ImGui::PushTextWrapPos(ImGui::GetCursorPosX() + wrap_width);
+    ImGui::TextDisabled("%s", description);
+    if (use == SeedUse::kIncluded) {
+      ImGui::TextDisabled("Always on with the active randomizer seed.");
+    } else if (use == SeedUse::kConflicts) {
+      ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 0.85f, 0.2f, 1.0f));
+      ImGui::TextUnformatted("Not applied: the active seed's preset patches the same thing.");
+      ImGui::PopStyleColor();
+    }
+    ImGui::PopTextWrapPos();
+  }
+
+  void SetAlchemyVatsShuffle(uint32_t shuffle) {
+    rex::cvar::SetFlagByName(kAlchemyVatsCvar, std::to_string(shuffle), /*persist=*/true);
+    SaveEnhancements();
+  }
+
+  // A nonzero rand() seed for the vat shuffle.
+  static uint32_t NewShuffleSeed() {
+    uint32_t v = 0;
+    while (!v) {
+      v = std::random_device{}();
+    }
+    return v;
   }
 
   void SaveBasic() { rex::cvar::SaveConfigSubset(user_settings_path_, BasicCvarNames()); }

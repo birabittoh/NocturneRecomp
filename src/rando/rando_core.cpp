@@ -221,6 +221,74 @@ void WriteEnhancements(const Enhancements& e) {
   if (e.Has(Enhancement::kCatacombsEscape)) XB_PatchMines();
   if (e.Has(Enhancement::kReverseLibraryCard)) XB_ApplyReverseLibraryCardPatch();
   if (e.Has(Enhancement::kClearFile)) XB_PatchClearFile();
+  if (e.Has(Enhancement::kMapTracker)) {
+    // XB_ApplyMapTrackerPatch for the "Guarded" location set (relics only),
+    // which is what the vanilla castle has; inline so as not to log to the
+    // Generator.
+    fseek(fXEX, MapTracker_CodeBlock_Ofs, SEEK_SET);
+    fwrite(&MapTracker_CodeBlock[0], sizeof(MapTracker_CodeBlock), 1, fXEX);
+    fseek(fXEX, 0x24035C + 0x4000, SEEK_SET);
+    XB_Write_u32_be(XB_CalcBranch(0x24035C, 0x87FE70));
+    fseek(fXEX, MapTracker_LocData_Ofs, SEEK_SET);
+    fwrite(&MapTracker_LocData[0], sizeof(MapTracker_LocData), 1, fXEX);
+    fseek(fXEX, MapTracker_LocData_Ofs + MapTracker_Castle1Terminate_Ofs, SEEK_SET);
+    XB_Write_u16_be(0);
+    fseek(fXEX, MapTracker_LocData_Ofs + MapTracker_Castle2Terminate_Ofs, SEEK_SET);
+    XB_Write_u16_be(0);
+  }
+  // From XB_PresetWrites, XB_RandomizeShopItems and XB_ApplyBountyHunterPatches.
+  if (e.Has(Enhancement::kClockRoomDoor)) {
+    XB_WritePatch(0x3163BC, &XB_PATCHCLOCKROOMOPEN[0], sizeof(XB_PATCHCLOCKROOMOPEN));
+  }
+  if (e.Has(Enhancement::kKeyItemsStay)) {
+    fseek(fXEX, 0x347AD0, SEEK_SET);
+    XB_Write_u32_be(0x60000000);
+  }
+  if (e.Has(Enhancement::kFreeJewelOfOpen)) {
+    fseek(fXEX, OFS_SHOPLIST + 4, SEEK_SET);
+    XB_Write_u32_be(0);
+  }
+  if (e.Has(Enhancement::kCheapDuplicator)) {
+    fseek(fXEX, 0xD42234, SEEK_SET);
+    XB_Write_u32_be(15000);
+  }
+  if (e.Has(Enhancement::kInfiniteItems)) {
+    for (long ofs : {0xE43351, 0xE42F31, 0xE42F89, 0xE42DD1, 0xE41CF9}) {
+      fseek(fXEX, ofs, SEEK_SET);
+      fputc(0, fXEX);
+    }
+  }
+  if (e.Has(Enhancement::kSkipMariaSilverRing)) {
+    fseek(fXEX, 0xCE0596, SEEK_SET);
+    XB_Write_u16_be(0x0008);
+    XB_Write_u16_be(0x0001);
+  }
+  if (e.Has(Enhancement::kDemonCardDoor)) {
+    for (long ofs : {0xCE3A8C, 0xCE3E6E, 0xCE3A82, 0xCE3E64}) {
+      fseek(fXEX, ofs + 4, SEEK_SET);
+      XB_Write_u16_be(0);
+    }
+  }
+  if (e.alchemy_vats) {
+    // Its rand() rolls from the chosen shuffle instead of the seed's state.
+    const uint32_t state = g_rand_state;
+    g_rand_state = e.alchemy_vats;
+    XB_RandomizeAlchemyVats();
+    g_rand_state = state;
+  }
+  switch (e.game_mode) {
+    case GameMode::kBatMaster:
+      XB_ApplyBatMasterPatches();
+      break;
+    case GameMode::kLegDay:
+      XB_ApplyLegDayPatches();
+      break;
+    case GameMode::kRichter:
+      XB_ApplyRichterPatches();
+      break;
+    default:
+      break;
+  }
   if (e.wing_smash_color >= 1 && e.wing_smash_color <= kWingSmashColorCount) {
     // XB_RandomizeWingSmashTrail with the color chosen instead of rolled.
     fseek(fXEX, 0xDEB73C, SEEK_SET);
