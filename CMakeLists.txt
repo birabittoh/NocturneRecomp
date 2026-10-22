@@ -241,6 +241,7 @@ set(NOCTURNERECOMP_SOURCES
     src/rando/rando_host.cpp
     src/room_presence.cpp
     src/settings.cpp
+    src/video_mode.cpp
     src/xbox_live.cpp
     src/gpu/guest_shaders.cpp
     src/gpu/native_renderer.cpp
