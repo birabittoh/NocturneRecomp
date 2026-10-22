@@ -1,8 +1,7 @@
 // nocturnerecomp - hold a key (default Tab) or a controller button (default
 // LThumb) to speed up the game. Moved in-app from the former fast_forward mod.
-// This only sets the guest time scalar (rex::chrono::Clock); src/frame_pacer.cpp
-// reads that scalar and does the actual internal-framerate speed-up by driving
-// the game's target_time clock at (real time * scalar).
+// This only sets the guest time scalar (rex::chrono::Clock); the frame limiter
+// in src/gpu/native_renderer_d3d.cpp scales its 60 fps target by it.
 #pragma once
 
 #include <memory>

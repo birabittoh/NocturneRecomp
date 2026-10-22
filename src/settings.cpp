@@ -61,7 +61,6 @@ constexpr std::array kGameDefaults = {
     // both platforms.
     DefaultValue{"post_process_shader_path", "./shaders/crt.slang"},
     DefaultValue{"post_process_shader_enabled", "false"},
-    DefaultValue{"frame_pacer_enabled", "false"},
     DefaultValue{"shader_dump_enabled", "false"},
     DefaultValue{"texture_dump_enabled", "false"},
     DefaultValue{"texture_dump_format", "png"},
@@ -245,10 +244,9 @@ bool IsKnownLanguageId(std::string_view id) {
 
 // cvars rendered generically in the collapsed Advanced section, persisted to
 // the app's normal cvar config (nocturnerecomp.toml).
-constexpr std::array<const char*, 9> kAdvancedCvarNames = {
+constexpr std::array<const char*, 8> kAdvancedCvarNames = {
     "post_process_shader_enabled",
     "post_process_shader_path",
-    "frame_pacer_enabled",
     // Windows only, so absent from the registry elsewhere; DrawAdvancedRow and
     // the generic Reset-All / save loops no-op on a name that is not
     // registered, so listing it unconditionally is safe.

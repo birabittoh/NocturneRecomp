@@ -4,9 +4,9 @@
 // Sets the SDK's generic guest clock time-scalar
 // (rex::chrono::Clock::set_guest_time_scalar), the same lever real emulators
 // use for turbo: it scales how fast guest ticks, timers, and vblank interrupts
-// advance relative to real time. The actual internal-framerate speed-up comes
-// from src/frame_pacer.cpp, which drives the game's target_time clock at
-// (real time * this scalar) -- so this file only has to publish the scalar and
+// advance relative to real time. The frame limiter in
+// src/gpu/native_renderer_d3d.cpp scales its target rate by this scalar -- so
+// this file only has to publish the scalar and
 // restore it to 1.0 when both inputs release (and on unbind), so a shutdown
 // never leaves the game stuck sped up.
 #include "fast_forward.h"

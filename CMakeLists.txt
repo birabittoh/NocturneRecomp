@@ -231,7 +231,6 @@ set(NOCTURNERECOMP_SOURCES
     src/fast_forward.cpp
     src/font_overlay.cpp
     src/font_patch.cpp
-    src/frame_pacer.cpp
     src/graphics_settings.cpp
     src/host_timer_resolution.cpp
     src/native_options.cpp

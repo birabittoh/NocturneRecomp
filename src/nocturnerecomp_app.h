@@ -34,7 +34,6 @@
 #include "achievements_screen.h"
 #include "fast_forward.h"
 #include "font_overlay.h"
-#include "frame_pacer.h"
 #include "fonts.generated.h"
 #include "graphics_settings.h"
 #include "native_options.h"
@@ -232,13 +231,6 @@ class NocturnerecompApp : public rex::ReXApp {
     // the guest starts, so it is in place by the title's first font load.
     nocturne::InstallJapaneseFontOverlay(runtime());
 
-    // Steady internal-framerate pacer: drives the game's target_time clock at
-    // exactly real-time from a dedicated steady-clock thread, so the PS1
-    // simulation holds 60Hz instead of oscillating with vblank/present jitter
-    // (see src/frame_pacer.h). Fast-forward now feeds it purely via the guest
-    // time scalar. Gated via the frame_pacer_enabled cvar.
-    nocturne::GetFramePacer().Bind(runtime());
-
     // The renderer loads no GPU plugin, so the SDK's per guest frame callback
     // (which drives the mod registry's tick) never fires; the swap hook does it.
     nocturne::SetGuestFrameCallback([this] { runtime()->mod_registry()->DispatchTick(); });
@@ -350,9 +342,6 @@ class NocturnerecompApp : public rex::ReXApp {
     // Tear the host renderer down before the window goes away.
     nocturne::ShutdownPlumeBackend();
 
-    // Stop the pacer thread before the runtime (and its guest memory) tears
-    // down -- it dereferences runtime()->memory() every tick.
-    nocturne::GetFramePacer().Stop();
     rex::discord_rpc::Stop();
     nocturne::ReleaseHostTimerResolution();
   }
