@@ -38,6 +38,11 @@ void PlumeSetOverlayDrawer(rex::ui::UIDrawer* drawer);
 // host frame rate follows the guest's.
 void PlumePresentFrame();
 
+// The size the guest's render target should have: the swap chain's size fitted
+// to the guest's 16:9. Leaves the arguments alone when there is no swap chain
+// to measure, so callers pre-load a fallback.
+void PlumeGuestExtent(uint32_t* width, uint32_t* height);
+
 // The window changed size; the swap chain has to follow. Called from the app's
 // pixel size hook, i.e. on the UI thread, so it only records the request and
 // the next present acts on it.

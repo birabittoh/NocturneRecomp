@@ -2,6 +2,8 @@
 //
 // See native_renderer_plume.h.
 
+#include "native_renderer_draw.h"
+#include "settings.h"
 #include "native_renderer_plume.h"
 
 #include <algorithm>
@@ -101,6 +103,65 @@ bool g_present_wait = false;
 rex::ui::UIDrawer* g_overlay = nullptr;
 
 uint64_t g_frames_presented = 0;
+
+// A window dragged by its corner reports a new size every frame, and each one
+// would rebuild the guest's targets. Hold a candidate until it has stopped
+// moving, then rebuild once and save the size for the next launch.
+uint32_t g_settled_width = 0, g_settled_height = 0;
+uint32_t g_pending_width = 0, g_pending_height = 0;
+uint64_t g_pending_frame = 0;
+constexpr uint64_t kWindowSettleFrames = 30;  // half a second at 60 fps
+
+void WaitForAllSlots();
+
+// Called once per present, after the frame has been submitted. The rebuild
+// waits for every slot, so it cannot free an image a queued frame still reads.
+void SettleWindowSize() {
+  if (g_backend.swap_chain->isEmpty())
+    return;
+  const uint32_t width = g_backend.swap_chain->getWidth();
+  const uint32_t height = g_backend.swap_chain->getHeight();
+  if (g_settled_width == 0) {  // first look: whatever the target was built at
+    g_settled_width = width;
+    g_settled_height = height;
+    return;
+  }
+  if (width == g_settled_width && height == g_settled_height) {
+    g_pending_width = g_pending_height = 0;
+    // The target is built by the first draw, which can land before the window
+    // has reached its final size; catch that up without a debounce.
+    uint32_t built_width = 0, built_height = 0;
+    GuestTargetExtent(&built_width, &built_height);
+    uint32_t want_width = built_width, want_height = built_height;
+    PlumeGuestExtent(&want_width, &want_height);
+    if (built_width != 0 && (built_width != want_width || built_height != want_height)) {
+      WaitForAllSlots();
+      GuestResizeTarget(want_width, want_height);
+    }
+    return;
+  }
+  if (width != g_pending_width || height != g_pending_height) {
+    g_pending_width = width;
+    g_pending_height = height;
+    g_pending_frame = g_frames_presented;
+    return;
+  }
+  if (g_frames_presented - g_pending_frame < kWindowSettleFrames)
+    return;
+
+  g_settled_width = width;
+  g_settled_height = height;
+  g_pending_width = g_pending_height = 0;
+  PersistWindowSize();
+
+  uint32_t extent_width = 0, extent_height = 0;
+  GuestTargetExtent(&extent_width, &extent_height);
+  if (extent_width == 0)
+    return;
+  PlumeGuestExtent(&extent_width, &extent_height);
+  WaitForAllSlots();
+  GuestResizeTarget(extent_width, extent_height);
+}
 uint64_t g_acquire_failures = 0;
 uint64_t g_present_failures = 0;
 uint64_t g_resize_failures = 0;
@@ -340,6 +401,22 @@ bool InitPlumeBackend(void* window_handle) {
   return true;
 }
 
+void PlumeGuestExtent(uint32_t* width, uint32_t* height) {
+  if (!g_backend.swap_chain || g_backend.swap_chain->isEmpty())
+    return;
+  // The largest 16:9 that fits, which is what CompositeGuestImage would
+  // letterbox to anyway, so the blit is 1:1.
+  const uint64_t window_width = g_backend.swap_chain->getWidth();
+  const uint64_t window_height = g_backend.swap_chain->getHeight();
+  uint64_t w = window_width, h = window_width * 9 / 16;
+  if (h > window_height) {
+    h = window_height;
+    w = window_height * 16 / 9;
+  }
+  *width = uint32_t(std::clamp<uint64_t>(w, 16, 8192));
+  *height = uint32_t(std::clamp<uint64_t>(h, 9, 8192));
+}
+
 bool PlumeBackendReady() { return g_ready.load(std::memory_order_acquire); }
 
 void PlumePresentFrame() {
@@ -453,7 +530,9 @@ void PlumePresentFrame() {
   WaitForSlot(g_slots[g_slot]);
   GuestFrameRetired(g_slot);
 
-  if (++g_frames_presented % 600 == 0) {
+  ++g_frames_presented;
+  SettleWindowSize();
+  if (g_frames_presented % 600 == 0) {
     REXLOG_DEBUG(
         "native_renderer: Plume presented {} frames ({} acquire failures, {} present failures, "
         "{} resize failures, {} wait(s) owed)",

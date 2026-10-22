@@ -101,49 +101,9 @@ constexpr std::array kGameDefaults = {
 // host_timer_resolution_ms is absent here on purpose: 5ms is right for
 // everyone, so it gets no curated row. It is listed in kAdvancedCvarNames
 // instead, where the generic widget exposes it as the raw millisecond value.
-constexpr std::array<const char*, 10> kBasicCvarNames = {
-    "fullscreen",  "vsync", "resolution",    "user_name",  "user_language", "gpu_backend",
+constexpr std::array<const char*, 9> kBasicCvarNames = {
+    "fullscreen",  "vsync", "user_name",  "user_language", "gpu_backend",
     "vulkan_device", "audio_mute", "audio_volume", "graphics_style_enhanced"};
-
-// Named resolution presets offered by DrawResolutionRow, ordered ascending.
-constexpr std::array<const char*, 4> kResolutionPresetsAscending = {"720p", "1080p", "1440p", "4K"};
-
-// Vertical pixel count of each named resolution preset.
-int ResolutionHeightFor(const char* option) {
-  std::string_view opt(option);
-  if (opt == "720p")
-    return 720;
-  if (opt == "1080p")
-    return 1080;
-  if (opt == "1440p")
-    return 1440;
-  if (opt == "4K")
-    return 2160;
-  return 720;
-}
-
-// Number of leading entries of kResolutionPresetsAscending that fit on the
-// display the settings window currently resides on -- offering a preset
-// taller than the desktop's own resolution just leaves the player with an
-// oversized window/fullscreen mode they can't fully see.
-// window->GetDesktopDisplayHeight() is routed through the SDK's Window
-// abstraction (SDL under the hood on every platform), so this works on
-// Windows, X11, and Wayland alike without any platform-specific code here.
-// A 0 result (no window yet, or the backend couldn't answer) means "assume
-// everything fits" -- fail open rather than hide presets over a query that
-// simply isn't available.
-int AllowedResolutionCount(rex::ui::Window* window) {
-  uint32_t display_height = window ? window->GetDesktopDisplayHeight() : 0;
-  if (display_height == 0)
-    return static_cast<int>(kResolutionPresetsAscending.size());
-  int count = 0;
-  for (const char* opt : kResolutionPresetsAscending) {
-    if (static_cast<uint32_t>(ResolutionHeightFor(opt)) > display_height)
-      break;
-    ++count;
-  }
-  return std::max(count, 1);
-}
 
 // audio_volume is stored (and applied to samples by the SDL audio driver) as
 // linear amplitude, but human loudness perception is roughly logarithmic --
@@ -310,7 +270,6 @@ class CuratedSettingsDialog : public rex::ui::ImGuiDialog {
 
     DrawFullscreenRow();
     DrawVsyncRow();
-    DrawResolutionRow();
     DrawGraphicsStyleRow();
     DrawAudioMuteRow();
     DrawAudioVolumeRow();
@@ -379,8 +338,8 @@ class CuratedSettingsDialog : public rex::ui::ImGuiDialog {
   // GetPendingRestartFlags() only tracks cvars that were actually changed at
   // runtime (settings UI, console, mods) this session -- values applied
   // while loading a config file at boot don't count, so a saved preference
-  // that simply differs from the SDK's factory default (e.g. Resolution set
-  // to 1080p) doesn't trip this on a fresh launch. See SetFlagByNameImpl's
+  // that simply differs from the SDK's factory default (e.g. Language set
+  // to Italian) doesn't trip this on a fresh launch. See SetFlagByNameImpl's
   // mark_restart parameter in the SDK's cvar.cpp.
   bool IsPendingRestart(const char* name) {
     auto pending = rex::cvar::GetPendingRestartFlags();
@@ -544,35 +503,6 @@ class CuratedSettingsDialog : public rex::ui::ImGuiDialog {
     if (changed) {
       rex::cvar::SetFlagByName("audio_volume", std::to_string(VolumeAmplitudeFromPercent(percent)),
                                /*persist=*/true);
-      SaveBasic();
-    }
-    ImGui::PopID();
-  }
-
-  void DrawResolutionRow() {
-    const auto* entry = rex::cvar::GetFlagInfo("resolution");
-    if (!entry)
-      return;
-    const auto& kOptions = kResolutionPresetsAscending;
-    int count = std::clamp(AllowedResolutionCount(window_), 1, static_cast<int>(kOptions.size()));
-    std::string current = entry->getter();
-    int cur_idx = 0;
-    for (int i = 0; i < count; ++i) {
-      if (current == kOptions[i]) {
-        cur_idx = i;
-        break;
-      }
-    }
-
-    ImGui::TextUnformatted("Resolution");
-    ImGui::SameLine(180.0f);
-    ImGui::SetNextItemWidth(160.0f);
-    ImGui::PushID("resolution");
-    int idx = cur_idx;
-    // Format string is a fixed label, not a %d placeholder -- SliderInt just
-    // displays it verbatim.
-    if (ImGui::SliderInt("##v", &idx, 0, count - 1, kOptions[idx])) {
-      rex::cvar::SetFlagByName("resolution", kOptions[idx], /*persist=*/true);
       SaveBasic();
     }
     ImGui::PopID();
@@ -806,6 +736,43 @@ void ApplySettingDefaults() {
   for (const auto& d : kGameDefaults) {
     rex::cvar::SetDefaultValue(d.cvar, d.value);
   }
+}
+
+namespace {
+rex::ui::Window* g_window = nullptr;
+std::filesystem::path g_user_settings_path;
+}  // namespace
+
+void BindWindowTarget(rex::ui::Window* window, std::filesystem::path user_settings_path) {
+  g_window = window;
+  g_user_settings_path = std::move(user_settings_path);
+}
+
+void PersistWindowSize() {
+  if (g_user_settings_path.empty() || g_window == nullptr)
+    return;
+  // Fullscreen size is the display's, not a window size worth coming back to.
+  if (g_window->IsFullscreen())
+    return;
+  // Logical, because that is the unit window_width/window_height are read in;
+  // the renderer's extent is in physical pixels and would grow the window on
+  // every launch on a scaled display.
+  const uint32_t width = g_window->GetActualLogicalWidth();
+  const uint32_t height = g_window->GetActualLogicalHeight();
+  if (width == 0 || height == 0 || width > 8192 || height > 8192)
+    return;
+  auto* width_entry = rex::cvar::GetFlagInfo("window_width");
+  auto* height_entry = rex::cvar::GetFlagInfo("window_height");
+  if (!width_entry || !height_entry)
+    return;
+  const std::string want_width = std::to_string(width);
+  const std::string want_height = std::to_string(height);
+  if (width_entry->getter() == want_width && height_entry->getter() == want_height)
+    return;
+  // Outside kBasicCvarNames, so Reset All leaves the window size alone.
+  rex::cvar::SetFlagByName("window_width", want_width, /*persist=*/true);
+  rex::cvar::SetFlagByName("window_height", want_height, /*persist=*/true);
+  rex::cvar::SaveConfigSubset(g_user_settings_path, {"window_width", "window_height"});
 }
 
 void PrewarmSettingsDialogCaches() {

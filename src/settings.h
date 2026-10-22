@@ -1,7 +1,7 @@
 // nocturnerecomp - ReXGlue Recompiled Project
 //
 // Game-curated settings: the game's own defaults for SDK cvars, and a small
-// player-facing settings overlay (Fullscreen/Resolution, plus a collapsed
+// player-facing settings overlay (Fullscreen, VSync, plus a collapsed
 // Advanced section) that replaces the SDK's developer settings panel on F4
 // when `settings_manager_enabled = true`. See rex::cvar::SetDefaultValue,
 // rex::cvar::SaveConfigSubset, and rex::ui::DrawCvarWidget in the SDK for the
@@ -86,7 +86,7 @@ std::vector<LanguageOption> GetLanguageOptions();
 // already covers (e.g. the stock Graphics/Volume rows) don't need this --
 // they render correctly for any language strings_<code>.bin supplies. This
 // is only for text native_options.cpp synthesizes itself: appended rows'
-// labels (Resolution, Fullscreen, Language, GPU Backend, ...) and a couple
+// labels (Fullscreen, VSync, Language, ...) and a couple
 // of enumerated values (see native_options.cpp's kNativeStringKey*
 // constants for the full key list).
 //
@@ -126,8 +126,17 @@ const char16_t* FindNativeStringTranslation(uint32_t language_id, std::string_vi
 // first F4 press.
 void PrewarmSettingsDialogCaches();
 
+// The window and settings file PersistWindowSize acts on. Call at startup.
+void BindWindowTarget(rex::ui::Window* window, std::filesystem::path user_settings_path);
+
+// Saves the window's current logical size as window_width/window_height, which
+// the SDK reads when it creates the window on the next launch. Called by the
+// renderer once a resize has settled; a window being dragged by its corner
+// never gets here. Does nothing in fullscreen.
+void PersistWindowSize();
+
 // Creates the curated settings overlay. `user_settings_path` is where the
-// friendly settings (Fullscreen, Resolution) are persisted;
+// friendly settings (Fullscreen, VSync) are persisted;
 // `app_config_path` is where everything else (the Advanced section) is
 // persisted, matching the SDK's normal cvar config file. `window` is used
 // by the "Restart Now" button on the pending-restart banner: it relaunches

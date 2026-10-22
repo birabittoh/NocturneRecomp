@@ -136,11 +136,16 @@ class NocturnerecompApp : public rex::ReXApp {
     if (!rex::ReXApp::SetupEnvironment())
       return false;
 
-    // User-facing settings (Fullscreen, Resolution, ...) live in their own
+    // User-facing settings (Fullscreen, VSync, ...) live in their own
     // file, separate from the advanced cvars in the app's normal config, and
     // are loaded last so they win over both.
     if (std::filesystem::exists(user_settings_path()))
       rex::cvar::LoadConfig(user_settings_path());
+
+    // The guest is always told 1280x720 (its video mode is what the title lays
+    // its UI out for); the host renders at the window's size on top of that, so
+    // a "resolution" saved by an older build must not change the video mode.
+    rex::cvar::SetFlagByName("resolution", "720p", /*persist=*/false);
 
     // Both config files are loaded by now, so the cvar holds the user's value.
     // This used to be an unconditional timeBeginPeriod(1) in OnPreSetup; it has
@@ -172,6 +177,7 @@ class NocturnerecompApp : public rex::ReXApp {
     // destroys and recreates the overlay on every close/open, so without this
     // it re-ran on every single open). See PrewarmSettingsDialogCaches.
     nocturne::PrewarmSettingsDialogCaches();
+    nocturne::BindWindowTarget(window(), user_settings_path());
 
     // Bridge the guest "Achievements" pause-menu entry (XamShowAchievementsUI,
     // intercepted in achievements_menu.cpp) to the SDK's built-in achievements
@@ -211,7 +217,7 @@ class NocturnerecompApp : public rex::ReXApp {
     // graphics_settings.h) since it's a base feature, not optional content.
     nocturne::GetGraphicsSettings().Bind(runtime());
 
-    // Adds a Resolution row to the game's own settings screen, alongside its
+    // Adds VSync, Fullscreen and Language rows to the game's own settings screen, alongside its
     // stock Graphics/Volume/Change Screen Size rows (see native_options.h).
     nocturne::GetNativeOptions().Bind(runtime());
 

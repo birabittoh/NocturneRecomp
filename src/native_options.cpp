@@ -399,7 +399,6 @@ XLanguageId CurrentLanguage() {
 // mechanism.
 constexpr const char* kNativeStringKeyPresetLabel = "preset_label";
 constexpr const char* kNativeStringKeyCustomPromptLabel = "custom_prompt_label";
-constexpr const char* kNativeStringKeyResolutionLabel = "resolution_label";
 constexpr const char* kNativeStringKeyFullscreenLabel = "fullscreen_label";
 constexpr const char* kNativeStringKeyFullscreenOff = "fullscreen_off";
 constexpr const char* kNativeStringKeyFullscreenOn = "fullscreen_on";
@@ -557,90 +556,6 @@ struct CustomRow {
   bool (*available)() = nullptr;
 };
 
-// --- Resolution -------------------------------------------------------------
-
-// `resolution` is consumed when the render target and video mode are sized
-// (native_command_processor.cpp's ResolveVideoModeWidth/Height), not polled
-// per frame, so a change here lands on the next launch -- the same
-// restart-scoped behaviour the ImGui settings dialog warns about. That is
-// also why committing the cvar straight from the guest thread is safe: it is
-// a string write plus a config save, with nothing reallocating underneath it.
-constexpr const char* kResolutionCvar = "resolution";
-
-// Kept in lockstep with settings.cpp's own Resolution row so the native row
-// and the ImGui overlay row are the same setting with the same choices.
-constexpr std::array<const char*, 4> kResolutionCvarValues = {"720p", "1080p", "1440p", "4K"};
-constexpr const char16_t* kResolutionText[] = {u"720p", u"1080p", u"1440p", u"4K"};
-
-// The shared string table has no id for "Resolution", so the label is
-// authored here rather than looked up. Title case to match the stock rows
-// ("Grafici", "Volume", "Cambia risoluzione....."), not the all-caps prompt
-// bar. The value texts are the preset names themselves and stay untranslated.
-const char16_t* ResolutionLabel() {
-  const char16_t* base = [] {
-    switch (CurrentLanguage()) {
-      case XLanguageId::kItalian:
-        return u"Risoluzione";
-      // The literal-text widget setter (SetWidgetText, via 0x825D1EE0) and
-      // the shipped string table's own setter (SetWidgetTextById, via
-      // 0x825D1EE8) both bottom out in the same raw UTF-16 copy into the
-      // widget's text buffer (sub_825E5D30 in each of sub_825CEE40 and
-      // sub_825CFC68) -- there is no separate font/atlas selection for
-      // literal text. Glyph rendering reads from one shared, lazily
-      // populated glyph cache (dword_82E7A574) built from whichever
-      // font_<lang>.xpr the boot-time language switch in sub_82586AA8
-      // loaded (font_ja.xpr for kJapanese), so any text painted while the
-      // game is running in Japanese -- literal or looked-up -- already
-      // renders through that font.
-      //
-      // font_ja.xpr only carries glyphs for characters the shipped game
-      // actually uses; kanji that never appear in the original Japanese
-      // script (like 解/像/度) are simply absent from the atlas and paint
-      // as blanks. Katakana coverage is broad but not complete either --
-      // レゾリューション's dakuten ゾ is also missing -- so this spells out
-      // "Screen Size" instead, reusing only glyphs already proven to render:
-      // スクリーン from FullscreenLabel's フルスクリーン below, plus the
-      // unvoiced サイズ.
-      case XLanguageId::kJapanese:
-        return u"スクリーンサイズ";
-      case XLanguageId::kGerman:
-        return u"Auflösung";
-      case XLanguageId::kFrench:
-        return u"Résolution";
-      case XLanguageId::kSpanish:
-        return u"Resolución";
-      case XLanguageId::kEnglish:
-      default:
-        return u"Resolution";
-    }
-  }();
-  return AppendRestartMarker(TranslatedOr(kNativeStringKeyResolutionLabel, base),
-                              CvarPendingRestart(kResolutionCvar));
-}
-
-int32_t GetResolutionIndex() {
-  const std::string current = rex::cvar::GetFlagByName(kResolutionCvar);
-  for (size_t i = 0; i < kResolutionCvarValues.size(); ++i) {
-    if (current == kResolutionCvarValues[i]) {
-      return static_cast<int32_t>(i);
-    }
-  }
-  return 0;
-}
-
-void CommitResolutionIndex(int32_t index) {
-  if (index < 0 || index >= static_cast<int32_t>(kResolutionCvarValues.size())) {
-    return;
-  }
-  const char* value = kResolutionCvarValues[static_cast<size_t>(index)];
-  if (rex::cvar::GetFlagByName(kResolutionCvar) == value) {
-    return;
-  }
-  rex::cvar::SetFlagByName(kResolutionCvar, value, /*persist=*/true);
-  SaveToUserSettings(kResolutionCvar);
-  REXLOG_INFO("[native_options] resolution set to {} (applies on next launch)", value);
-}
-
 // --- Fullscreen ---------------------------------------------------------
 
 // `fullscreen` is kHotReload -- Window::SetFullscreen applies live via the
@@ -661,12 +576,15 @@ uint32_t SyncFullscreenText() {
   return static_cast<uint32_t>(g_fullscreen_values.size());
 }
 
+// The shared string table has no id for "Fullscreen", so the label is authored
+// here rather than looked up. Title case to match the stock rows, not the
+// all-caps prompt bar.
 const char16_t* FullscreenLabel() {
   const char16_t* base = [] {
     switch (CurrentLanguage()) {
       case XLanguageId::kItalian:
         return u"Schermo intero";
-      // See ResolutionLabel's comment: literal text renders through the same
+      // See FullscreenLabel's comment: literal text renders through the same
       // language-selected font as looked-up text, so this is safe.
       case XLanguageId::kJapanese:
         return u"フルスクリーン";
@@ -703,7 +621,7 @@ void CommitFullscreenIndex(int32_t index) {
 // --- Language -------------------------------------------------------------
 
 // `user_language` is kRequiresRestart (see xam_user.cpp), same restart-scoped
-// behaviour as Resolution -- and it is also the very cvar CurrentLanguage()
+// behaviour as any restart-scoped cvar -- and it is also the very cvar CurrentLanguage()
 // reads to localize every row's label, so changing it here is only reflected
 // the next time this screen (or any other native_options row) is painted
 // after a relaunch.
@@ -733,7 +651,7 @@ bool g_language_options_built = false;
 // Mod-supplied labels are plain ASCII display names (see making-mods.md's
 // language-option example), so a byte-widening conversion is enough; there
 // is no font glyph coverage for anything beyond ASCII anyway (see
-// ResolutionLabel's comment on font_<lang>.xpr's limited atlas).
+// FullscreenLabel's comment on font_<lang>.xpr's limited atlas).
 std::u16string AsciiToUtf16(const std::string& s) {
   std::u16string out;
   out.reserve(s.size());
@@ -778,7 +696,7 @@ const char16_t* LanguageRowLabel() {
     switch (CurrentLanguage()) {
       case XLanguageId::kItalian:
         return u"Lingua";
-      // See ResolutionLabel's comment: 言/語 aren't in font_ja.xpr's glyph
+      // See FullscreenLabel's comment: 言/語 aren't in font_ja.xpr's glyph
       // atlas, so this uses the katakana loanword instead.
       case XLanguageId::kJapanese:
         return u"ランゲージ";
@@ -931,7 +849,7 @@ const char16_t* PresetLabel() {
     switch (CurrentLanguage()) {
       case XLanguageId::kItalian:
         return u"Preset";
-      // See ResolutionLabel's comment on why this is safe.
+      // See FullscreenLabel's comment on why this is safe.
       case XLanguageId::kJapanese:
         return u"プリセット";
       case XLanguageId::kGerman:
@@ -962,7 +880,7 @@ const char16_t* CustomPromptLabel() {
     switch (CurrentLanguage()) {
       case XLanguageId::kItalian:
         return u"PERSONALIZZA";
-      // See ResolutionLabel's comment on why this is safe.
+      // See FullscreenLabel's comment on why this is safe.
       case XLanguageId::kJapanese:
         return u"カスタマイズ";
       case XLanguageId::kGerman:
@@ -999,9 +917,9 @@ const char16_t* GraphicsLabel() {
 
 constexpr uint32_t kStockGraphicsRow = 0;
 constexpr uint32_t kStockVolumeRow = 1;
-constexpr uint32_t kFullscreenRow = kVanillaRowCount + 1;
-constexpr uint32_t kLanguageRow = kVanillaRowCount + 3;
-constexpr uint32_t kVsyncRow = kVanillaRowCount + 2;
+constexpr uint32_t kFullscreenRow = kVanillaRowCount;
+constexpr uint32_t kVsyncRow = kVanillaRowCount + 1;
+constexpr uint32_t kLanguageRow = kVanillaRowCount + 2;
 
 constexpr CustomRow kCustomRows[] = {
     {
@@ -1034,22 +952,6 @@ constexpr CustomRow kCustomRows[] = {
         .live = true,
     },
     {
-        // `live` here doesn't mean the *effect* is immediate -- resolution is
-        // still restart-scoped -- it means the cvar is written on every
-        // left/right, same as the ImGui overlay's own dropdown (which has no
-        // separate accept step either). That's what lets the label's
-        // "(Restart)" marker (see AppendRestartMarker) track the real cvar
-        // state live instead of only updating the next time this screen is
-        // re-entered.
-        .list_row = kVanillaRowCount,
-        .label = &ResolutionLabel,
-        .values = kResolutionText,
-        .value_count = static_cast<uint32_t>(std::size(kResolutionText)),
-        .get = &GetResolutionIndex,
-        .commit = &CommitResolutionIndex,
-        .live = true,
-    },
-    {
         .list_row = kFullscreenRow,
         .label = &FullscreenLabel,
         .values = g_fullscreen_values.data(),
@@ -1064,8 +966,9 @@ constexpr CustomRow kCustomRows[] = {
         .live = true,
     },
     {
-        // See the Resolution row above for why this is `live` despite being
-        // restart-scoped.
+        // `live` means the cvar is written on every left/right, so the label's
+        // "(Restart)" marker (see AppendRestartMarker) tracks the real cvar
+        // state live, even though the language itself is restart-scoped.
         .list_row = kLanguageRow,
         .label = &LanguageRowLabel,
         .values = g_language_values.data(),
@@ -1622,7 +1525,7 @@ extern "C" void NativeOptions_CycleRow(PPCContext& ctx, uint8_t* base) {
 
   const CustomRow& custom = kCustomRows[custom_index];
   // Commit before painting: a live row's label may depend on the committed
-  // cvar state (see Resolution/Language/GPU Backend's "(Restart)" marker),
+  // cvar state (see Language's "(Restart)" marker),
   // so the paint has to see this keypress's change, not the previous one.
   if (custom.live && custom.commit) {
     custom.commit(CustomEntryValue(base, static_cast<uint32_t>(custom_index)));

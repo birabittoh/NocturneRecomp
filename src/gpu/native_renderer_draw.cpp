@@ -5,6 +5,7 @@
 #include "native_renderer_draw.h"
 
 #include <algorithm>
+#include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -31,10 +32,16 @@ namespace {
 
 using namespace plume;
 
-// The guest's render target. The title binds one, 1280x720, for the whole
-// run, so the host keeps one of the same size and a second it resolves into.
-constexpr uint32_t kTargetWidth = 1280;
-constexpr uint32_t kTargetHeight = 720;
+// The guest's render target. The title binds one, 1280x720, for the whole run
+// and positions everything in those pixels. The host keeps one, and a second it
+// resolves into, at the size the window shows them (PlumeGuestExtent): the
+// vertex shaders' screen transform maps guest pixels to clip space, so the
+// geometry scales with the host target and only the places that speak guest
+// pixels directly (the clear rectangle, the half pixel shift) convert.
+constexpr uint32_t kGuestWidth = 1280;
+constexpr uint32_t kGuestHeight = 720;
+uint32_t g_target_width = kGuestWidth;
+uint32_t g_target_height = kGuestHeight;
 constexpr RenderFormat kTargetFormat = RenderFormat::R8G8B8A8_UNORM;
 
 // The pipeline layout every guest pipeline shares, matching the bindings
@@ -219,7 +226,7 @@ struct TrackedTexture {
 
 bool CreateTarget(RenderDevice* device, TrackedTexture& target) {
   target.texture =
-      device->createTexture(RenderTextureDesc::ColorTarget(kTargetWidth, kTargetHeight, kTargetFormat));
+      device->createTexture(RenderTextureDesc::ColorTarget(g_target_width, g_target_height, kTargetFormat));
   if (!target.texture)
     return false;
   const RenderTexture* attachment = target.texture.get();
@@ -434,9 +441,10 @@ bool EnsureResources(RenderDevice* device) {
     return false;
   }
 
+  PlumeGuestExtent(&g_target_width, &g_target_height);
   if (!CreateTarget(device, g_res.target) || !CreateTarget(device, g_res.front)) {
-    REXLOG_ERROR("native_renderer: could not create the {}x{} guest render target", kTargetWidth,
-                 kTargetHeight);
+    REXLOG_ERROR("native_renderer: could not create the {}x{} guest render target",
+                 g_target_width, g_target_height);
     return false;
   }
   if (!CreateBlit(device)) {
@@ -488,9 +496,10 @@ void BindTarget(RenderCommandList* commands) {
   // the integer coordinate (D3D9 convention) and the host at the half, so the
   // same geometry lands half a pixel further along without it. See Eternal
   // Sonata's draw path for the derivation.
-  commands->setViewports(
-      RenderViewport(0.5f, 0.5f, float(kTargetWidth), float(kTargetHeight), 0.0f, 1.0f));
-  commands->setScissors(RenderRect(0, 0, int32_t(kTargetWidth), int32_t(kTargetHeight)));
+  commands->setViewports(RenderViewport(0.5f * float(g_target_width) / kGuestWidth,
+                                        0.5f * float(g_target_height) / kGuestHeight,
+                                        float(g_target_width), float(g_target_height), 0.0f, 1.0f));
+  commands->setScissors(RenderRect(0, 0, int32_t(g_target_width), int32_t(g_target_height)));
   g_target_bound = true;
 }
 
@@ -848,7 +857,7 @@ void ScreenTransform(const uint8_t* base, uint32_t device, float out[4]) {
   const float scale_y = (vte & 4u) ? LoadFloat(base, device + Reg2100(0x2111)) : 1.0f;
   const float offset_y = (vte & 8u) ? LoadFloat(base, device + Reg2100(0x2112)) : 0.0f;
 
-  float width = float(kTargetWidth), height = float(kTargetHeight);
+  float width = float(kGuestWidth), height = float(kGuestHeight);
   if (const uint32_t surface = Load32(base, device + kBoundRenderTarget0)) {
     const uint32_t info = Load32(base, surface + 36);
     width = float((info >> 18) + 1);
@@ -983,15 +992,15 @@ bool WantDump(uint64_t frame) {
 void RecordDump(RenderCommandList* commands, RenderDevice* device, uint64_t frame) {
   if (g_dump.pending || !WantDump(frame))
     return;
-  constexpr uint64_t kBytes = uint64_t(kTargetWidth) * kTargetHeight * 4;
+  const uint64_t kBytes = uint64_t(g_target_width) * g_target_height * 4;
   if (!g_dump.buffer)
     g_dump.buffer = device->createBuffer(RenderBufferDesc::ReadbackBuffer(kBytes));
   if (!g_dump.buffer)
     return;
   g_res.front.Transition(commands, RenderTextureLayout::COPY_SOURCE);
   commands->copyTextureRegion(
-      RenderTextureCopyLocation::PlacedFootprint(g_dump.buffer.get(), kTargetFormat, kTargetWidth,
-                                                 kTargetHeight, 1, kTargetWidth),
+      RenderTextureCopyLocation::PlacedFootprint(g_dump.buffer.get(), kTargetFormat, g_target_width,
+                                                 g_target_height, 1, g_target_width),
       RenderTextureCopyLocation::Subresource(g_res.front.texture.get()));
   g_dump.pending = true;
   g_dump.pending_frame = frame;
@@ -1172,10 +1181,13 @@ void GuestClear(uint8_t* base, uint32_t device, uint32_t flags, uint32_t rect, u
     for (uint32_t i = 0; i < 4; ++i)
       rgba[i] = LoadFloat(base, color + 4 * i);
   }
-  RenderRect host_rect(0, 0, int32_t(kTargetWidth), int32_t(kTargetHeight));
+  RenderRect host_rect(0, 0, int32_t(g_target_width), int32_t(g_target_height));
   if (rect != 0) {
-    host_rect = RenderRect(int32_t(Load32(base, rect)), int32_t(Load32(base, rect + 4)),
-                           int32_t(Load32(base, rect + 8)), int32_t(Load32(base, rect + 12)));
+    // Guest pixels to host pixels.
+    const double sx = double(g_target_width) / kGuestWidth, sy = double(g_target_height) / kGuestHeight;
+    host_rect = RenderRect(int32_t(Load32(base, rect) * sx), int32_t(Load32(base, rect + 4) * sy),
+                           int32_t(std::ceil(Load32(base, rect + 8) * sx)),
+                           int32_t(std::ceil(Load32(base, rect + 12) * sy)));
   }
   static uint32_t logged = 0;
   if (logged < 8) {
@@ -1203,10 +1215,10 @@ void CompositeGuestImage(RenderCommandList* commands, const RenderFramebuffer* f
   commands->clearColor(0, RenderColor(0.0f, 0.0f, 0.0f, 1.0f));
 
   // Letterboxed to the guest's aspect.
-  float w = float(width), h = float(width) * kTargetHeight / kTargetWidth;
+  float w = float(width), h = float(width) * kGuestHeight / kGuestWidth;
   if (h > float(height)) {
     h = float(height);
-    w = float(height) * kTargetWidth / kTargetHeight;
+    w = float(height) * kGuestWidth / kGuestHeight;
   }
   commands->setViewports(RenderViewport((float(width) - w) * 0.5f, (float(height) - h) * 0.5f, w, h));
   commands->setGraphicsPipelineLayout(g_res.blit_layout.get());
@@ -1225,11 +1237,11 @@ void GuestFrameRetired(uint32_t slot) {
     return;
   const std::string path = "nocturne_frame_" + std::to_string(g_dump.pending_frame) + ".ppm";
   if (FILE* file = std::fopen(path.c_str(), "wb")) {
-    std::fprintf(file, "P6\n%u %u\n255\n", kTargetWidth, kTargetHeight);
-    std::vector<uint8_t> row(kTargetWidth * 3);
-    for (uint32_t y = 0; y < kTargetHeight; ++y) {
-      const uint8_t* src = pixels + size_t(y) * kTargetWidth * 4;
-      for (uint32_t x = 0; x < kTargetWidth; ++x) {
+    std::fprintf(file, "P6\n%u %u\n255\n", g_target_width, g_target_height);
+    std::vector<uint8_t> row(g_target_width * 3);
+    for (uint32_t y = 0; y < g_target_height; ++y) {
+      const uint8_t* src = pixels + size_t(y) * g_target_width * 4;
+      for (uint32_t x = 0; x < g_target_width; ++x) {
         row[x * 3] = src[x * 4];
         row[x * 3 + 1] = src[x * 4 + 1];
         row[x * 3 + 2] = src[x * 4 + 2];
@@ -1256,6 +1268,35 @@ void ShutdownGuestDraw() {
   g_dump.buffer.reset();
   g_res = Resources();
   g_targets_cleared = false;
+}
+
+void GuestTargetExtent(uint32_t* width, uint32_t* height) {
+  *width = g_res.ready ? g_target_width : 0;
+  *height = g_res.ready ? g_target_height : 0;
+}
+
+void GuestResizeTarget(uint32_t width, uint32_t height) {
+  if (!g_res.ready || (width == g_target_width && height == g_target_height))
+    return;
+  RenderDevice* device = PlumeDevice();
+  // Bindings name the old front image by pointer, and the allocator is free to
+  // hand its address to the new one, which the lookup would read as a hit.
+  g_bindings.clear();
+  g_res.target = TrackedTexture{};
+  g_res.front = TrackedTexture{};
+  g_target_width = width;
+  g_target_height = height;
+  if (!CreateTarget(device, g_res.target) || !CreateTarget(device, g_res.front)) {
+    REXLOG_ERROR("native_renderer: could not rebuild the guest target at {}x{}", width, height);
+    g_res.ready = false;
+    return;
+  }
+  g_res.blit_set->setTexture(0, g_res.front.texture.get(), RenderTextureLayout::SHADER_READ);
+  g_dump.buffer.reset();
+  g_dump.pending = false;
+  g_targets_cleared = false;
+  g_target_bound = false;
+  REXLOG_INFO("native_renderer: guest target is now {}x{}", width, height);
 }
 
 }  // namespace nocturne

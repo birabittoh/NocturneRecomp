@@ -10,7 +10,8 @@
 // out of the device object's register shadows at that point: the bound shaders
 // and vertex declaration, the constant banks and the render state.
 //
-// The guest renders into one 1280x720 colour target. A Resolve copies it into
+// The guest draws in 1280x720 pixels into a colour target the size of the window's
+// letterboxed view of it. A Resolve copies it into
 // the image the present shows and, when asked, clears it. Textures are read
 // out of guest memory by the texture mirror (native_renderer_texture.h).
 //
@@ -32,6 +33,12 @@ struct GuestInlineDraw {
   uint32_t stride = 0;
   uint32_t data = 0;
 };
+
+// The size the guest's target is currently built at (0x0 until the first draw
+// creates it), and the call that rebuilds it. The caller must have waited for
+// every frame in flight: the old images are freed here.
+void GuestTargetExtent(uint32_t* width, uint32_t* height);
+void GuestResizeTarget(uint32_t width, uint32_t height);
 
 // Record one guest draw into the frame. Must be called after the guest has
 // written the vertices and before anything changes the device state the draw
