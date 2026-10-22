@@ -12,6 +12,8 @@
 #include <rex/system/mod_registry.h>
 #include <rex/system/xmemory.h>
 
+#include "game_state.h"
+
 namespace nocturne {
 
 namespace {
@@ -229,7 +231,9 @@ void RoomPresence::Tick() {
                                    rex::memory::PageAccess::kNoAccess;
   uint32_t hp_max =
       stats_mapped ? ReadGuestU32BE(memory, kPlayerStatsGuestAddress + kHpMaxOffset) : 0;
-  bool in_game = stats_mapped && hp_max > 0;
+  // hp_max isn't cleared on Quit to Title, so also ask the app whether the
+  // game is still running (game_state.h).
+  bool in_game = stats_mapped && hp_max > 0 && GameRunning(memory->virtual_membase());
 
   if (!in_game) {
     if (!showed_main_menu_) {

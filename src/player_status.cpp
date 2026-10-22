@@ -8,6 +8,7 @@
 #include <rex/system/mod_registry.h>
 #include <rex/system/xmemory.h>
 
+#include "game_state.h"
 #include "player_status_names.h"
 
 namespace nocturne::player {
@@ -106,10 +107,12 @@ bool PlayerStatus::Read(Snapshot& out) const {
   if (!p) {
     return false;
   }
-  // hp_max is never a real 0 in play, so it doubles as "a save is loaded"; the
-  // struct is all-zero until then (same check room_presence.cpp makes).
+  // The struct is all-zero until a save (or new game) loads, and hp_max is
+  // never a real 0 in play. It isn't cleared on Quit to Title, though, only
+  // when the game starts again, so the game state has to be checked too.
   const uint8_t* stats = p + kStatsOffset;
-  if (BE32(stats + kStatHpMax) <= 0) {
+  if (BE32(stats + kStatHpMax) <= 0 ||
+      !GameRunning(rex::system::kernel_state()->memory()->virtual_membase())) {
     return false;
   }
   out.loaded = true;

@@ -1,7 +1,9 @@
 // Randomizer overlay (default F6): pick a preset and options, enter a seed,
 // and randomize the running game with the vendored SOTN_XB_RANDO core (see
 // src/rando/rando.h), applied in memory by src/rando_runtime.h. Only from the
-// title screen or main menu; while a save is loaded the controls are locked.
+// title screen or main menu: once a game is running (file select on), the
+// overlay is a read-only tracker of owned relics and items, with the active
+// seed's spoiler log behind a toggle.
 //
 // Randomizer by MottZilla: https://github.com/MottZilla/SOTN_XB_RANDO
 #pragma once

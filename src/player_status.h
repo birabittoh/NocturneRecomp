@@ -9,8 +9,8 @@
 // file's constants -- keep the two in sync.
 //
 // Events (ModRegistry::Publish, fired from a per-guest-frame tick):
-//   player.save_loaded    in-game latch edge 0 -> 1; no relic/item events follow
-//   player.save_unloaded  in-game latch edge 1 -> 0
+//   player.save_loaded    Snapshot::loaded edge 0 -> 1; no relic/item events follow
+//   player.save_unloaded  Snapshot::loaded edge 1 -> 0 (Quit to Title)
 //   player.relic_changed  u64 = relic index, bytes = {old flags, new flags}
 //   player.item_changed   u64 = item id,     bytes = {old count, new count}
 #pragma once
@@ -79,7 +79,9 @@ struct Stats {
 
 // One consistent copy of the struct, read in a single pass.
 struct Snapshot {
-  bool loaded = false;  // false at the title screen / before any save is loaded
+  // True from the moment a save or new game has populated the struct until
+  // Quit to Title. False in the front end and at file select.
+  bool loaded = false;
   std::array<uint8_t, kRelicCount> relics{};
   std::array<uint8_t, 8> unknown_1e{};  // +0x1E, XB-only, purpose unknown
   std::array<uint8_t, kHandItemCount> hand_count{};

@@ -4,6 +4,7 @@
 #include <cinttypes>
 #include <cstdio>
 #include <string>
+#include <string_view>
 
 #include <imgui.h>
 
@@ -11,6 +12,7 @@
 #include <rex/ui/imgui_drawer.h>
 #include <rex/ui/keybinds.h>
 
+#include "player_status.h"
 #include "rando/rando.h"
 #include "rando_runtime.h"
 
@@ -20,6 +22,44 @@ namespace {
 
 constexpr const char* kBaseXexName = "default.xex";
 constexpr const char* kWindowTitle = "Randomizer##rando";
+
+// Items the randomizer can place that gate progression, shown next to the
+// relics: Holy Glasses (final boss), Gold and Silver Ring (Clock Tower
+// door), Spike Breaker (Catacombs spikes).
+constexpr const char* kKeyItemNames[] = {"Holy Glasses", "Gold Ring", "Silver Ring",
+                                         "Spike Breaker"};
+
+player::ItemId FindItem(std::string_view name) {
+  for (int id = 0; id < player::kItemIdCount; ++id) {
+    player::ItemId item{static_cast<uint16_t>(id)};
+    if (item.Name() == name) {
+      return item;
+    }
+  }
+  return {};
+}
+
+// Owned: in the inventory or worn.
+bool Owns(const player::Snapshot& snap, player::ItemId item) {
+  if (snap.ItemCount(item) > 0) {
+    return true;
+  }
+  for (int s = 0; s < player::kSlotCount; ++s) {
+    if (snap.Equipped(static_cast<player::Slot>(s)).value == item.value) {
+      return true;
+    }
+  }
+  return false;
+}
+
+// Lit when owned, dimmed otherwise.
+void OwnedLabel(std::string_view name, bool owned) {
+  if (owned) {
+    ImGui::Text("%.*s", static_cast<int>(name.size()), name.data());
+  } else {
+    ImGui::TextDisabled("%.*s", static_cast<int>(name.size()), name.data());
+  }
+}
 
 }  // namespace
 
@@ -61,17 +101,16 @@ class RandoMenuDialog : public rex::ui::ImGuiDialog {
         "title screen or main menu, then start a new game.");
     ImGui::Separator();
 
-    DrawActiveRando();
-    ImGui::Separator();
-
     const auto runtime = GetRandoRuntime().state();
-    if (GetRandoRuntime().SaveLoaded()) {
-      // The world a loaded save plays in can't change under it.
-      ImGui::TextWrapped(
-          "A save is loaded. Return to the title screen to randomize or go back to vanilla.");
+    if (!GetRandoRuntime().InFrontEnd()) {
+      // The world a running game plays in can't change under it.
+      DrawTracker(runtime);
       ImGui::End();
       return;
     }
+
+    DrawActiveRando(running, runtime);
+    ImGui::Separator();
 
     ImGui::BeginDisabled(running || runtime.request_pending);
 
@@ -156,20 +195,21 @@ class RandoMenuDialog : public rex::ui::ImGuiDialog {
       ImGui::TextWrapped("%s", runtime.unsupported_reason.c_str());
     }
 
-    ImGui::BeginDisabled(running || runtime.request_pending || !runtime.supported);
-    if (ImGui::Button("Randomize!")) {
-      CopySeedToOptions();
-      SaveOptions();
-      gen.Start(game_root_ / kBaseXexName, user_root_ / "spoilers.txt", options_);
-      applied_ = false;
+    // These options would give the seed that is already active: nothing to
+    // do until something changes.
+    const bool already_active = runtime.active && runtime.active->options == options_;
+    if (already_active && !running) {
+      ImGui::TextDisabled("This seed is active. Change the seed or an option to randomize again.");
+    } else {
+      ImGui::BeginDisabled(running || runtime.request_pending || !runtime.supported);
+      if (ImGui::Button("Randomize!")) {
+        CopySeedToOptions();
+        SaveOptions();
+        gen.Start(game_root_ / kBaseXexName, user_root_ / "spoilers.txt", options_);
+        applied_ = false;
+      }
+      ImGui::EndDisabled();
     }
-    ImGui::SameLine();
-    ImGui::BeginDisabled(!runtime.active);
-    if (ImGui::Button("Return to vanilla")) {
-      GetRandoRuntime().RequestRevert();
-    }
-    ImGui::EndDisabled();
-    ImGui::EndDisabled();
 
     if (running) {
       ImGui::SameLine();
@@ -202,32 +242,121 @@ class RandoMenuDialog : public rex::ui::ImGuiDialog {
     }
   }
 
-  void DrawActiveRando() {
-    const auto runtime = GetRandoRuntime().state();
+  // Status line: the active seed (with the way back to vanilla, kept away
+  // from Randomize) or the vanilla game.
+  void DrawActiveRando(bool running, const RandoRuntime::State& runtime) {
     if (!runtime.active) {
       ImGui::TextUnformatted("Active: the vanilla game.");
     } else {
-      const auto& seed = *runtime.active;
-      const auto& presets = rando::Presets();
-      ImGui::TextWrapped("Active seed: %s", seed.options.seed.c_str());
-      ImGui::Text("Preset: %s    Complexity: %d    Hash: %016" PRIx64,
-                  presets[std::min<size_t>(seed.options.preset, presets.size() - 1)].name,
-                  seed.complexity, seed.patches.Hash());
-      if (runtime.inactive_code_patches) {
-        ImGui::TextWrapped(
-            "%zu code patch(es) of this seed couldn't be activated, so parts of the preset may "
-            "misbehave. See the log.",
-            runtime.inactive_code_patches);
+      DrawSeedHeader(*runtime.active, runtime);
+      ImGui::BeginDisabled(running || runtime.request_pending);
+      if (ImGui::Button("Return to vanilla")) {
+        GetRandoRuntime().RequestRevert();
       }
+      ImGui::EndDisabled();
       if (ImGui::CollapsingHeader("Spoiler log")) {
-        ImGui::BeginChild("##spoilers", ImVec2(0, 200), ImGuiChildFlags_Borders);
-        ImGui::TextUnformatted(seed.spoilers.c_str(), seed.spoilers.c_str() + seed.spoilers.size());
-        ImGui::EndChild();
+        DrawSpoilers(*runtime.active);
       }
     }
     if (!runtime.message.empty()) {
       ImGui::TextWrapped("%s", runtime.message.c_str());
     }
+  }
+
+  void DrawSeedHeader(const rando::Result& seed, const RandoRuntime::State& runtime) {
+    const auto& presets = rando::Presets();
+    ImGui::TextWrapped("Active seed: %s", seed.options.seed.c_str());
+    ImGui::Text("Preset: %s    Complexity: %d    Hash: %016" PRIx64,
+                presets[std::min<size_t>(seed.options.preset, presets.size() - 1)].name,
+                seed.complexity, seed.patches.Hash());
+    if (runtime.inactive_code_patches) {
+      ImGui::TextWrapped(
+          "%zu code patch(es) of this seed couldn't be activated, so parts of the preset may "
+          "misbehave. See the log.",
+          runtime.inactive_code_patches);
+    }
+  }
+
+  void DrawSpoilers(const rando::Result& seed) {
+    ImGui::BeginChild("##spoilers", ImVec2(0, 200), ImGuiChildFlags_Borders);
+    ImGui::TextUnformatted(seed.spoilers.c_str(), seed.spoilers.c_str() + seed.spoilers.size());
+    ImGui::EndChild();
+  }
+
+  // Read-only view while a game runs, for randomized and vanilla games alike.
+  void DrawTracker(const RandoRuntime::State& runtime) {
+    if (runtime.active) {
+      DrawSeedHeader(*runtime.active, runtime);
+    } else {
+      ImGui::TextUnformatted("Playing the vanilla game.");
+    }
+    if (!runtime.message.empty()) {
+      ImGui::TextWrapped("%s", runtime.message.c_str());
+    }
+    ImGui::TextDisabled("Quit to the title screen to change the seed.");
+    ImGui::Separator();
+
+    player::Snapshot snap;
+    if (!player::GetPlayerStatus().Read(snap)) {
+      ImGui::TextUnformatted("Waiting for a save to load...");
+      return;
+    }
+
+    ImGui::SeparatorText("Relics");
+    const int vlad_first = static_cast<int>(player::Relic::HeartOfVlad);
+    DrawRelicGrid(snap, 0, vlad_first);
+    ImGui::SeparatorText("Vlad relics");
+    DrawRelicGrid(snap, vlad_first, player::kRelicCount);
+
+    ImGui::SeparatorText("Key items");
+    if (ImGui::BeginTable("##key_items", 2)) {
+      for (const char* name : kKeyItemNames) {
+        ImGui::TableNextColumn();
+        OwnedLabel(name, Owns(snap, FindItem(name)));
+      }
+      ImGui::EndTable();
+    }
+
+    if (runtime.active) {
+      ImGui::Spacing();
+      ImGui::Checkbox("Reveal spoilers", &reveal_spoilers_);
+      if (reveal_spoilers_) {
+        DrawSpoilers(*runtime.active);
+      }
+    }
+
+    int owned = 0;
+    for (int id = 0; id < player::kHandItemCount + player::kBodyItemCount; ++id) {
+      owned += snap.ItemCount(player::ItemId{static_cast<uint16_t>(id)}) > 0;
+    }
+    char label[64];
+    std::snprintf(label, sizeof(label), "Inventory (%d)###inventory", owned);
+    if (ImGui::CollapsingHeader(label)) {
+      ImGui::BeginChild("##inventory", ImVec2(0, 0), ImGuiChildFlags_Borders);
+      for (int id = 0; id < player::kHandItemCount + player::kBodyItemCount; ++id) {
+        player::ItemId item{static_cast<uint16_t>(id)};
+        if (const int count = snap.ItemCount(item)) {
+          ImGui::Text("%-20.*s x%d", static_cast<int>(item.Name().size()), item.Name().data(),
+                      count);
+        }
+      }
+      ImGui::EndChild();
+    }
+  }
+
+  void DrawRelicGrid(const player::Snapshot& snap, int first, int last) {
+    ImGui::PushID(first);
+    if (!ImGui::BeginTable("##relics", 3)) {
+      ImGui::PopID();
+      return;
+    }
+    for (int i = first; i < last; ++i) {
+      auto relic = static_cast<player::Relic>(i);
+      ImGui::TableNextColumn();
+      OwnedLabel(player::RelicName(relic), snap.RelicFlags(relic) & player::kRelicFound);
+    }
+    ImGui::EndTable();
+    ImGui::PopID();
   }
 
   void SelectPreset(int index) {
@@ -266,6 +395,7 @@ class RandoMenuDialog : public rex::ui::ImGuiDialog {
   char seed_buf_[256] = {};
   bool visible_ = false;
   bool applied_ = false;
+  bool reveal_spoilers_ = false;  // tracker; off every session
 };
 
 RandoMenu::RandoMenu() = default;

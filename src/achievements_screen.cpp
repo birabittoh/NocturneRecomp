@@ -23,7 +23,7 @@
 #include <vector>
 
 #include "achievement_icons.h"
-#include "in_game_latch.h"
+#include "game_state.h"
 #include "native_options.h"
 #include "settings.h"
 
@@ -1005,17 +1005,17 @@ bool AchievementsScreen::OpenFromGuest(PPCContext& ctx, uint8_t* base, uint32_t 
   }
   g_return_page = current_page;
 
-  // With no save loaded, CScreenAchievement::Activate clears the UI manager's
+  // From the front end, CScreenAchievement::Activate clears the UI manager's
   // settled flag (mgr+332) exactly as the stretch screen's does, which trips
   // the pre-game watchdog into yanking us straight back out. native_options
   // owns the suppression for that -- see EnterPregameScreen.
-  const bool save_loaded = SaveLoaded(base);
-  if (!save_loaded) {
+  const bool game_running = GameRunning(base);
+  if (!game_running) {
     EnterPregameScreen(kAchievementsPage);
   }
 
-  REXLOG_INFO("[achievements_screen] opening page {} from page {} (save loaded: {})",
-              kAchievementsPage, current_page, save_loaded);
+  REXLOG_INFO("[achievements_screen] opening page {} from page {} (game running: {})",
+              kAchievementsPage, current_page, game_running);
   PostPageSwitch(ctx, base, kBlankAchievementArg, kAchievementsPage, user_index);
   return true;
 }

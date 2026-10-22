@@ -41,6 +41,8 @@ struct Options {
   bool candles = true;
   bool map_tracker = false;
   bool force_no_complexity = false;
+
+  bool operator==(const Options&) const = default;
 };
 
 struct Preset {

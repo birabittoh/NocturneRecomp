@@ -90,8 +90,8 @@
 #include <string>
 #include <vector>
 
+#include "game_state.h"
 #include "graphics_settings.h"
-#include "in_game_latch.h"
 #include "settings.h"
 
 #include <rex/cvar.h>
@@ -336,8 +336,8 @@ constexpr uint32_t kWidgetXOffset = 4;
 constexpr uint32_t kWidgetYOffset = 8;
 constexpr uint32_t kArrowYBias = 2;
 
-// The app object and its "a save is loaded" latch (kAppObjectPtrAddr,
-// InGameLatchAddress) live in in_game_latch.h. See the block comment above
+// The app object and its menu latch (kAppObjectPtrAddr, InGameLatchAddress)
+// live in game_state.h. See the block comment above
 // kListSetupFnAddr for how the TU value was re-derived.
 
 // The UI manager, again a pointer stored at this address.

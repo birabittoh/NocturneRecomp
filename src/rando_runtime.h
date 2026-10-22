@@ -29,10 +29,16 @@
 //     host page protection, so writes there go through a protection toggle.
 //
 // Applying and reverting happen on the guest thread between frames (the mod
-// registry tick) and only while no save is loaded: the overlay posts a
-// request, the tick performs or rejects it. The active seed is saved in the
-// user data root and applied again at boot, before guest code runs, so a
-// randomized save keeps its world across launches.
+// registry tick) and only at the title / main menu: the overlay posts a
+// request, the tick performs or rejects it. The chosen seed (what New Game
+// gets) is saved in the user data root and applied again at boot, before
+// guest code runs.
+//
+// Each save slot also remembers the world it was written in
+// (user_root/rando_slots/<slot>.txt). Loading a save applies that world on
+// the guest thread just before the game unpacks the save, whatever seed is
+// chosen for New Game; back at the title screen the New Game seed returns.
+// Saves with no record (made before this existed) load as vanilla.
 #pragma once
 
 #include <cstddef>
@@ -41,6 +47,7 @@
 #include <memory>
 #include <mutex>
 #include <string>
+#include <vector>
 
 #include "rando/rando.h"
 
@@ -57,16 +64,27 @@ class RandoRuntime {
   void Bind(rex::Runtime* runtime, const std::filesystem::path& game_data_root,
             const std::filesystem::path& user_data_root);
 
-  // Overlay requests, performed by the next guest tick. Rejected while a
-  // save is loaded.
+  // Overlay requests, performed by the next guest tick. Rejected unless the
+  // game is at the title / main menu.
   void RequestApply(std::shared_ptr<const rando::Result> seed);
   void RequestRevert();
+
+  // Save-slot binding, from the guest hooks at the bottom of the .cpp (guest
+  // thread). A save is bound to the world it was written in; loading it
+  // brings that world back, and the title screen restores the New Game one.
+  void OnSaveRead(const std::string& slot);
+  void OnSaveLoading();
+  void OnSaveWritten(const std::string& slot);
+  void OnSaveDeleted(const std::string& slot);
 
   struct State {
     bool supported = false;
     std::string unsupported_reason;
     bool request_pending = false;
-    std::shared_ptr<const rando::Result> active;  // null: vanilla
+    std::shared_ptr<const rando::Result> active;  // in guest memory now; null: vanilla
+    // What New Game gets (the overlay's choice); null: vanilla. Differs
+    // from `active` only while a save bound to another world is loaded.
+    std::shared_ptr<const rando::Result> new_game;
     // Patched functions the interpreter couldn't take over; those changes
     // are inert.
     size_t inactive_code_patches = 0;
@@ -75,20 +93,39 @@ class RandoRuntime {
   };
   State state() const;
 
-  // True while the game has a save loaded; seeds can't change then. Safe to
-  // call from any thread once bound.
-  bool SaveLoaded() const;
+  // True at the title / main menu, the only place seeds can change: from
+  // New Game on (file select included) the game is running and may already
+  // have read the data a seed patches. Safe to call from any thread once
+  // bound.
+  bool InFrontEnd() const;
 
  private:
   void Tick();
+  // Callers hold apply_mutex_: the tick and the save hooks can run on
+  // different threads.
   bool Apply(std::shared_ptr<const rando::Result> seed, std::string* error);
   void Revert();
-  void SaveActive() const;
+  bool ApplyWorld(std::shared_ptr<const rando::Result> seed, std::string* error);
+
+  // Seed files: options plus "hash=", or "vanilla=1". Loading regenerates
+  // the seed (cached) and refuses it if the hash no longer matches.
+  std::shared_ptr<const rando::Result> LoadSeedFile(const std::filesystem::path& path,
+                                                    std::string* error);
+  void WriteSeedFile(const std::filesystem::path& path,
+                     const std::shared_ptr<const rando::Result>& seed) const;
+  static bool IsVanillaFile(const std::filesystem::path& path);
+  std::filesystem::path SlotPath(const std::string& slot) const;
 
   rex::Runtime* runtime_ = nullptr;
   std::filesystem::path base_xex_;
   std::filesystem::path active_path_;
+  std::filesystem::path slots_dir_;
   std::shared_ptr<const rando::BaseXex> base_;
+
+  std::mutex apply_mutex_;
+  std::vector<std::shared_ptr<const rando::Result>> seed_cache_;  // under apply_mutex_
+  std::string last_read_slot_;  // guest thread
+  bool was_front_end_ = false;  // tick
 
   mutable std::mutex mutex_;
   State state_;
