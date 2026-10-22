@@ -4,11 +4,14 @@
 //
 // Every draw this title makes goes through BeginVertices: the vertices are
 // written straight into the command buffer and the draw packet is emitted by
-// Begin itself, so the host consumes a draw lazily, at the next hooked D3D
-// entry, by which time the guest has finished filling the block (see
-// FlushInline in native_renderer_d3d.cpp). Everything a draw needs is read back
-// out of the device object's register shadows at that point: the bound shaders
-// and vertex declaration, the constant banks and the render state.
+// Begin itself. So the draw is recorded in the Begin hook, with everything it
+// needs read back out of the device object's register shadows there (the bound
+// shaders and vertex declaration, the constant banks and the render state),
+// and only its vertices are copied later, at the next hooked D3D entry, by
+// which time the guest has finished filling the block (see FlushInline in
+// native_renderer_d3d.cpp). Waiting for that entry to read the state too would
+// see whatever the guest set up for its next draw in between: render state
+// setters are not hooked.
 //
 // The guest draws in 1280x720 pixels into a colour target the size of the window's
 // letterboxed view of it. A Resolve copies it into
@@ -45,10 +48,21 @@ struct GuestInlineDraw {
 void GuestTargetExtent(uint32_t* width, uint32_t* height);
 void GuestResizeTarget(uint32_t width, uint32_t height);
 
-// Record one guest draw into the frame. Must be called after the guest has
-// written the vertices and before anything changes the device state the draw
-// was issued under. `base` is guest memory.
-void GuestDrawInline(uint8_t* base, const GuestInlineDraw& draw);
+// Where a recorded draw's vertices go, and where they come from: `bytes` of
+// guest memory at `source`, to be byte swapped into `destination`. Empty when
+// there is nothing left to copy.
+struct GuestVertexFill {
+  uint8_t* destination = nullptr;
+  uint32_t source = 0;
+  uint32_t bytes = 0;
+};
+
+// Record one guest draw into the frame, under the device state as it is now.
+// `base` is guest memory. Host vertices are copied here; guest ones are not
+// written yet, so the result says where they go, for GuestFillVertices once
+// they are. The copy has to happen before the frame is submitted.
+GuestVertexFill GuestDrawInline(uint8_t* base, const GuestInlineDraw& draw);
+void GuestFillVertices(uint8_t* base, const GuestVertexFill& fill);
 
 // The guest's tessellated quad draw (D3DDevice::DrawVerticesTessellated): the
 // four control points of stride 32 at guest address `control_points`, drawn

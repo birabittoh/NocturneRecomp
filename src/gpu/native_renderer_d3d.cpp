@@ -185,15 +185,19 @@ REX_HOOK_RAW(D3DDevice__DrawVerticesTessellated) {
   }
 }
 
-bool g_inline_pending = false;
+nocturne::GuestVertexFill g_inline_fill;
 
 // The game never calls EndVertices (the draw packet is emitted by BeginVertices
-// itself), so a block is consumed at the next hooked D3D entry, by which time
-// the guest has finished filling it.
+// itself), so a block's vertices are copied at the next hooked D3D entry, by
+// which time the guest has finished filling it. The draw itself is recorded in
+// the Begin hook (RecordInline): render state setters are not hooked, so by
+// that next entry the device may already hold the state of the next draw.
 void FlushInline(uint8_t* base) {
-  if (!g_inline_pending)
-    return;
-  g_inline_pending = false;
+  nocturne::GuestFillVertices(base, g_inline_fill);
+  g_inline_fill = {};
+}
+
+void RecordInline(uint8_t* base) {
   {
     const uint32_t vs = U32(base, g_inline.device + 0x3080), ps = U32(base, g_inline.device + 0x307c);
     static uint32_t last_vs = 0, last_ps = 0;
@@ -207,8 +211,8 @@ void FlushInline(uint8_t* base) {
   }
   if (g_stats.frame >= 300 && g_stats.frame < 302)
     TraceDraw(base, g_inline);
-  nocturne::GuestDrawInline(base, {g_inline.device, g_inline.prim, g_inline.count, g_inline.stride,
-                                   g_inline.data});
+  g_inline_fill = nocturne::GuestDrawInline(
+      base, {g_inline.device, g_inline.prim, g_inline.count, g_inline.stride, g_inline.data});
 }
 
 REX_HOOK_RAW(D3DDevice__BeginVertices) {
@@ -217,7 +221,7 @@ REX_HOOK_RAW(D3DDevice__BeginVertices) {
   const uint32_t dev = ctx.r3.u32, prim = ctx.r4.u32, count = ctx.r5.u32, stride = ctx.r6.u32;
   __imp__D3DDevice__BeginVertices(ctx, base);
   g_inline = {dev, prim, count, stride, ctx.r3.u32};
-  g_inline_pending = true;
+  RecordInline(base);
 }
 
 REX_HOOK_RAW(D3DDevice__EndVertices) {

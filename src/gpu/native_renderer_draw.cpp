@@ -1009,12 +1009,12 @@ void RecordDump(RenderCommandList* commands, RenderDevice* device, uint64_t fram
 
 }  // namespace
 
-void GuestDrawInline(uint8_t* base, const GuestInlineDraw& draw) {
+GuestVertexFill GuestDrawInline(uint8_t* base, const GuestInlineDraw& draw) {
   if (draw.count == 0 || draw.stride == 0 || (draw.stride & 3u) != 0)
-    return;
+    return {};
   RenderCommandList* commands = BeginRecording();
   if (commands == nullptr)
-    return;
+    return {};
   RenderDevice* device = PlumeDevice();
 
   const uint32_t dev = draw.device;
@@ -1025,17 +1025,17 @@ void GuestDrawInline(uint8_t* base, const GuestInlineDraw& draw) {
   if (vertex_slot < 0 || pixel_slot < 0) {
     Drop(kDropUnresolvedShader, Load32(base, dev + (vertex_slot < 0 ? kBoundVertexShader
                                                                      : kBoundPixelShader)));
-    return;
+    return {};
   }
   VertexDeclaration decl;
   if (!ReadDeclaration(base, Load32(base, dev + kBoundDeclaration), decl)) {
     Drop(kDropNoDeclaration, Load32(base, dev + kBoundDeclaration));
-    return;
+    return {};
   }
   const RenderPrimitiveTopology topology = MapTopology(draw.primitive);
   if (topology == RenderPrimitiveTopology::UNKNOWN) {
     Drop(kDropTopology, draw.primitive);
-    return;
+    return {};
   }
 
   PipelineKey key;
@@ -1050,7 +1050,7 @@ void GuestDrawInline(uint8_t* base, const GuestInlineDraw& draw) {
   std::copy(decl.elements, decl.elements + decl.count, key.elements);
   const GuestPipeline* pipeline = AcquirePipeline(device, key, decl);
   if (pipeline == nullptr)
-    return;
+    return {};
 
   // The vertices, out of the command buffer. Every element is made of 32 bit
   // units (MapVertexFormat refuses anything else), so the block swaps as
@@ -1059,12 +1059,13 @@ void GuestDrawInline(uint8_t* base, const GuestInlineDraw& draw) {
   const Allocation vertices = ArenaAllocate(device, vertex_bytes);
   if (!vertices) {
     Drop(kDropArena, vertex_bytes);
-    return;
+    return {};
   }
+  GuestVertexFill fill;
   if (draw.host_vertices != nullptr)
     std::memcpy(vertices.cpu, draw.host_vertices, vertex_bytes);
   else
-    CopySwapped(vertices.cpu, base, draw.data, vertex_bytes);
+    fill = {vertices.cpu, draw.data, vertex_bytes};
 
   // Quads and fans, as triangle lists.
   uint32_t index_count = 0;
@@ -1073,11 +1074,11 @@ void GuestDrawInline(uint8_t* base, const GuestInlineDraw& draw) {
     index_count = draw.primitive == kPrimQuadList ? draw.count / 4 * 6
                                                   : (draw.count >= 3 ? (draw.count - 2) * 3 : 0);
     if (index_count == 0)
-      return;
+      return {};
     indices = ArenaAllocate(device, uint64_t(index_count) * 4);
     if (!indices) {
       Drop(kDropArena, index_count);
-      return;
+      return {};
     }
     auto* out = reinterpret_cast<uint32_t*>(indices.cpu);
     if (draw.primitive == kPrimQuadList) {
@@ -1106,7 +1107,7 @@ void GuestDrawInline(uint8_t* base, const GuestInlineDraw& draw) {
   const Allocation screen = ArenaAllocate(device, 16);
   if (!vertex_floats || !pixel_floats || !bools || !draw_state || !screen) {
     Drop(kDropArena, 0);
-    return;
+    return {};
   }
   CopySwapped(bools.cpu, base, dev + kBoolShadow, 32);
   CopySwapped(bools.cpu + 32, base, dev + kLoopShadow, 128);
@@ -1115,7 +1116,7 @@ void GuestDrawInline(uint8_t* base, const GuestInlineDraw& draw) {
       BindTextures(commands, device, base, dev, pipeline->pixel->texture_mask, swizzles);
   if (textures == nullptr) {
     Drop(kDropTextures, 0);
-    return;
+    return {};
   }
   BuildDrawState(base, dev, swizzles, reinterpret_cast<uint32_t*>(draw_state.cpu));
   ScreenTransform(base, dev, reinterpret_cast<float*>(screen.cpu));
@@ -1142,6 +1143,12 @@ void GuestDrawInline(uint8_t* base, const GuestInlineDraw& draw) {
   } else {
     commands->drawInstanced(draw.count, 1, 0, 0);
   }
+  return fill;
+}
+
+void GuestFillVertices(uint8_t* base, const GuestVertexFill& fill) {
+  if (fill.destination != nullptr)
+    CopySwapped(fill.destination, base, fill.source, fill.bytes);
 }
 
 void GuestResolve(uint8_t* base, uint32_t device, uint32_t flags, uint32_t destination,
