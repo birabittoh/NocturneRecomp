@@ -32,6 +32,11 @@ struct GuestInlineDraw {
   uint32_t count = 0;
   uint32_t stride = 0;
   uint32_t data = 0;
+  // Vertices the host built, already in host dword order, in place of the guest
+  // block at `data`; and the pack slot of the vertex shader to run instead of
+  // the bound one (-1 for the bound one).
+  const uint8_t* host_vertices = nullptr;
+  int vertex_slot = -1;
 };
 
 // The size the guest's target is currently built at (0x0 until the first draw
@@ -44,6 +49,11 @@ void GuestResizeTarget(uint32_t width, uint32_t height);
 // written the vertices and before anything changes the device state the draw
 // was issued under. `base` is guest memory.
 void GuestDrawInline(uint8_t* base, const GuestInlineDraw& draw);
+
+// The guest's tessellated quad draw (D3DDevice::DrawVerticesTessellated): the
+// four control points of stride 32 at guest address `control_points`, drawn
+// with the bound pixel shader and state. See native_renderer_tessellation.cpp.
+void GuestDrawTessellatedQuad(uint8_t* base, uint32_t device, uint32_t control_points);
 
 // The guest's Resolve: (device, flags, ..., destination texture, ..., clear
 // colour pointer). Copies the render target into the image the next present

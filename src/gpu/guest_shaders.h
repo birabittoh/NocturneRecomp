@@ -34,6 +34,10 @@ bool LoadGuestShaders();
 int FindGuestVertexShader(const uint8_t* base, uint32_t object);
 int FindGuestPixelShader(const uint8_t* base, uint32_t object);
 
+// The pack slot of the vertex shader with this key (see gen-guest-shaders.py),
+// or -1.
+int FindGuestVertexShaderByKey(uint64_t key);
+
 const GuestShader& GuestVertexShader(uint32_t slot);
 const GuestShader& GuestPixelShader(uint32_t slot);
 

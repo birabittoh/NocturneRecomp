@@ -39,6 +39,7 @@ extern "C" REX_FUNC(__imp__D3DDevice__EndVertices);
 extern "C" REX_FUNC(__imp__D3DDevice__DrawVertices);
 extern "C" REX_FUNC(__imp__D3DDevice__DrawIndexedVertices);
 extern "C" REX_FUNC(__imp__D3DDevice__BeginVertices);
+extern "C" REX_FUNC(__imp__D3DDevice__DrawVerticesTessellated);
 extern "C" REX_FUNC(__imp__D3DDevice__Resolve);
 extern "C" REX_FUNC(__imp__D3DDevice__ClearF);
 extern "C" REX_FUNC(__imp__D3DDevice__SetRenderTarget);
@@ -165,6 +166,19 @@ void TraceDraw(uint8_t* base, const InlineBlock& b) {
   }
 }
 }  // namespace
+
+// The one patch draw (the smoke strip): stream 0 holds the four control
+// points, which the vertex buffer header locates (physical address at +0x18,
+// low bits flags). Consumed right after the guest's draw, before it unbinds the
+// stream.
+REX_HOOK_RAW(D3DDevice__DrawVerticesTessellated) {
+  FlushInline(base);
+  const uint32_t dev = ctx.r3.u32, count = ctx.r6.u32;
+  __imp__D3DDevice__DrawVerticesTessellated(ctx, base);
+  const uint32_t vb = U32(base, dev + 4 * 0xbe5);
+  if (vb && count == 4)
+    nocturne::GuestDrawTessellatedQuad(base, dev, 0xC0000000u | (U32(base, vb + 0x18) & 0x1FFFFFFCu));
+}
 
 bool g_inline_pending = false;
 

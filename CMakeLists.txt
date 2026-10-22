@@ -245,6 +245,7 @@ set(NOCTURNERECOMP_SOURCES
     src/gpu/native_renderer_draw.cpp
     src/gpu/native_renderer_overlay.cpp
     src/gpu/native_renderer_plume.cpp
+    src/gpu/native_renderer_tessellation.cpp
     src/gpu/native_renderer_texture.cpp
     ${NOCTURNE_FONTS_HEADER}
     ${NOCTURNE_GLYPHS_HEADER}

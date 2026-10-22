@@ -1018,7 +1018,9 @@ void GuestDrawInline(uint8_t* base, const GuestInlineDraw& draw) {
   RenderDevice* device = PlumeDevice();
 
   const uint32_t dev = draw.device;
-  const int vertex_slot = FindGuestVertexShader(base, Load32(base, dev + kBoundVertexShader));
+  const int vertex_slot = draw.vertex_slot >= 0
+                              ? draw.vertex_slot
+                              : FindGuestVertexShader(base, Load32(base, dev + kBoundVertexShader));
   const int pixel_slot = FindGuestPixelShader(base, Load32(base, dev + kBoundPixelShader));
   if (vertex_slot < 0 || pixel_slot < 0) {
     Drop(kDropUnresolvedShader, Load32(base, dev + (vertex_slot < 0 ? kBoundVertexShader
@@ -1059,7 +1061,10 @@ void GuestDrawInline(uint8_t* base, const GuestInlineDraw& draw) {
     Drop(kDropArena, vertex_bytes);
     return;
   }
-  CopySwapped(vertices.cpu, base, draw.data, vertex_bytes);
+  if (draw.host_vertices != nullptr)
+    std::memcpy(vertices.cpu, draw.host_vertices, vertex_bytes);
+  else
+    CopySwapped(vertices.cpu, base, draw.data, vertex_bytes);
 
   // Quads and fans, as triangle lists.
   uint32_t index_count = 0;

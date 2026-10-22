@@ -123,6 +123,8 @@ bool LoadGuestShaders() {
 int FindGuestVertexShader(const uint8_t* base, uint32_t object) { return Find(base, object, false); }
 int FindGuestPixelShader(const uint8_t* base, uint32_t object) { return Find(base, object, true); }
 
+int FindGuestVertexShaderByKey(uint64_t key) { return g_pack.FindSlot(false, key); }
+
 const GuestShader& GuestVertexShader(uint32_t slot) { return g_pack.Vertex(slot); }
 const GuestShader& GuestPixelShader(uint32_t slot) { return g_pack.Pixel(slot); }
 
