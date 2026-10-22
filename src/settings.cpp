@@ -416,6 +416,8 @@ class CuratedSettingsDialog : public rex::ui::ImGuiDialog {
         ImGui::SeparatorText(e.section);
       }
       ImGui::PushID(e.cvar);
+      const SeedUse use = seed ? e.seed_use(*seed) : SeedUse::kNone;
+      ImGui::BeginGroup();
       bool on = entry->getter() == "true";
       if (rex::ui::ToggleSwitch("##v", &on)) {
         rex::cvar::SetFlagByName(e.cvar, on ? "true" : "false", /*persist=*/true);
@@ -423,27 +425,32 @@ class CuratedSettingsDialog : public rex::ui::ImGuiDialog {
       }
       ImGui::SameLine();
       ImGui::TextUnformatted(e.label);
-      DrawEnhancementNotes(e.description, seed ? e.seed_use(*seed) : SeedUse::kNone, wrap_width);
+      DrawSeedMarker(use);
+      ImGui::EndGroup();
+      EnhancementTooltip(e.description, use);
       ImGui::PopID();
     }
 
     const rando::Enhancements current = CurrentEnhancements();
     ImGui::SeparatorText("Cosmetic");
     ImGui::PushID(kAlchemyVatsCvar);
+    const SeedUse vats_use = seed ? AlchemyVatsSeedUse(*seed) : SeedUse::kNone;
     bool shuffle_vats = current.alchemy_vats != 0;
+    ImGui::BeginGroup();
     if (rex::ui::ToggleSwitch("##v", &shuffle_vats)) {
       SetAlchemyVatsShuffle(shuffle_vats ? NewShuffleSeed() : 0);
     }
     ImGui::SameLine();
     ImGui::TextUnformatted("Shuffle Alchemy Lab Vats");
+    DrawSeedMarker(vats_use);
+    ImGui::EndGroup();
+    EnhancementTooltip("Shuffles the sub-weapons in the Alchemy Laboratory vats.", vats_use);
     if (shuffle_vats) {
       ImGui::SameLine();
       if (ImGui::SmallButton("Reshuffle")) {
         SetAlchemyVatsShuffle(NewShuffleSeed());
       }
     }
-    DrawEnhancementNotes("Shuffles the sub-weapons in the Alchemy Laboratory vats.",
-                         seed ? AlchemyVatsSeedUse(*seed) : SeedUse::kNone, wrap_width);
     ImGui::PopID();
 
     ImGui::Spacing();
@@ -462,10 +469,18 @@ class CuratedSettingsDialog : public rex::ui::ImGuiDialog {
     }
 
     ImGui::SeparatorText("Game mode");
+    const rando::GameMode mode = current.game_mode;
+    const SeedUse mode_use = seed ? GameModeSeedUse(*seed, mode) : SeedUse::kNone;
+    constexpr const char* kModeNote =
+        "A mode changes the game's rules: start a new game to play it.";
+    ImGui::BeginGroup();
     ImGui::TextUnformatted("Mode");
+    DrawSeedMarker(mode_use);
+    ImGui::EndGroup();
+    EnhancementTooltip(GameModeDescription(mode), mode_use,
+                       mode != rando::GameMode::kNormal ? kModeNote : nullptr);
     ImGui::SameLine(180.0f);
     ImGui::SetNextItemWidth(160.0f);
-    const rando::GameMode mode = current.game_mode;
     if (ImGui::BeginCombo("##game_mode", GameModeName(mode))) {
       for (int i = 0; i < static_cast<int>(rando::GameMode::kCount); ++i) {
         const auto m = static_cast<rando::GameMode>(i);
@@ -473,23 +488,48 @@ class CuratedSettingsDialog : public rex::ui::ImGuiDialog {
           rex::cvar::SetFlagByName(kGameModeCvar, std::to_string(i), /*persist=*/true);
           SaveEnhancements();
         }
+        EnhancementTooltip(GameModeDescription(m),
+                           seed ? GameModeSeedUse(*seed, m) : SeedUse::kNone,
+                           m != rando::GameMode::kNormal ? kModeNote : nullptr);
       }
       ImGui::EndCombo();
-    }
-    DrawEnhancementNotes(GameModeDescription(mode),
-                         seed ? GameModeSeedUse(*seed, mode) : SeedUse::kNone, wrap_width);
-    if (mode != rando::GameMode::kNormal) {
-      ImGui::PushTextWrapPos(ImGui::GetCursorPosX() + wrap_width);
-      ImGui::TextDisabled("A mode changes the game's rules: start a new game to play it.");
-      ImGui::PopTextWrapPos();
+    } else {
+      EnhancementTooltip(GameModeDescription(mode), mode_use,
+                         mode != rando::GameMode::kNormal ? kModeNote : nullptr);
     }
     ImGui::EndDisabled();
   }
 
-  // An enhancement's description and what the active seed does about it.
-  static void DrawEnhancementNotes(const char* description, SeedUse use, float wrap_width) {
-    ImGui::PushTextWrapPos(ImGui::GetCursorPosX() + wrap_width);
-    ImGui::TextDisabled("%s", description);
+  // A short note after a row's label on what the active seed does about it;
+  // EnhancementTooltip spells it out.
+  static void DrawSeedMarker(SeedUse use) {
+    if (use == SeedUse::kNone) {
+      return;
+    }
+    ImGui::SameLine();
+    if (use == SeedUse::kIncluded) {
+      ImGui::TextDisabled("(in seed)");
+    } else {
+      ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 0.85f, 0.2f, 1.0f));
+      ImGui::TextUnformatted("(not applied)");
+      ImGui::PopStyleColor();
+    }
+  }
+
+  // Hover help for the item just drawn (also while the tab is disabled): the
+  // description, `note` if any, and what the active seed does about it.
+  static void EnhancementTooltip(const char* description, SeedUse use,
+                                 const char* note = nullptr) {
+    if (!ImGui::IsItemHovered(ImGuiHoveredFlags_ForTooltip |
+                              ImGuiHoveredFlags_AllowWhenDisabled) ||
+        !ImGui::BeginTooltip()) {
+      return;
+    }
+    ImGui::PushTextWrapPos(ImGui::GetFontSize() * 28.0f);
+    ImGui::TextUnformatted(description);
+    if (note) {
+      ImGui::TextDisabled("%s", note);
+    }
     if (use == SeedUse::kIncluded) {
       ImGui::TextDisabled("Always on with the active randomizer seed.");
     } else if (use == SeedUse::kConflicts) {
@@ -498,6 +538,7 @@ class CuratedSettingsDialog : public rex::ui::ImGuiDialog {
       ImGui::PopStyleColor();
     }
     ImGui::PopTextWrapPos();
+    ImGui::EndTooltip();
   }
 
   void SetAlchemyVatsShuffle(uint32_t shuffle) {
