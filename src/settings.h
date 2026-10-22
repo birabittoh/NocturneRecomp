@@ -114,7 +114,7 @@ void RegisterNativeStringListener(rex::system::ModRegistry* registry);
 // lifetime.
 const char16_t* FindNativeStringTranslation(uint32_t language_id, std::string_view key);
 
-// Runs the GPU plugin / Vulkan device enumeration that CreateSettingsDialog's
+// Runs the Vulkan device enumeration that CreateSettingsDialog's
 // dropdowns need, once, and caches the results for every dialog instance
 // created afterwards. Both enumerations are expensive (EnumerateDevices
 // creates and tears down a whole VkInstance to query physical devices) --

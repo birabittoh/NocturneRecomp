@@ -121,6 +121,9 @@ def copy_runtime_libs(is_windows, sdk_dir, build_type):
     for name in os.listdir(src_dir):
         if not name.endswith(ext):
             continue
+        # GPU plugins are never loaded: the native renderer is the only one.
+        if name.startswith(("rexgpu-", "librexgpu-")):
+            continue
         stem = name[: -len(ext)]
         stem_suffix = "rd" if stem.endswith("rd") else "d" if stem.endswith("d") else ""
         if stem_suffix != variant_suffix:

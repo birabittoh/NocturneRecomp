@@ -100,7 +100,6 @@
 #include <rex/ppc/context.h>
 #include <rex/runtime.h>
 #include <rex/system/function_dispatcher.h>
-#include <rex/system/gpu_plugin.h>
 #include <rex/ui/window.h>
 #include <rex/ui/windowed_app_context.h>
 

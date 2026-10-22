@@ -21,7 +21,6 @@
 #include <rex/platform.h>
 #include <rex/platform/process.h>
 #include <rex/system/auto_updater.h>
-#include <rex/system/gpu_plugin.h>
 #include <rex/system/mod_registry.h>
 #include <rex/ui/imgui_widgets.h>
 #include <rex/ui/overlay/settings_overlay.h>
@@ -50,7 +49,6 @@ struct DefaultValue {
 constexpr std::array kGameDefaults = {
     DefaultValue{"user_name", "Player"},
     DefaultValue{"user_language", "1"},
-    DefaultValue{"gpu_plugin", ""},
     DefaultValue{"gpu_backend", "any"},
     DefaultValue{"fullscreen", "false"},
     DefaultValue{"resolution", "720p"},
@@ -103,9 +101,9 @@ constexpr std::array kGameDefaults = {
 // host_timer_resolution_ms is absent here on purpose: 5ms is right for
 // everyone, so it gets no curated row. It is listed in kAdvancedCvarNames
 // instead, where the generic widget exposes it as the raw millisecond value.
-constexpr std::array<const char*, 10> kBasicCvarNames = {
+constexpr std::array<const char*, 9> kBasicCvarNames = {
     "fullscreen",  "resolution",    "user_name",  "user_language", "gpu_backend",
-    "vulkan_device", "gpu_plugin", "audio_mute", "audio_volume", "graphics_style_enhanced"};
+    "vulkan_device", "audio_mute", "audio_volume", "graphics_style_enhanced"};
 
 // Named resolution presets offered by DrawResolutionRow, ordered ascending.
 constexpr std::array<const char*, 4> kResolutionPresetsAscending = {"720p", "1080p", "1440p", "4K"};
@@ -265,7 +263,6 @@ std::vector<std::string> BasicCvarNames() {
 // Populated once by PrewarmSettingsDialogCaches(); every CuratedSettingsDialog
 // instance reads from these rather than re-running the underlying (expensive)
 // enumeration itself.
-std::vector<std::string> g_gpu_plugin_names;
 #if REX_HAS_VULKAN
 std::vector<rex::ui::vulkan::DeviceInfo> g_vulkan_devices;
 #endif
@@ -281,7 +278,6 @@ class CuratedSettingsDialog : public rex::ui::ImGuiDialog {
         user_settings_path_(std::move(user_settings_path)),
         app_config_path_(std::move(app_config_path)),
         input_system_(input_system) {
-    gpu_plugin_names_ = g_gpu_plugin_names;
 #if REX_HAS_VULKAN
     vulkan_devices_ = g_vulkan_devices;
 #endif
@@ -319,23 +315,17 @@ class CuratedSettingsDialog : public rex::ui::ImGuiDialog {
     DrawAudioVolumeRow();
     DrawUserNameRow();
     DrawLanguageRow();
-    DrawGpuPluginRow();
-    // gpu_plugin is kRequiresRestart, so a change made just above hasn't
-    // taken effect yet -- this session is still running whatever renderer
-    // was active at launch. DrawGpuBackendRow queries the *selected*
-    // plugin's supported backends by actually loading its DLL
-    // (QuerySupportedBackends), which collides with an already-live native
-    // renderer's own Vulkan device/swapchain and crashes if run before the
-    // restart. Skip it while gpu_plugin has a pending restart.
-    bool gpu_plugin_restart_pending = IsPendingRestart("gpu_plugin");
-    if (!gpu_plugin_restart_pending && rex::cvar::GetFlagByName("gpu_plugin") != "") {
-      DrawGpuBackendRow();
-#if REX_HAS_VULKAN
-      if (rex::cvar::GetFlagByName("gpu_backend") == "vulkan") {
-        DrawVulkanDeviceRow();
-      }
+    // The native renderer reads both: gpu_backend picks D3D12 or Vulkan (only
+    // Windows has the choice) and vulkan_device the adapter when Vulkan is in use.
+#ifdef _WIN32
+    DrawGpuBackendRow();
 #endif
-    }
+#if REX_HAS_VULKAN
+#ifdef _WIN32
+    if (rex::cvar::GetFlagByName("gpu_backend") == "vulkan")
+#endif
+      DrawVulkanDeviceRow();
+#endif
 
     ImGui::Separator();
     if (ImGui::CollapsingHeader("Advanced")) {
@@ -642,28 +632,12 @@ class CuratedSettingsDialog : public rex::ui::ImGuiDialog {
     ImGui::PopID();
   }
 
-  // Backend support is a property of the *selected GPU plugin*, not a fixed
-  // set every plugin shares -- gpu_backend's own `.allowed(...)` list
-  // includes "any" and every backend rex_gpu_create could theoretically
-  // accept, regardless of what the active plugin actually implements. This
-  // queries rex::system::QuerySupportedBackends(gpu_plugin) instead, caching
-  // per plugin name since it loads/unloads the plugin DLL to ask; the row
-  // only renders when that plugin actually offers more than one backend --
-  // with zero or one, there's no meaningful choice to present.
   void DrawGpuBackendRow() {
     const auto* entry = rex::cvar::GetFlagInfo("gpu_backend");
-    const auto* plugin_entry = rex::cvar::GetFlagInfo("gpu_plugin");
-    if (!entry || !plugin_entry)
+    if (!entry)
       return;
 
-    std::string plugin_name = plugin_entry->getter();
-    if (plugin_name != gpu_backend_query_plugin_) {
-      gpu_backend_query_plugin_ = plugin_name;
-      gpu_backend_names_ = rex::system::QuerySupportedBackends(plugin_name);
-    }
-    if (gpu_backend_names_.size() < 2)
-      return;
-
+    static const std::array<std::string, 2> gpu_backend_names_ = {"d3d12", "vulkan"};
     auto label_for = [](const std::string& id) -> std::string {
       if (id == "d3d12")
         return "D3D12";
@@ -694,62 +668,6 @@ class CuratedSettingsDialog : public rex::ui::ImGuiDialog {
         }
         if (selected)
           ImGui::SetItemDefaultFocus();
-      }
-      ImGui::EndCombo();
-    }
-    ImGui::PopID();
-  }
-
-  // gpu_plugin names a rexgpu-<name>[postfix].dll staged next to the
-  // executable; unlike gpu_backend it has no fixed `.allowed(...)` list
-  // since the valid set depends on what's actually staged there, so this
-  // combo is populated from rex::system::EnumerateGpuPlugins() instead of
-  // going through the generic DrawCvarWidget (which would fall back to a
-  // plain text field for an unconstrained string cvar). "" is also a valid
-  // value here, distinct from anything EnumerateGpuPlugins() returns: it
-  // selects this game's own native renderer (see OnPreLaunchModule) instead
-  // of routing through a gpu_plugin DLL, so it gets its own leading entry.
-  void DrawGpuPluginRow() {
-    const auto* entry = rex::cvar::GetFlagInfo("gpu_plugin");
-    if (!entry)
-      return;
-
-    static constexpr const char* kNativeLabel = "experimental";
-    auto label_for = [&](const std::string& id) -> const char* {
-      return id.empty() ? kNativeLabel : id.c_str();
-    };
-
-    std::string current = entry->getter();
-
-    ImGui::TextUnformatted("GPU Plugin");
-    if (!entry->description.empty() && ImGui::IsItemHovered()) {
-      ImGui::SetTooltip("%s", entry->description.c_str());
-    }
-    ImGui::SameLine(180.0f);
-    ImGui::SetNextItemWidth(160.0f);
-    ImGui::PushID("gpu_plugin");
-    if (ImGui::BeginCombo("##v", label_for(current))) {
-      {
-        bool selected = current.empty();
-        ImGui::PushID(-1);
-        if (ImGui::Selectable(kNativeLabel, selected)) {
-          rex::cvar::SetFlagByName("gpu_plugin", "", /*persist=*/true);
-          SaveBasic();
-        }
-        if (selected)
-          ImGui::SetItemDefaultFocus();
-        ImGui::PopID();
-      }
-      for (int i = 0; i < static_cast<int>(gpu_plugin_names_.size()); ++i) {
-        bool selected = (current == gpu_plugin_names_[i]);
-        ImGui::PushID(i);
-        if (ImGui::Selectable(gpu_plugin_names_[i].c_str(), selected)) {
-          rex::cvar::SetFlagByName("gpu_plugin", gpu_plugin_names_[i], /*persist=*/true);
-          SaveBasic();
-        }
-        if (selected)
-          ImGui::SetItemDefaultFocus();
-        ImGui::PopID();
       }
       ImGui::EndCombo();
     }
@@ -840,9 +758,6 @@ class CuratedSettingsDialog : public rex::ui::ImGuiDialog {
   rex::ui::Window* window_;
   std::filesystem::path user_settings_path_;
   std::filesystem::path app_config_path_;
-  std::vector<std::string> gpu_plugin_names_;
-  std::string gpu_backend_query_plugin_;  // Cache key for gpu_backend_names_.
-  std::vector<std::string> gpu_backend_names_;
 #if REX_HAS_VULKAN
   std::vector<rex::ui::vulkan::DeviceInfo> vulkan_devices_;
 #endif
@@ -880,7 +795,6 @@ void ApplySettingDefaults() {
 }
 
 void PrewarmSettingsDialogCaches() {
-  g_gpu_plugin_names = rex::system::EnumerateGpuPlugins();
 #if REX_HAS_VULKAN
   g_vulkan_devices = rex::ui::vulkan::EnumerateDevices();
 #endif

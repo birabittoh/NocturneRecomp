@@ -92,12 +92,10 @@ class NocturnerecompApp : public rex::ReXApp {
     // One-shot toast shown top-left as the game starts
     config.startup_hint = "Press F4 to open settings.";
 
-    // Explicitly go headless (no xenos/graphics backend) rather than relying
-    // on gpu_plugin being unset -- this is the documented entry point for
-    // bringing your own renderer via OnCreateImmediateDrawer/OnPreLaunchModule.
-    // The gpu_plugin cvar can still be set by an older config file or the
-    // defaults in settings.cpp; clearing it here is what stops the SDK loading
-    // a Xenos plugin next to (and on top of) the native renderer.
+    // This project renders the guest itself (src/gpu), so the SDK stays
+    // headless. An older config file can still name a plugin; clearing it here,
+    // the last point before ReXApp decides whether to call LoadGpuPlugin, is
+    // what stops the SDK loading one on top of the native renderer.
     config.graphics = nullptr;
     config.gpu_plugin.clear();
   }
@@ -169,7 +167,7 @@ class NocturnerecompApp : public rex::ReXApp {
   }
 
   void OnPostSetup() override {
-    // Runs the settings overlay's GPU plugin / Vulkan device enumeration now,
+    // Runs the settings overlay's Vulkan device enumeration now,
     // rather than paying for it on the player's first F4 press (the SDK
     // destroys and recreates the overlay on every close/open, so without this
     // it re-ran on every single open). See PrewarmSettingsDialogCaches.
