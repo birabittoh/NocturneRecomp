@@ -390,7 +390,9 @@ command-processor thread, not the render/UI thread.
 relic index, bytes = old/new flags) and `player.item_changed` (u64 = item id,
 bytes = old/new count) from a per-frame tick. `rexmod/player_status.h` has the
 layout constants, relic/item enums and name tables, and a read-only
-`rexmod::player::View` over the struct. The layout and its confidence notes live
+`rexmod::player::View` over the struct (`View::Find(registry, memory)`). Its
+`Loaded()` also checks `"app.state"`, the app's current / game / front-end
+state pointers, because the struct keeps its values after Quit to Title. The layout and its confidence notes live
 in the base game's `src/player_status.cpp`; the header mirrors it. The base game's
 inventory inspector (I) shows all of this live.
 

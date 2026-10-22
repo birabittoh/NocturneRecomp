@@ -24,13 +24,16 @@
 
 namespace nocturne {
 
+inline constexpr uint32_t kAppObjectPtrVanilla = 0x82E4F808u;
+inline constexpr uint32_t kAppObjectPtrTu = 0x82E4F5C8u;
 #ifdef NOCTURNE_TU
-inline constexpr uint32_t kAppObjectPtrAddr = 0x82E4F5C8u;
+inline constexpr uint32_t kAppObjectPtrAddr = kAppObjectPtrTu;
 #else
-inline constexpr uint32_t kAppObjectPtrAddr = 0x82E4F808u;
+inline constexpr uint32_t kAppObjectPtrAddr = kAppObjectPtrVanilla;
 #endif
 // The state words follow the app object pointer (TU: same -0x240 delta, not
-// checked live).
+// checked live). Mods get them as the "app.state" registry address: three
+// BE pointers, current / game / front end (rexmod/player_status.h reads it).
 inline constexpr uint32_t kCurrentStatePtrAddr = kAppObjectPtrAddr + 4;
 inline constexpr uint32_t kGameStatePtrAddr = kAppObjectPtrAddr + 8;
 inline constexpr uint32_t kFrontEndStatePtrAddr = kAppObjectPtrAddr + 12;

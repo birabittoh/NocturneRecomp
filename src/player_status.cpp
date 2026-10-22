@@ -98,6 +98,8 @@ int Snapshot::ItemCount(ItemId id) const {
 void PlayerStatus::Bind(rex::Runtime* runtime) {
   runtime_ = runtime;
   runtime->mod_registry()->RegisterAddress("player.status", kStatusVanilla, kStatusTu);
+  runtime->mod_registry()->RegisterAddress("app.state", kAppObjectPtrVanilla + 4,
+                                           kAppObjectPtrTu + 4);
   runtime->mod_registry()->RegisterTick([this] { Tick(); });
 }
 
