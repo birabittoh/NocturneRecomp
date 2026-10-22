@@ -26,13 +26,13 @@ constexpr uint32_t kStatusVanilla = 0x83174940u;
 constexpr uint32_t kStatusTu = 0x83174700u;
 
 // Layout, offsets from kStatusAddress. "confirmed" = seen in code or live;
-// "strong"/"inferred" still want a live check in the inspector (player_inspector).
+// relics, item counts, order lists and equipment were verified live in the inspector (player_inspector).
 constexpr uint32_t kRelicsOffset = 0x000;       // u8[30], confirmed (wolf dash gates on relics[6] & 2)
 constexpr uint32_t kUnknown1EOffset = 0x01E;    // u8[8], XB-only, unknown
-constexpr uint32_t kHandCountOffset = 0x026;    // u8[169], strong
-constexpr uint32_t kBodyCountOffset = 0x0CF;    // u8[90], strong
-constexpr uint32_t kHandOrderOffset = 0x129;    // u8[169], strong
-constexpr uint32_t kBodyOrderOffset = 0x1D2;    // u8[90], strong
+constexpr uint32_t kHandCountOffset = 0x026;    // u8[169], confirmed live
+constexpr uint32_t kBodyCountOffset = 0x0CF;    // u8[90], confirmed live
+constexpr uint32_t kHandOrderOffset = 0x129;    // u8[169], confirmed live
+constexpr uint32_t kBodyOrderOffset = 0x1D2;    // u8[90], confirmed live
 constexpr uint32_t kStatsOffset = 0x23C;        // BE s32 fields, confirmed live (game_symbols)
 constexpr uint32_t kEquipRawOffset = 0x294;     // BE s32[10]; the 7 slots start at +0x29C (confirmed live)
 constexpr uint32_t kReadSpan = 0x2E0;           // through the play-time words (+0x2CC..+0x2DB)
