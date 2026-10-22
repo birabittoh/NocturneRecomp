@@ -91,6 +91,7 @@
 #include <vector>
 
 #include "graphics_settings.h"
+#include "in_game_latch.h"
 #include "settings.h"
 
 #include <rex/cvar.h>
@@ -335,18 +336,9 @@ constexpr uint32_t kWidgetXOffset = 4;
 constexpr uint32_t kWidgetYOffset = 8;
 constexpr uint32_t kArrowYBias = 2;
 
-// The app object (a pointer *stored at* this address, not the object itself)
-// and the "a save is loaded" latch inside it -- the flag the front-end
-// watchdog clears on its way out, and the one that decides which page the
-// settings screen exits to.
-// See the block comment above kListSetupFnAddr for how the TU values below
-// were re-derived.
-#ifdef NOCTURNE_TU
-constexpr uint32_t kAppObjectPtrAddr = 0x82E4F5C8u;
-#else
-constexpr uint32_t kAppObjectPtrAddr = 0x82E4F808u;
-#endif
-constexpr uint32_t kInGameLatchOffset = 29;
+// The app object and its "a save is loaded" latch (kAppObjectPtrAddr,
+// InGameLatchAddress) live in in_game_latch.h. See the block comment above
+// kListSetupFnAddr for how the TU value was re-derived.
 
 // The UI manager, again a pointer stored at this address.
 #ifdef NOCTURNE_TU
@@ -1188,12 +1180,6 @@ void Write16BE(uint8_t* base, uint32_t guest_address, uint16_t value) {
 uint8_t Read8(const uint8_t* base, uint32_t guest_address) { return base[guest_address]; }
 
 void Write8(uint8_t* base, uint32_t guest_address, uint8_t value) { base[guest_address] = value; }
-
-// Address of the "a save is loaded" latch, or 0 before the app object exists.
-uint32_t InGameLatchAddress(const uint8_t* base) {
-  const uint32_t app_object = Read32BE(base, kAppObjectPtrAddr);
-  return app_object ? app_object + kInGameLatchOffset : 0;
-}
 
 // Calls a guest function with a scratch register set, restoring the caller's
 // context afterwards -- same pattern graphics_settings.cpp uses to reuse the

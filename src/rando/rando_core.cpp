@@ -3,20 +3,40 @@
 // xb_rando.cpp #includes its own xb_candlesetup.h and xb_relic_locations.cpp,
 // so it is compiled as one translation unit here, unmodified.
 //
-// Its two hard-wired file paths are redirected by a fopen wrapper rather than
-// by editing the upstream source:
-//   * "spoilers.txt" (written to the working directory) goes to the path set
-//     with SetSpoilersPath.
+// The core patches a decrypted default.xex through stdio. Rather than editing
+// the upstream source, its stdio calls are redirected by macros to the
+// wrappers below:
+//   * the xex it opens (XB_Randomize's path argument) is kMemoryXexPath, a
+//     host buffer set with SetMemoryXex; seeks, reads and writes go there and
+//     nothing touches the disk;
+//   * "spoilers.txt" is captured into a string (TakeSpoilers).
+// Any other FILE* is forwarded to real stdio.
+//
+// rand()/srand() are redirected too, to a private copy of MSVC's generator
+// with MSVC's per-thread state. glibc's rand() differs from MSVC's (so the
+// same seed name gave different seeds per platform) and is shared by every
+// thread in the process. Upstream only seeds the relic thread's state,
+// which starts at 1 in a new thread just as it does here; the generator
+// thread's state is seeded from the seed number (SeedGeneratorRng), so a
+// whole run is reproducible.
+//
 // Its Win32 GUI hooks (LogMsg, DoMessages, ...) are provided by rando_host.cpp.
 //
 // Randomizer by MottZilla: https://github.com/MottZilla/SOTN_XB_RANDO
 
 #include "rando_core.h"
 
+// Everything xb_rando.cpp includes, ahead of the macros below, so the macros
+// only rewrite the core's own calls.
+#include <cstdarg>
+#include <cstdint>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
-#include <mutex>
+#include <ctime>
+#include <process.h>
 #include <string>
+#include <windows.h>
 
 #ifndef _WIN32
 #include "compat/itoa.h"
@@ -24,26 +44,147 @@
 
 namespace nocturne::rando::detail {
 namespace {
-std::mutex g_spoilers_mutex;
-std::string g_spoilers_path;
+
+struct MemoryFile {
+  std::vector<uint8_t>* data = nullptr;
+  size_t pos = 0;
+  size_t limit = 0;
+  bool out_of_range = false;
+};
+
+struct SpoilerFile {
+  std::string text;
+};
+
+MemoryFile g_xex;
+SpoilerFile g_spoilers;
+
+std::FILE* XexHandle() { return reinterpret_cast<std::FILE*>(&g_xex); }
+std::FILE* SpoilerHandle() { return reinterpret_cast<std::FILE*>(&g_spoilers); }
+
+thread_local uint32_t g_rand_state = 1;
+
 }  // namespace
 
-void SetSpoilersPath(const std::string& path) {
-  std::lock_guard lock(g_spoilers_mutex);
-  g_spoilers_path = path;
+void SetMemoryXex(std::vector<uint8_t>* data, size_t limit) {
+  g_xex = {};
+  g_xex.data = data;
+  // (No std::min: <windows.h> defines a min macro.)
+  g_xex.limit = !data ? 0 : limit < data->size() ? limit : data->size();
 }
 
+bool MemoryXexOutOfRange() { return g_xex.out_of_range; }
+
+std::string TakeSpoilers() { return std::move(g_spoilers.text); }
+
+void SeedGeneratorRng(uint32_t seed) { g_rand_state = seed; }
+
 std::FILE* OpenForRando(const char* path, const char* mode) {
+  if (std::strcmp(path, kMemoryXexPath) == 0) {
+    return g_xex.data ? XexHandle() : nullptr;
+  }
   if (std::strcmp(path, "spoilers.txt") == 0) {
-    std::lock_guard lock(g_spoilers_mutex);
-    if (!g_spoilers_path.empty()) {
-      return std::fopen(g_spoilers_path.c_str(), mode);
-    }
+    g_spoilers.text.clear();
+    return SpoilerHandle();
   }
   return std::fopen(path, mode);
 }
+
+int RandoFclose(std::FILE* f) {
+  if (f == XexHandle() || f == SpoilerHandle()) {
+    return 0;
+  }
+  return std::fclose(f);
+}
+
+int RandoFseek(std::FILE* f, long offset, int origin) {
+  if (f != XexHandle()) {
+    return std::fseek(f, offset, origin);
+  }
+  long base = origin == SEEK_CUR   ? static_cast<long>(g_xex.pos)
+              : origin == SEEK_END ? static_cast<long>(g_xex.limit)
+                                   : 0;
+  if (base + offset < 0) {
+    g_xex.out_of_range = true;
+    return -1;
+  }
+  g_xex.pos = static_cast<size_t>(base + offset);
+  return 0;
+}
+
+long RandoFtell(std::FILE* f) {
+  if (f != XexHandle()) {
+    return std::ftell(f);
+  }
+  return static_cast<long>(g_xex.pos);
+}
+
+int RandoFgetc(std::FILE* f) {
+  if (f != XexHandle()) {
+    return std::fgetc(f);
+  }
+  if (g_xex.pos >= g_xex.limit) {
+    g_xex.out_of_range = true;
+    return EOF;
+  }
+  return (*g_xex.data)[g_xex.pos++];
+}
+
+int RandoFputc(int c, std::FILE* f) {
+  if (f == SpoilerHandle()) {
+    g_spoilers.text.push_back(static_cast<char>(c));
+    return static_cast<unsigned char>(c);
+  }
+  if (f != XexHandle()) {
+    return std::fputc(c, f);
+  }
+  if (g_xex.pos >= g_xex.limit) {
+    g_xex.out_of_range = true;
+    return EOF;
+  }
+  (*g_xex.data)[g_xex.pos++] = static_cast<uint8_t>(c);
+  return static_cast<unsigned char>(c);
+}
+
+size_t RandoFwrite(const void* ptr, size_t size, size_t count, std::FILE* f) {
+  if (f != XexHandle() && f != SpoilerHandle()) {
+    return std::fwrite(ptr, size, count, f);
+  }
+  const auto* p = static_cast<const unsigned char*>(ptr);
+  for (size_t i = 0; i < size * count; ++i) {
+    if (RandoFputc(p[i], f) == EOF) {
+      return i / (size ? size : 1);
+    }
+  }
+  return count;
+}
+
+int RandoFputs(const char* s, std::FILE* f) {
+  if (f != XexHandle() && f != SpoilerHandle()) {
+    return std::fputs(s, f);
+  }
+  return RandoFwrite(s, 1, std::strlen(s), f) == std::strlen(s) ? 0 : EOF;
+}
+
+// MSVC's rand(): RAND_MAX is 0x7FFF there as well.
+int RandoRand() {
+  g_rand_state = g_rand_state * 214013u + 2531011u;
+  return static_cast<int>((g_rand_state >> 16) & 0x7FFF);
+}
+
+void RandoSrand(unsigned seed) { g_rand_state = seed; }
+
 }  // namespace nocturne::rando::detail
 
 #define fopen(path, mode) nocturne::rando::detail::OpenForRando(path, mode)
+#define fclose(f) nocturne::rando::detail::RandoFclose(f)
+#define fseek(f, offset, origin) nocturne::rando::detail::RandoFseek(f, offset, origin)
+#define ftell(f) nocturne::rando::detail::RandoFtell(f)
+#define fgetc(f) nocturne::rando::detail::RandoFgetc(f)
+#define fputc(c, f) nocturne::rando::detail::RandoFputc(c, f)
+#define fwrite(ptr, size, count, f) nocturne::rando::detail::RandoFwrite(ptr, size, count, f)
+#define fputs(s, f) nocturne::rando::detail::RandoFputs(s, f)
+#define rand() nocturne::rando::detail::RandoRand()
+#define srand(seed) nocturne::rando::detail::RandoSrand(seed)
 
 #include "xb_rando.cpp"

@@ -8,9 +8,11 @@
 #include "generated/nocturnerecomp_init.h"
 
 #include <algorithm>
+#include <atomic>
 #include <cmath>
 #include <cstdlib>
 #include <cstring>
+#include <mutex>
 #include <unordered_set>
 #include <vector>
 
@@ -19,13 +21,22 @@
 namespace nocturne {
 namespace {
 
-// Extra goto-able ranges (randomizer code caves); see PpcSetInterpretableRanges.
-std::vector<std::pair<uint32_t, uint32_t>> g_extra_ranges;  // sorted, disjoint
+// Extra goto-able ranges (randomizer code caves); see PpcAddInterpretableRanges.
+// Append-only: an entry is written before the count that publishes it, so
+// readers on guest threads need no lock. Entries may overlap.
+constexpr size_t kMaxExtraRanges = 256;
+std::pair<uint32_t, uint32_t> g_extra_ranges[kMaxExtraRanges];
+std::atomic<size_t> g_extra_count{0};
+std::mutex g_extra_mutex;  // serializes writers
 
 bool InExtraRange(uint32_t addr) {
-  auto it = std::upper_bound(g_extra_ranges.begin(), g_extra_ranges.end(), addr,
-                             [](uint32_t a, const auto& r) { return a < r.first; });
-  return it != g_extra_ranges.begin() && addr < (it - 1)->second;
+  const size_t n = g_extra_count.load(std::memory_order_acquire);
+  for (size_t i = 0; i < n; ++i) {
+    if (addr >= g_extra_ranges[i].first && addr < g_extra_ranges[i].second) {
+      return true;
+    }
+  }
+  return false;
 }
 
 struct RegFile {
@@ -223,9 +234,26 @@ StepKind Classify(uint32_t insn) {
 
 }  // namespace
 
-void PpcSetInterpretableRanges(std::vector<std::pair<uint32_t, uint32_t>> ranges) {
-  std::sort(ranges.begin(), ranges.end());
-  g_extra_ranges = std::move(ranges);
+bool PpcAddInterpretableRanges(const std::vector<std::pair<uint32_t, uint32_t>>& ranges) {
+  std::lock_guard lock(g_extra_mutex);
+  size_t n = g_extra_count.load(std::memory_order_relaxed);
+  bool all = true;
+  for (const auto& r : ranges) {
+    bool covered = false;
+    for (size_t i = 0; i < n && !covered; ++i) {
+      covered = r.first >= g_extra_ranges[i].first && r.second <= g_extra_ranges[i].second;
+    }
+    if (covered) {
+      continue;
+    }
+    if (n == kMaxExtraRanges) {
+      all = false;
+      continue;
+    }
+    g_extra_ranges[n++] = r;
+    g_extra_count.store(n, std::memory_order_release);
+  }
+  return all;
 }
 
 bool PpcScanFunction(uint8_t* base, uint32_t start, uint32_t end, uint32_t* bad_pc,

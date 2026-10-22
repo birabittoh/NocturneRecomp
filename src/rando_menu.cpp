@@ -1,28 +1,24 @@
 #include "rando_menu.h"
 
 #include <algorithm>
-#include <cstdlib>
-#include <fstream>
-#include <map>
-#include <sstream>
+#include <cinttypes>
+#include <cstdio>
 #include <string>
 
 #include <imgui.h>
 
-#include <rex/cvar.h>
 #include <rex/ui/imgui_dialog.h>
 #include <rex/ui/imgui_drawer.h>
 #include <rex/ui/keybinds.h>
 
 #include "rando/rando.h"
-#include "rando_xex.h"
+#include "rando_runtime.h"
 
 namespace nocturne {
 
 namespace {
 
 constexpr const char* kBaseXexName = "default.xex";
-constexpr const char* kOutputXexName = "Rando.xex";
 constexpr const char* kWindowTitle = "Randomizer##rando";
 
 }  // namespace
@@ -61,11 +57,23 @@ class RandoMenuDialog : public rex::ui::ImGuiDialog {
     bool changed = false;
 
     ImGui::TextWrapped(
-        "Randomizer by MottZilla (github.com/MottZilla/SOTN_XB_RANDO). Generates Rando.xex "
-        "from your default.xex; the game boots it on the next launch.");
+        "Randomizer by MottZilla (github.com/MottZilla/SOTN_XB_RANDO). Randomize from the "
+        "title screen or main menu, then start a new game.");
     ImGui::Separator();
 
-    ImGui::BeginDisabled(running);
+    DrawActiveRando();
+    ImGui::Separator();
+
+    const auto runtime = GetRandoRuntime().state();
+    if (GetRandoRuntime().SaveLoaded()) {
+      // The world a loaded save plays in can't change under it.
+      ImGui::TextWrapped(
+          "A save is loaded. Return to the title screen to randomize or go back to vanilla.");
+      ImGui::End();
+      return;
+    }
+
+    ImGui::BeginDisabled(running || runtime.request_pending);
 
     ImGui::TextUnformatted("Seed");
     ImGui::SetNextItemWidth(-90);
@@ -118,10 +126,7 @@ class RandoMenuDialog : public rex::ui::ImGuiDialog {
     }
 
     ImGui::Spacing();
-    DrawGenerateControls(running);
-
-    ImGui::Separator();
-    DrawActiveRando();
+    DrawGenerateControls(running, runtime);
 
     ImGui::Separator();
     ImGui::TextUnformatted(preset.name);
@@ -145,28 +150,25 @@ class RandoMenuDialog : public rex::ui::ImGuiDialog {
   }
 
  private:
-  void DrawGenerateControls(bool running) {
+  void DrawGenerateControls(bool running, const RandoRuntime::State& runtime) {
     auto& gen = rando::Generator::Get();
-    std::error_code ec;
-    const bool have_base = std::filesystem::exists(game_root_ / kBaseXexName, ec);
-    const bool title_update = std::filesystem::exists(game_root_ / (std::string(kBaseXexName) + "p"), ec);
-
-    if (title_update) {
-      ImGui::TextWrapped(
-          "A title update is staged next to default.xex. The randomizer only supports the "
-          "unpatched game.");
-    }
-    if (!have_base) {
-      ImGui::TextWrapped("default.xex wasn't found in the game folder.");
+    if (!runtime.supported) {
+      ImGui::TextWrapped("%s", runtime.unsupported_reason.c_str());
     }
 
-    ImGui::BeginDisabled(running || title_update || !have_base);
+    ImGui::BeginDisabled(running || runtime.request_pending || !runtime.supported);
     if (ImGui::Button("Randomize!")) {
       CopySeedToOptions();
       SaveOptions();
-      gen.Start(game_root_ / kBaseXexName, game_root_ / kOutputXexName,
-                user_root_ / "spoilers.txt", options_);
+      gen.Start(game_root_ / kBaseXexName, user_root_ / "spoilers.txt", options_);
+      applied_ = false;
     }
+    ImGui::SameLine();
+    ImGui::BeginDisabled(!runtime.active);
+    if (ImGui::Button("Return to vanilla")) {
+      GetRandoRuntime().RequestRevert();
+    }
+    ImGui::EndDisabled();
     ImGui::EndDisabled();
 
     if (running) {
@@ -175,43 +177,56 @@ class RandoMenuDialog : public rex::ui::ImGuiDialog {
         gen.Abort();
       }
       ImGui::SameLine();
-      ImGui::TextUnformatted("Processing...");
-    } else {
-      switch (gen.status()) {
-        case rando::Status::kDone:
-          if (!applied_) {
-            // Select the fresh image; the boot module is chosen before the
-            // game starts, so it takes effect on the next launch.
-            rex::cvar::SetFlagByName("rando_xex_name", kOutputXexName, /*persist=*/true);
-            applied_ = true;
-          }
-          ImGui::TextWrapped("Done. Restart the game to play the randomized seed. The spoiler log is %s.",
-                             (user_root_ / "spoilers.txt").string().c_str());
-          break;
-        case rando::Status::kFailed:
-          ImGui::TextWrapped("Generation failed; see the log below.");
-          break;
-        case rando::Status::kAborted:
-          ImGui::TextWrapped("Aborted.");
-          break;
-        default:
-          break;
-      }
+      ImGui::TextUnformatted("Generating...");
+      return;
     }
-    if (running) {
-      applied_ = false;
+    switch (gen.status()) {
+      case rando::Status::kDone:
+        if (!applied_) {
+          // Applied by the guest thread between frames; see rando_runtime.h.
+          GetRandoRuntime().RequestApply(gen.result());
+          applied_ = true;
+        }
+        break;
+      case rando::Status::kFailed:
+        ImGui::TextWrapped("Generation failed; see the log below.");
+        break;
+      case rando::Status::kAborted:
+        ImGui::TextWrapped("Aborted.");
+        break;
+      default:
+        break;
+    }
+    if (runtime.request_pending) {
+      ImGui::TextUnformatted("Applying...");
     }
   }
 
   void DrawActiveRando() {
-    const std::string active = REXCVAR_GET(rando_xex_name);
-    if (active.empty()) {
-      ImGui::TextUnformatted("Next launch boots: the vanilla game.");
-      return;
+    const auto runtime = GetRandoRuntime().state();
+    if (!runtime.active) {
+      ImGui::TextUnformatted("Active: the vanilla game.");
+    } else {
+      const auto& seed = *runtime.active;
+      const auto& presets = rando::Presets();
+      ImGui::TextWrapped("Active seed: %s", seed.options.seed.c_str());
+      ImGui::Text("Preset: %s    Complexity: %d    Hash: %016" PRIx64,
+                  presets[std::min<size_t>(seed.options.preset, presets.size() - 1)].name,
+                  seed.complexity, seed.patches.Hash());
+      if (runtime.inactive_code_patches) {
+        ImGui::TextWrapped(
+            "%zu code patch(es) of this seed couldn't be activated, so parts of the preset may "
+            "misbehave. See the log.",
+            runtime.inactive_code_patches);
+      }
+      if (ImGui::CollapsingHeader("Spoiler log")) {
+        ImGui::BeginChild("##spoilers", ImVec2(0, 200), ImGuiChildFlags_Borders);
+        ImGui::TextUnformatted(seed.spoilers.c_str(), seed.spoilers.c_str() + seed.spoilers.size());
+        ImGui::EndChild();
+      }
     }
-    ImGui::TextWrapped("Next launch boots: %s", active.c_str());
-    if (ImGui::Button("Boot the vanilla game instead")) {
-      rex::cvar::SetFlagByName("rando_xex_name", "", /*persist=*/true);
+    if (!runtime.message.empty()) {
+      ImGui::TextWrapped("%s", runtime.message.c_str());
     }
   }
 
@@ -239,64 +254,11 @@ class RandoMenuDialog : public rex::ui::ImGuiDialog {
   std::filesystem::path OptionsPath() const { return user_root_ / "randomizer.txt"; }
 
   void LoadOptions() {
-    std::ifstream f(OptionsPath());
-    std::map<std::string, std::string> kv;
-    for (std::string line; std::getline(f, line);) {
-      if (auto eq = line.find('='); eq != std::string::npos) {
-        kv[line.substr(0, eq)] = line.substr(eq + 1);
-      }
-    }
-    auto b = [&](const char* k, bool& v) {
-      if (kv.count(k)) {
-        v = kv[k] == "1";
-      }
-    };
-    auto& o = options_;
-    if (kv.count("preset")) {
-      int p = std::atoi(kv["preset"].c_str());
-      if (p >= 0 && p < static_cast<int>(rando::Presets().size())) {
-        o.preset = p;
-      }
-    }
-    if (kv.count("complexity")) {
-      o.complexity = std::clamp(std::atoi(kv["complexity"].c_str()), 1, 8);
-    }
-    if (kv.count("seed")) {
-      std::snprintf(seed_buf_, sizeof(seed_buf_), "%s", kv["seed"].c_str());
-      o.seed = seed_buf_;
-    }
-    b("relics", o.relics);
-    b("starting_gear", o.starting_gear);
-    b("equipment", o.equipment);
-    b("drops", o.drops);
-    b("drop_rates", o.drop_rates);
-    b("shop", o.shop);
-    b("clock_statue", o.clock_statue);
-    b("fast_warps", o.fast_warps);
-    b("anti_freeze", o.anti_freeze);
-    b("candles", o.candles);
-    b("map_tracker", o.map_tracker);
-    b("force_no_complexity", o.force_no_complexity);
+    rando::LoadOptionsFile(OptionsPath(), &options_);
+    std::snprintf(seed_buf_, sizeof(seed_buf_), "%s", options_.seed.c_str());
   }
 
-  void SaveOptions() {
-    std::ofstream f(OptionsPath());
-    const auto& o = options_;
-    f << "preset=" << o.preset << "\ncomplexity=" << o.complexity << "\nseed=" << o.seed << "\n";
-    auto b = [&](const char* k, bool v) { f << k << '=' << (v ? 1 : 0) << '\n'; };
-    b("relics", o.relics);
-    b("starting_gear", o.starting_gear);
-    b("equipment", o.equipment);
-    b("drops", o.drops);
-    b("drop_rates", o.drop_rates);
-    b("shop", o.shop);
-    b("clock_statue", o.clock_statue);
-    b("fast_warps", o.fast_warps);
-    b("anti_freeze", o.anti_freeze);
-    b("candles", o.candles);
-    b("map_tracker", o.map_tracker);
-    b("force_no_complexity", o.force_no_complexity);
-  }
+  void SaveOptions() { rando::SaveOptionsFile(OptionsPath(), options_); }
 
   std::filesystem::path game_root_;
   std::filesystem::path user_root_;

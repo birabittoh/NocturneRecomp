@@ -1,11 +1,12 @@
-// Randomizer front end: generates a randomizer-patched xex ("Rando.xex") from
-// the game's own default.xex, using MottZilla's SOTN_XB_RANDO core
-// (ext/SOTN_XB_RANDO, https://github.com/MottZilla/SOTN_XB_RANDO).
+// Randomizer front end: generates a seed of MottZilla's SOTN_XB_RANDO core
+// (ext/SOTN_XB_RANDO, https://github.com/MottZilla/SOTN_XB_RANDO) in memory.
 //
-// The upstream tool needs the user to decrypt default.xex with xextool first;
-// here that step is done in-process (WriteDecryptedXex), then the core's
-// XB_Randomize patches the copy in place. Booting the result is handled by
-// src/rando_xex.h (the rando_xex_name cvar); this file only produces it.
+// The upstream tool patches a decrypted copy of default.xex on disk. Here the
+// game's own default.xex is decrypted in-process into a host buffer in the
+// same file layout (LoadBaseXex), the core's XB_Randomize patches that
+// buffer (its stdio is redirected, see rando_core.cpp), and the result is the
+// list of guest byte runs it changed (PatchSet) plus the spoiler log. Applying
+// a PatchSet to the running game is src/rando_runtime.h's job.
 //
 // The core is a pile of globals (one run at a time, not re-entrant), so
 // Generator is a singleton driving it from one worker thread.
@@ -14,6 +15,8 @@
 #include <atomic>
 #include <cstdint>
 #include <filesystem>
+#include <memory>
+#include <mutex>
 #include <string>
 #include <vector>
 
@@ -56,17 +59,65 @@ struct Preset {
 
 const std::vector<Preset>& Presets();
 
+// Options as "key=value" lines, the format of randomizer.txt. Loading leaves
+// options missing from the file as they were.
+bool LoadOptionsFile(const std::filesystem::path& path, Options* options);
+bool SaveOptionsFile(const std::filesystem::path& path, const Options& options,
+                     const std::string& extra_lines = {});
+
 // A random two-item-name seed, as the upstream GUI generates.
 std::string RandomSeedName();
 
-// Writes `dst` as a decrypted copy of the retail `src` default.xex: same
-// size and layout, the encryption flag cleared, the way xextool -e u leaves
-// it -- which is the form the randomizer's hard-coded file offsets address.
-bool WriteDecryptedXex(const std::filesystem::path& src, const std::filesystem::path& dst,
-                       std::string* error);
+// default.xex prepared for the randomizer: the xex header followed by the
+// flat (decrypted, decompressed) image. That is the layout of upstream's
+// decrypted xex wherever the core writes, so its hard-coded file offsets
+// address this buffer directly.
+struct BaseXex {
+  std::vector<uint8_t> file;
+  uint32_t header_size = 0;  // file offset of the image
+  uint32_t image_base = 0;   // guest address of the image
+  // File offsets map to guest addresses (image_base + offset - header_size)
+  // only up to here: past the first compressed data block, the decrypted
+  // file and the flat image part ways.
+  uint32_t mapped_end = 0;
 
-// The sanity checks upstream's VerifyXEX runs on its input.
-bool VerifyDecryptedXex(const std::filesystem::path& path, std::string* error);
+  uint32_t GuestOf(size_t file_offset) const {
+    return image_base + static_cast<uint32_t>(file_offset - header_size);
+  }
+};
+
+// Loads `xex` and runs upstream's VerifyXEX checks on the result. Loaded once
+// per path and cached.
+std::shared_ptr<const BaseXex> LoadBaseXex(const std::filesystem::path& xex, std::string* error);
+
+// One run of guest bytes a seed changes, with the base image's bytes kept for
+// reverting.
+struct PatchRun {
+  uint32_t guest = 0;
+  std::vector<uint8_t> base;
+  std::vector<uint8_t> bytes;
+};
+
+struct PatchSet {
+  std::vector<PatchRun> runs;  // sorted by guest address, disjoint
+
+  size_t ByteCount() const;
+  // Identifies the seed's output; stable across runs and platforms.
+  uint64_t Hash() const;
+};
+
+// A generated seed.
+struct Result {
+  Options options;
+  PatchSet patches;
+  std::string spoilers;
+  int complexity = 0;
+};
+
+// Generates a seed on the calling thread, blocking while another run holds
+// the core. Progress goes to Generator's log.
+std::shared_ptr<const Result> Generate(const std::filesystem::path& base_xex,
+                                       const Options& options, std::string* error);
 
 enum class Status { kIdle, kRunning, kDone, kFailed, kAborted };
 
@@ -74,13 +125,15 @@ class Generator {
  public:
   static Generator& Get();
 
-  // Generates `output` from `base_xex`; false when a run is already going.
-  // `spoilers` is where the spoiler log is written.
-  bool Start(const std::filesystem::path& base_xex, const std::filesystem::path& output,
-             const std::filesystem::path& spoilers, const Options& options);
+  // Generates a seed from `base_xex` on a worker thread; false when a run is
+  // already going. On success, the spoiler log is also written to `spoilers`.
+  bool Start(const std::filesystem::path& base_xex, const std::filesystem::path& spoilers,
+             const Options& options);
   void Abort();
 
   Status status() const { return status_; }
+  // The last successful run's output, or null.
+  std::shared_ptr<const Result> result() const;
   std::vector<std::string> Log() const;
   void ClearLog();
 
@@ -89,10 +142,12 @@ class Generator {
   void Scratch();
 
  private:
-  void Run(std::filesystem::path base_xex, std::filesystem::path output, Options options);
+  void Run(std::filesystem::path base_xex, std::filesystem::path spoilers, Options options);
   void Fail(Status status, const char* message);
 
   std::atomic<Status> status_{Status::kIdle};
+  mutable std::mutex result_mutex_;
+  std::shared_ptr<const Result> result_;
 };
 
 }  // namespace nocturne::rando

@@ -238,7 +238,7 @@ set(NOCTURNERECOMP_SOURCES
     src/player_status.cpp
     src/ppc_interpreter.cpp
     src/rando_menu.cpp
-    src/rando_xex.cpp
+    src/rando_runtime.cpp
     src/rando/rando_core.cpp
     src/rando/rando_host.cpp
     src/room_presence.cpp

@@ -38,7 +38,7 @@ namespace {
 // Everything build.py used to write into the shipped nocturnerecomp.toml.
 // These are the game's defaults, not necessarily the SDK's; kept here so
 // there is one place that owns "what NocturneRecomp ships with". Keybind/
-// remap/rando_xex_name/danger-zone entries have no row in the curated
+// remap/danger-zone entries have no row in the curated
 // dialog below (left to the SDK's own developer panel) but still need their
 // default seeded here, same as build.py used to.
 struct DefaultValue {
@@ -82,7 +82,6 @@ constexpr std::array kGameDefaults = {
     DefaultValue{"remap_start", "back"},
     DefaultValue{"remap_back", "start"},
     DefaultValue{"remap_left_trigger", "left_trigger"},
-    DefaultValue{"rando_xex_name", "Rando.xex"},
     DefaultValue{"gpu_allow_invalid_fetch_constants", "true"},
     DefaultValue{"game_data_root", "assets"},
     DefaultValue{"update_data_root", "update"},
@@ -202,7 +201,7 @@ bool IsKnownLanguageId(std::string_view id) {
 
 // cvars rendered generically in the collapsed Advanced section, persisted to
 // the app's normal cvar config (nocturnerecomp.toml).
-constexpr std::array<const char*, 8> kAdvancedCvarNames = {
+constexpr std::array<const char*, 7> kAdvancedCvarNames = {
     "post_process_shader_enabled",
     "post_process_shader_path",
     // Windows only, so absent from the registry elsewhere; DrawAdvancedRow and
@@ -213,7 +212,6 @@ constexpr std::array<const char*, 8> kAdvancedCvarNames = {
     "texture_dump_enabled",
     "texture_dump_format",
     "texture_dump_skip_sizes",
-    "rando_xex_name",
 };
 
 std::vector<std::string> BasicCvarNames() {

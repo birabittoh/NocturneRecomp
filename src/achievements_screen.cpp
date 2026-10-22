@@ -23,6 +23,7 @@
 #include <vector>
 
 #include "achievement_icons.h"
+#include "in_game_latch.h"
 #include "native_options.h"
 #include "settings.h"
 
@@ -47,9 +48,10 @@ namespace {
 //   * kScreenEventFnAddr is CScreenAchievement's vtable slot 1 (off_820140A8+4),
 //     the same slot the settings screen's own event handler occupies in its
 //     vtable -- see native_options.cpp, which documents that layout.
-//   * kUiManagerPtrAddr / kAppObjectPtrAddr / kPostEventFnAddr are the same
-//     three native_options.cpp uses, repeated here rather than shared so each
-//     file stays independently greppable against the image.
+//   * kUiManagerPtrAddr / kPostEventFnAddr are the same two native_options.cpp
+//     uses, repeated here rather than shared so each file stays independently
+//     greppable against the image. (The app object and its save-loaded latch
+//     are shared, in in_game_latch.h.)
 //
 // The TU (title update) values are the vanilla ones plus the regional shift
 // native_options.cpp documents for this address range (+0x200 for 0x825Bxxxx
@@ -96,7 +98,6 @@ constexpr uint32_t kPromptSetPosFnAddr = 0x825D21A8u;       // (prompt, x, y)
 constexpr uint32_t kTextWidthFnAddr = 0x825CF208u;          // (text_widget) -> pixels
 constexpr uint32_t kTextSetTextByIdFnAddr = 0x825CFE68u;    // (text_widget, string_id)
 constexpr uint32_t kUiManagerPtrAddr = 0x82E79DECu;
-constexpr uint32_t kAppObjectPtrAddr = 0x82E4F5C8u;
 constexpr uint32_t kImageBankPtrAddr = 0x82E7A330u;
 constexpr uint32_t kBGlyphNameAddr = 0x82202300u;
 #else
@@ -123,7 +124,6 @@ constexpr uint32_t kPromptSetPosFnAddr = 0x825D1FA8u;       // (prompt, x, y)
 constexpr uint32_t kTextWidthFnAddr = 0x825CF008u;          // (text_widget) -> pixels
 constexpr uint32_t kTextSetTextByIdFnAddr = 0x825CFC68u;    // (text_widget, string_id)
 constexpr uint32_t kUiManagerPtrAddr = 0x82E7A02Cu;
-constexpr uint32_t kAppObjectPtrAddr = 0x82E4F808u;
 constexpr uint32_t kImageBankPtrAddr = 0x82E7A570u;
 // The glyph names are single-character strings in a descending-letter table
 // ("Z" at 0x82202270, 4 bytes per entry), so "B" is 24 entries in. The settings
@@ -255,10 +255,6 @@ constexpr uint32_t kCurrentPageOffset = 4;
 constexpr uint32_t kEventClassPageSwitch = 8;
 constexpr uint32_t kBlankAchievementArg = 0;
 
-// The app object's "a save is loaded" latch -- read only to decide whether the
-// pre-game watchdog needs suppressing on the way in. Same field
-// native_options.cpp reads.
-constexpr uint32_t kInGameLatchOffset = 29;
 
 // Message layout for a screen's event handler, identical to the one
 // native_options.cpp documents: word 0 is the event class (0 = button press),
@@ -1013,8 +1009,7 @@ bool AchievementsScreen::OpenFromGuest(PPCContext& ctx, uint8_t* base, uint32_t 
   // settled flag (mgr+332) exactly as the stretch screen's does, which trips
   // the pre-game watchdog into yanking us straight back out. native_options
   // owns the suppression for that -- see EnterPregameScreen.
-  const uint32_t app_object = Read32BE(base, kAppObjectPtrAddr);
-  const bool save_loaded = app_object != 0 && base[app_object + kInGameLatchOffset] != 0;
+  const bool save_loaded = SaveLoaded(base);
   if (!save_loaded) {
     EnterPregameScreen(kAchievementsPage);
   }

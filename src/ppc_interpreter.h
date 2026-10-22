@@ -1,6 +1,6 @@
 // Minimal PPC32 (Xenon) interpreter over rex's PPCContext/guest memory.
 //
-// Exists so a custom patched xex (see src/rando_xex.h) can change *code* at
+// Exists so a randomizer seed (see src/rando_runtime.h) can change *code* at
 // runtime: recompiled functions execute natively and never re-read .text
 // from guest memory, so byte patches to instructions are inert unless the
 // affected functions are re-executed some other way. Rather than shipping
@@ -42,9 +42,13 @@ namespace nocturne {
 // ranges (or back inside the function bounds) just continues interpreting
 // at the target. PpcScanFunction follows such branches too, so the
 // unsupported-instruction check covers the cave code a patched function
-// flows through. Call once (not thread-safe) before installing thunks;
-// ranges must be disjoint.
-void PpcSetInterpretableRanges(std::vector<std::pair<uint32_t, uint32_t>> ranges);
+// flows through. Call before installing the thunks that need them.
+//
+// Ranges are only ever added: safe to call while guest threads interpret,
+// and a range left over from an earlier patch is harmless (once reverted it
+// holds zeros nothing branches to). Ranges already covered are skipped.
+// Returns false if the fixed table filled up and some were dropped.
+bool PpcAddInterpretableRanges(const std::vector<std::pair<uint32_t, uint32_t>>& ranges);
 
 // Walks statically reachable instructions of [start, end) (guest addresses,
 // instructions read from guest memory at `base`) and returns true if the

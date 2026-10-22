@@ -10,9 +10,11 @@
 #include <algorithm>
 #include <chrono>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <fstream>
 #include <iterator>
+#include <map>
 #include <mutex>
 #include <random>
 #include <thread>
@@ -163,24 +165,102 @@ const std::vector<Preset>& Presets() {
   return presets;
 }
 
+namespace {
+
+using KeyValues = std::map<std::string, std::string>;
+
+bool ReadKeyValues(const std::filesystem::path& path, KeyValues& kv) {
+  std::ifstream f(path);
+  if (!f) {
+    return false;
+  }
+  for (std::string line; std::getline(f, line);) {
+    if (!line.empty() && line.back() == '\r') {
+      line.pop_back();
+    }
+    if (auto eq = line.find('='); eq != std::string::npos) {
+      kv[line.substr(0, eq)] = line.substr(eq + 1);
+    }
+  }
+  return true;
+}
+
+// Every boolean option and its key, in file order.
+template <typename O, typename F>
+void ForEachFlag(O& o, F&& f) {
+  f("relics", o.relics);
+  f("starting_gear", o.starting_gear);
+  f("equipment", o.equipment);
+  f("drops", o.drops);
+  f("drop_rates", o.drop_rates);
+  f("shop", o.shop);
+  f("clock_statue", o.clock_statue);
+  f("fast_warps", o.fast_warps);
+  f("anti_freeze", o.anti_freeze);
+  f("candles", o.candles);
+  f("map_tracker", o.map_tracker);
+  f("force_no_complexity", o.force_no_complexity);
+}
+
+}  // namespace
+
+bool LoadOptionsFile(const std::filesystem::path& path, Options* o) {
+  KeyValues kv;
+  if (!ReadKeyValues(path, kv)) {
+    return false;
+  }
+  if (kv.count("preset")) {
+    int p = std::atoi(kv["preset"].c_str());
+    if (p >= 0 && p < static_cast<int>(Presets().size())) {
+      o->preset = p;
+    }
+  }
+  if (kv.count("complexity")) {
+    o->complexity = std::clamp(std::atoi(kv["complexity"].c_str()), 1, 8);
+  }
+  if (kv.count("seed")) {
+    o->seed = kv["seed"];
+  }
+  ForEachFlag(*o, [&](const char* key, bool& v) {
+    if (kv.count(key)) {
+      v = kv[key] == "1";
+    }
+  });
+  return true;
+}
+
+bool SaveOptionsFile(const std::filesystem::path& path, const Options& o,
+                     const std::string& extra_lines) {
+  std::ofstream f(path, std::ios::trunc);
+  f << "preset=" << o.preset << "\ncomplexity=" << o.complexity << "\nseed=" << o.seed << "\n";
+  ForEachFlag(o, [&](const char* key, bool v) { f << key << '=' << (v ? 1 : 0) << '\n'; });
+  f << extra_lines;
+  return static_cast<bool>(f);
+}
+
 std::string RandomSeedName() {
   std::mt19937 rng{std::random_device{}()};
   auto word = [&] { return std::string(XB_ItemNames[rng() % 256]); };
   return word() + " " + word() + std::to_string(rng() % 1000);
 }
 
-bool WriteDecryptedXex(const std::filesystem::path& src, const std::filesystem::path& dst,
-                       std::string* error) {
-  auto fail = [&](const char* msg) {
+namespace {
+
+std::shared_ptr<const BaseXex> BuildBaseXex(const std::filesystem::path& path,
+                                            std::string* error) {
+  auto fail = [&](const char* msg) -> std::shared_ptr<const BaseXex> {
     if (error) {
       *error = msg;
     }
-    return false;
+    return nullptr;
   };
 
   std::vector<uint8_t> xex;
-  if (!ReadFile(src, xex)) {
+  if (!ReadFile(path, xex) || xex.size() < 24) {
     return fail("Couldn't read the game's default.xex.");
+  }
+  if (ReadBE32(xex.data()) != 0x58455832) {
+    return fail("Invalid XEX file.");
   }
   std::vector<uint8_t> image;
   if (!rex::runtime::XexModule::ExtractBaseImage(xex.data(), xex.size(), image)) {
@@ -190,83 +270,207 @@ bool WriteDecryptedXex(const std::filesystem::path& src, const std::filesystem::
   const uint32_t header_size = ReadBE32(xex.data() + 8);
   const uint32_t header_count = ReadBE32(xex.data() + 20);
   constexpr uint32_t kFileFormatInfoKey = 0x3FF;
-  uint32_t info = 0;
+  constexpr uint32_t kImageBaseKey = 0x10201;
+  uint32_t info = 0, image_base = 0;
   for (uint32_t i = 0; i < header_count && 24 + 8 * i + 8 <= header_size; ++i) {
-    if (ReadBE32(xex.data() + 24 + 8 * i) == kFileFormatInfoKey) {
-      info = ReadBE32(xex.data() + 24 + 8 * i + 4);
+    const uint32_t key = ReadBE32(xex.data() + 24 + 8 * i);
+    const uint32_t value = ReadBE32(xex.data() + 24 + 8 * i + 4);
+    if (key == kFileFormatInfoKey) {
+      info = value;
+    } else if (key == kImageBaseKey) {
+      image_base = value;
     }
   }
-  if (!info || info + 8 > header_size) {
-    return fail("default.xex has no file format info header.");
+  if (header_size > xex.size() || !info || info + 8 > header_size || !image_base) {
+    return fail("default.xex has no file format info or image base header.");
   }
 
-  // info: u32 size, u16 encryption (0 none, 1 normal), u16 compression
-  // (0 none, 1 basic); basic is followed by (data_size, zero_size) blocks.
+  // info: u32 size, u16 encryption, u16 compression (0 none, 1 basic); basic
+  // is followed by (data_size, zero_size) blocks. Basic compression drops the
+  // zero runs between data blocks, so file and image offsets agree only up to
+  // the end of the first block.
   const uint32_t info_size = ReadBE32(xex.data() + info);
   const uint32_t compression = (uint32_t(xex[info + 6]) << 8) | xex[info + 7];
-
-  std::vector<uint8_t> out(xex.begin(), xex.begin() + header_size);
-  out[info + 4] = out[info + 5] = 0;  // no encryption; compression is left as it was
-
+  uint32_t mapped = 0;
   if (compression == 0) {
-    out.insert(out.end(), image.begin(), image.end());
-  } else if (compression == 1) {
-    // Basic compression drops the zero runs between data blocks; the stored
-    // form is just the data parts back to back.
-    size_t pos = 0;
-    for (uint32_t b = 8; b + 8 <= info_size; b += 8) {
-      const uint32_t data = ReadBE32(xex.data() + info + b);
-      const uint32_t zeros = ReadBE32(xex.data() + info + b + 4);
-      if (pos + data > image.size()) {
-        return fail("default.xex has an inconsistent compression table.");
-      }
-      out.insert(out.end(), image.begin() + pos, image.begin() + pos + data);
-      pos += size_t(data) + zeros;
-    }
+    mapped = static_cast<uint32_t>(image.size());
+  } else if (compression == 1 && info_size >= 16) {
+    mapped = ReadBE32(xex.data() + info + 8);
   } else {
     return fail("default.xex uses an unsupported compression type.");
   }
 
-  if (out.size() != xex.size()) {
-    return fail("The decrypted xex isn't the same size as default.xex.");
-  }
+  auto base = std::make_shared<BaseXex>();
+  base->header_size = header_size;
+  base->image_base = image_base;
+  base->mapped_end = header_size + std::min<uint32_t>(mapped, static_cast<uint32_t>(image.size()));
+  base->file.reserve(header_size + image.size());
+  base->file.assign(xex.begin(), xex.begin() + header_size);
+  base->file.insert(base->file.end(), image.begin(), image.end());
 
-  std::ofstream f(dst, std::ios::binary | std::ios::trunc);
-  if (!f) {
-    return fail("Couldn't open Rando.xex for writing.");
+  // Upstream's VerifyXEX, minus the word at 0x112: that is a security-header
+  // field xextool rewrites when it decrypts. The PE timestamp identifies the
+  // build on its own.
+  const auto& f = base->file;
+  if (f.size() < 0x4114 || ReadBE32(f.data() + 0x4000) != 0x4D5A9000) {
+    return fail("default.xex didn't decrypt to a PE image.");
   }
-  f.write(reinterpret_cast<const char*>(out.data()), static_cast<std::streamsize>(out.size()));
-  f.close();
-  if (!f) {
-    return fail("Couldn't write Rando.xex.");
+  if (ReadBE32(f.data() + 0x4110) != 0x5DAEED45) {
+    return fail("This isn't the unpatched USA XBLA default.xex the randomizer supports.");
   }
-  return true;
+  return base;
 }
 
-bool VerifyDecryptedXex(const std::filesystem::path& path, std::string* error) {
-  auto fail = [&](const char* msg) {
+PatchSet DiffBase(const BaseXex& base, const std::vector<uint8_t>& patched) {
+  // Changed bytes closer than this are kept in one run; the unchanged bytes
+  // between them are written back as they were.
+  constexpr size_t kMergeGap = 8;
+  PatchSet set;
+  const size_t end = std::min(base.file.size(), patched.size());
+  for (size_t off = base.header_size; off < end;) {
+    if (base.file[off] == patched[off]) {
+      ++off;
+      continue;
+    }
+    size_t run_end = off + 1;
+    for (size_t gap = 0; run_end + gap < end && gap <= kMergeGap;) {
+      if (base.file[run_end + gap] != patched[run_end + gap]) {
+        run_end += gap + 1;
+        gap = 0;
+      } else {
+        ++gap;
+      }
+    }
+    PatchRun run;
+    run.guest = base.GuestOf(off);
+    run.base.assign(base.file.begin() + off, base.file.begin() + run_end);
+    run.bytes.assign(patched.begin() + off, patched.begin() + run_end);
+    set.runs.push_back(std::move(run));
+    off = run_end;
+  }
+  return set;
+}
+
+// The core keeps its state in globals; one run at a time.
+std::mutex g_core_mutex;
+
+}  // namespace
+
+std::shared_ptr<const BaseXex> LoadBaseXex(const std::filesystem::path& xex, std::string* error) {
+  static std::mutex mutex;
+  static std::filesystem::path cached_path;
+  static std::shared_ptr<const BaseXex> cached;
+  std::lock_guard lock(mutex);
+  if (!cached || cached_path != xex) {
+    cached = BuildBaseXex(xex, error);
+    cached_path = xex;
+  }
+  return cached;
+}
+
+size_t PatchSet::ByteCount() const {
+  size_t n = 0;
+  for (const auto& run : runs) {
+    n += run.bytes.size();
+  }
+  return n;
+}
+
+uint64_t PatchSet::Hash() const {
+  // FNV-1a over (guest, length, bytes) of every run, integers big-endian.
+  uint64_t h = 0xcbf29ce484222325ull;
+  auto byte = [&](uint8_t b) {
+    h ^= b;
+    h *= 0x100000001b3ull;
+  };
+  auto u32 = [&](uint32_t v) {
+    for (int s = 24; s >= 0; s -= 8) {
+      byte(static_cast<uint8_t>(v >> s));
+    }
+  };
+  for (const auto& run : runs) {
+    u32(run.guest);
+    u32(static_cast<uint32_t>(run.bytes.size()));
+    for (uint8_t b : run.bytes) {
+      byte(b);
+    }
+  }
+  return h;
+}
+
+std::shared_ptr<const Result> Generate(const std::filesystem::path& base_xex,
+                                       const Options& o, std::string* error) {
+  auto fail = [&](const char* msg) -> std::shared_ptr<const Result> {
     if (error) {
       *error = msg;
     }
-    return false;
+    return nullptr;
   };
-  std::vector<uint8_t> xex;
-  if (!ReadFile(path, xex) || xex.size() < 0x4114) {
-    return fail("Couldn't read the xex.");
+  auto base = LoadBaseXex(base_xex, error);
+  if (!base) {
+    return nullptr;
   }
-  if (ReadBE32(xex.data()) != 0x58455832) {
-    return fail("Invalid XEX file.");
+
+  std::lock_guard core_lock(g_core_mutex);
+  auto& gen = Generator::Get();
+  gen.Append("default.xex loaded and decrypted.");
+
+  // What SyncGUI_OptionsToXB does: every XB_ option the core reads.
+  const auto& presets = Presets();
+  const Preset& preset = presets[std::min<size_t>(o.preset, presets.size() - 1)];
+  XB_RandomizeRelicLocations = o.relics;
+  XB_UseRandomStartingGear = o.starting_gear;
+  XB_RandomizeEquipment = o.equipment;
+  XB_RandomizeDrops = o.drops;
+  XB_BoostDropRates = o.drop_rates;
+  XB_RandomizeShop = o.shop;
+  XB_ClockStatue = o.clock_statue;
+  XB_FastWarps = o.fast_warps;
+  XB_AntiFreeze = o.anti_freeze;
+  XB_CandleRando = o.candles;
+  XB_EnableMapTracker = o.map_tracker;
+  XB_ForceNoComplexity = o.force_no_complexity;
+  XB_ChosenComplexity = std::clamp(o.complexity, 1, 8);
+  std::strncpy(XB_PresetName, preset.name, sizeof(XB_PresetName) - 1);
+  XB_PresetName[sizeof(XB_PresetName) - 1] = 0;
+
+  // SeedStringToNumber.
+  std::strncpy(sSeedName, o.seed.c_str(), sizeof(sSeedName) - 1);
+  sSeedName[sizeof(sSeedName) - 1] = 0;
+  uint32_t seed = 0;
+  for (size_t i = 0; sSeedName[i]; ++i) {
+    seed += uint32_t(static_cast<int8_t>(sSeedName[i])) << ((i & 3) * 8);
   }
-  if (ReadBE32(xex.data() + 0x4000) != 0x4D5A9000) {
-    return fail("XEX file still needs to be decrypted.");
+
+  std::vector<uint8_t> patched = base->file;
+  detail::SetMemoryXex(&patched, base->mapped_end);
+  detail::SeedGeneratorRng(seed);
+  XB_AbortSignal = 0;
+  XB_GeneratedSeedComplexity = 0;
+  const bool ok = XB_Randomize(const_cast<char*>(detail::kMemoryXexPath), seed) != 0;
+  detail::SetMemoryXex(nullptr, 0);
+  std::string spoilers = detail::TakeSpoilers();
+
+  if (!ok) {
+    return fail("XB_Randomize() Error!");
   }
-  // Upstream also compares the word at 0x112, but that is a security-header
-  // field xextool rewrites when it decrypts; ours leaves it as shipped. The PE
-  // timestamp identifies the build on its own.
-  if (ReadBE32(xex.data() + 0x4110) != 0x5DAEED45) {
-    return fail("This isn't the unpatched USA XBLA default.xex the randomizer supports.");
+  if (XB_GeneratedSeedComplexity > 15) {
+    // XB_Randomize reports a failed or aborted relic placement as success
+    // with an impossible complexity.
+    return fail(XB_AbortSignal ? "Operation aborted." : "Seed generation error!");
   }
-  return true;
+  if (detail::MemoryXexOutOfRange()) {
+    // A write the guest-address mapping doesn't cover; applying the rest
+    // would leave a half-patched seed.
+    return fail("The randomizer wrote outside the mapped part of default.xex.");
+  }
+
+  auto result = std::make_shared<Result>();
+  result->options = o;
+  result->patches = DiffBase(*base, patched);
+  result->spoilers = std::move(spoilers);
+  result->complexity = XB_GeneratedSeedComplexity;
+  return result;
 }
 
 Generator& Generator::Get() {
@@ -305,75 +509,45 @@ void Generator::Fail(Status status, const char* message) {
   status_ = status;
 }
 
-bool Generator::Start(const std::filesystem::path& base_xex, const std::filesystem::path& output,
-                      const std::filesystem::path& spoilers, const Options& options) {
+std::shared_ptr<const Result> Generator::result() const {
+  std::lock_guard lock(result_mutex_);
+  return result_;
+}
+
+bool Generator::Start(const std::filesystem::path& base_xex, const std::filesystem::path& spoilers,
+                      const Options& options) {
   Status expected = status_;
   if (expected == Status::kRunning) {
     return false;
   }
   status_ = Status::kRunning;
+  XB_AbortSignal = 0;
   ClearLog();
-  detail::SetSpoilersPath(spoilers.string());
-  std::thread([this, base_xex, output, options] { Run(base_xex, output, options); }).detach();
+  std::thread([this, base_xex, spoilers, options] { Run(base_xex, spoilers, options); }).detach();
   return true;
 }
 
-void Generator::Run(std::filesystem::path base_xex, std::filesystem::path output, Options o) {
+void Generator::Run(std::filesystem::path base_xex, std::filesystem::path spoilers, Options o) {
   std::string err;
-  if (!WriteDecryptedXex(base_xex, output, &err)) {
-    Fail(Status::kFailed, err.c_str());
+  auto result = Generate(base_xex, o, &err);
+  if (!result) {
+    Fail(XB_AbortSignal ? Status::kAborted : Status::kFailed, err.c_str());
     return;
   }
-  if (!VerifyDecryptedXex(output, &err)) {
-    Fail(Status::kFailed, err.c_str());
-    return;
+  if (!spoilers.empty()) {
+    std::ofstream f(spoilers, std::ios::binary | std::ios::trunc);
+    f << result->spoilers;
   }
-  Append("Vanilla XEX copied to Rando.XEX successfully.");
-
-  // What SyncGUI_OptionsToXB does: every XB_ option the core reads.
-  const auto& presets = Presets();
-  const Preset& preset = presets[std::min<size_t>(o.preset, presets.size() - 1)];
-  XB_RandomizeRelicLocations = o.relics;
-  XB_UseRandomStartingGear = o.starting_gear;
-  XB_RandomizeEquipment = o.equipment;
-  XB_RandomizeDrops = o.drops;
-  XB_BoostDropRates = o.drop_rates;
-  XB_RandomizeShop = o.shop;
-  XB_ClockStatue = o.clock_statue;
-  XB_FastWarps = o.fast_warps;
-  XB_AntiFreeze = o.anti_freeze;
-  XB_CandleRando = o.candles;
-  XB_EnableMapTracker = o.map_tracker;
-  XB_ForceNoComplexity = o.force_no_complexity;
-  XB_ChosenComplexity = std::clamp(o.complexity, 1, 8);
-  std::strncpy(XB_PresetName, preset.name, sizeof(XB_PresetName) - 1);
-  XB_PresetName[sizeof(XB_PresetName) - 1] = 0;
-
-  // SeedStringToNumber.
-  std::strncpy(sSeedName, o.seed.c_str(), sizeof(sSeedName) - 1);
-  sSeedName[sizeof(sSeedName) - 1] = 0;
-  uint32_t seed = 0;
-  for (size_t i = 0; sSeedName[i]; ++i) {
-    seed += uint32_t(static_cast<int8_t>(sSeedName[i])) << ((i & 3) * 8);
+  char line[128];
+  std::snprintf(line, sizeof(line), "Seed generated: %zu runs, %zu bytes, hash %016llx.",
+                result->patches.runs.size(), result->patches.ByteCount(),
+                static_cast<unsigned long long>(result->patches.Hash()));
+  Append(line);
+  {
+    std::lock_guard lock(result_mutex_);
+    result_ = std::move(result);
   }
-
-  XB_AbortSignal = 0;
-  XB_GeneratedSeedComplexity = 0;
-  const bool ok = XB_Randomize(const_cast<char*>(output.string().c_str()), seed) != 0;
-  if (!ok) {
-    Fail(Status::kFailed, "XB_Randomize() Error!");
-  } else if (XB_GeneratedSeedComplexity > 15) {
-    // XB_Randomize reports a failed or aborted relic placement as success
-    // with an impossible complexity.
-    Fail(XB_AbortSignal ? Status::kAborted : Status::kFailed,
-         "Seed generation error or operation aborted!");
-  } else {
-    Append("XB_Randomize() completed successfully.");
-    status_ = Status::kDone;
-    return;
-  }
-  std::error_code ec;
-  std::filesystem::remove(output, ec);
+  status_ = Status::kDone;
 }
 
 }  // namespace nocturne::rando
