@@ -404,7 +404,7 @@ constexpr const char* kNativeStringKeyFullscreenLabel = "fullscreen_label";
 constexpr const char* kNativeStringKeyFullscreenOff = "fullscreen_off";
 constexpr const char* kNativeStringKeyFullscreenOn = "fullscreen_on";
 constexpr const char* kNativeStringKeyLanguageLabel = "language_label";
-constexpr const char* kNativeStringKeyGpuBackendLabel = "gpu_backend_label";
+constexpr const char* kNativeStringKeyVsyncLabel = "vsync_label";
 
 // Prefers a mod-registered translation (see kNativeStringKey* above) for the
 // current language over the compiled-in `fallback`.
@@ -826,72 +826,46 @@ void CommitLanguageIndex(int32_t index) {
   REXLOG_INFO("[native_options] language set to {} (applies on next launch)", value);
 }
 
-// --- GPU Backend ------------------------------------------------------------
+// --- VSync --------------------------------------------------------------
 
-// Whether the active GPU plugin offers more than one backend to choose from
-// (rexgpu-xenos: D3D12 + Vulkan on Windows, Vulkan only on Linux), queried via
-// rex::system::QuerySupportedBackends -- same call settings.cpp's
-// DrawGpuBackendRow makes, and cached the same way (see
-// PrewarmSettingsDialogCaches): loading a plugin DLL just to ask isn't
-// something to redo on every screen open. This row's own `available` reads
-// the cached result, and NativeOptions::Bind folds it into the *runtime* row
-// count the list is actually built with (see g_active_row_count) rather than
-// leaving a widget the game created but this file never fills in -- so an
-// appended row's `available` returning false is safe here as long as it is
-// the last row in the table, which it is.
-constexpr const char* kGpuBackendCvar = "gpu_backend";
-constexpr std::array<const char*, 2> kGpuBackendCvarValues = {"d3d12", "vulkan"};
-constexpr const char16_t* kGpuBackendText[] = {u"D3D12", u"Vulkan"};
+// `vsync` is applied live: the renderer re-reads it on the next present (see
+// ApplyVsyncIfChanged), so this row is `live` with no restart caveat. On/Off
+// text is the Fullscreen row's, refreshed by SyncFullscreenText.
+constexpr const char* kVsyncCvar = "vsync";
 
-// Set once by NativeOptions::Bind, before any row-count decision is made.
-bool g_gpu_backend_row_available = false;
-
-bool GpuBackendAvailable() { return g_gpu_backend_row_available; }
-
-const char16_t* GpuBackendLabel() {
+const char16_t* VsyncLabel() {
   const char16_t* base = [] {
     switch (CurrentLanguage()) {
       case XLanguageId::kItalian:
-        return u"Backend GPU";
-      // See ResolutionLabel's comment on why this is safe.
+        return u"Sincronizzazione verticale";
       case XLanguageId::kJapanese:
-        return u"GPUバックエンド";
+        return u"垂直同期";
       case XLanguageId::kGerman:
-        return u"GPU-Backend";
+        return u"VSync";
       case XLanguageId::kFrench:
-        return u"Backend GPU";
+        return u"Synchro verticale";
       case XLanguageId::kSpanish:
-        return u"Backend de GPU";
+        return u"Sincronización vertical";
       case XLanguageId::kEnglish:
       default:
-        return u"GPU Backend";
+        return u"VSync";
     }
   }();
-  return AppendRestartMarker(TranslatedOr(kNativeStringKeyGpuBackendLabel, base),
-                              CvarPendingRestart(kGpuBackendCvar));
+  return TranslatedOr(kNativeStringKeyVsyncLabel, base);
 }
 
-int32_t GetGpuBackendIndex() {
-  const std::string current = rex::cvar::GetFlagByName(kGpuBackendCvar);
-  for (size_t i = 0; i < kGpuBackendCvarValues.size(); ++i) {
-    if (current == kGpuBackendCvarValues[i]) {
-      return static_cast<int32_t>(i);
-    }
-  }
-  return 0;
-}
+int32_t GetVsyncIndex() { return rex::cvar::GetFlagByName(kVsyncCvar) == "true" ? 1 : 0; }
 
-void CommitGpuBackendIndex(int32_t index) {
-  if (index < 0 || index >= static_cast<int32_t>(kGpuBackendCvarValues.size())) {
+void CommitVsyncIndex(int32_t index) {
+  if (index < 0 || index > 1) {
     return;
   }
-  const char* value = kGpuBackendCvarValues[static_cast<size_t>(index)];
-  if (rex::cvar::GetFlagByName(kGpuBackendCvar) == value) {
+  const char* value = index ? "true" : "false";
+  if (rex::cvar::GetFlagByName(kVsyncCvar) == value) {
     return;
   }
-  rex::cvar::SetFlagByName(kGpuBackendCvar, value, /*persist=*/true);
-  SaveToUserSettings(kGpuBackendCvar);
-  REXLOG_INFO("[native_options] gpu backend set to {} (applies on next launch)", value);
+  rex::cvar::SetFlagByName(kVsyncCvar, value, /*persist=*/true);
+  SaveToUserSettings(kVsyncCvar);
 }
 
 // --- Volume (takes over the stock row 1) ------------------------------------
@@ -1026,11 +1000,8 @@ const char16_t* GraphicsLabel() {
 constexpr uint32_t kStockGraphicsRow = 0;
 constexpr uint32_t kStockVolumeRow = 1;
 constexpr uint32_t kFullscreenRow = kVanillaRowCount + 1;
-constexpr uint32_t kLanguageRow = kVanillaRowCount + 2;
-// Kept in the table on every platform; whether it actually shows is decided
-// at runtime by g_gpu_backend_row_available (see GpuBackendAvailable and
-// NativeOptions::Bind), not by a compile-time platform check.
-constexpr uint32_t kGpuBackendRow = kVanillaRowCount + 3;
+constexpr uint32_t kLanguageRow = kVanillaRowCount + 3;
+constexpr uint32_t kVsyncRow = kVanillaRowCount + 2;
 
 constexpr CustomRow kCustomRows[] = {
     {
@@ -1105,16 +1076,13 @@ constexpr CustomRow kCustomRows[] = {
         .live = true,
     },
     {
-        // See the Resolution row above for why this is `live` despite being
-        // restart-scoped.
-        .list_row = kGpuBackendRow,
-        .label = &GpuBackendLabel,
-        .values = kGpuBackendText,
-        .value_count = static_cast<uint32_t>(std::size(kGpuBackendText)),
-        .get = &GetGpuBackendIndex,
-        .commit = &CommitGpuBackendIndex,
+        .list_row = kVsyncRow,
+        .label = &VsyncLabel,
+        .values = g_fullscreen_values.data(),
+        .value_count = static_cast<uint32_t>(g_fullscreen_values.size()),
+        .get = &GetVsyncIndex,
+        .commit = &CommitVsyncIndex,
         .live = true,
-        .available = &GpuBackendAvailable,
     },
 };
 
@@ -1270,8 +1238,8 @@ rex::Runtime* g_runtime = nullptr;
 uint32_t g_list = 0;
 
 // The number of rows the list is actually built with this run -- kTotalRowCount
-// (the table's compile-time maximum) minus one if GpuBackendAvailable() came
-// back false. Set once by NativeOptions::Bind, before the settings screen can
+// (the table's compile-time maximum) minus any appended row whose `available`
+// came back false. Set once by NativeOptions::Bind, before the settings screen can
 // possibly open, and used everywhere that needs the *real* row count: how
 // many rows ListSetup asks the game to create, how many entries BindRows
 // hands over, and the upper bound CycleRow/ListUpdate iterate to. This is
@@ -2202,15 +2170,6 @@ void NativeOptions::Bind(rex::Runtime* runtime) {
     REXLOG_WARN("[native_options] set-widget-text/alloc unavailable; no extra rows");
     return;
   }
-
-  // GPU Backend is the last row in the table, so deciding it out here -- once,
-  // rather than per screen-open -- and folding it into g_active_row_count
-  // before any hook runs is enough to make it disappear cleanly. The native
-  // renderer loads no GPU plugin, so there is no backend to choose between, and
-  // asking the plugin loader would dlopen a plugin only to read its list (which
-  // can deadlock against another thread's first log call under the loader lock).
-  g_gpu_backend_row_available = false;
-  --g_active_row_count;
 
   if (!dispatcher->OverrideFunction(kListSetupFnAddr, &NativeOptions_ListSetup,
                                     &g_original_list_setup_fn)) {

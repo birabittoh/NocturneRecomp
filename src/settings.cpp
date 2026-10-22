@@ -101,8 +101,8 @@ constexpr std::array kGameDefaults = {
 // host_timer_resolution_ms is absent here on purpose: 5ms is right for
 // everyone, so it gets no curated row. It is listed in kAdvancedCvarNames
 // instead, where the generic widget exposes it as the raw millisecond value.
-constexpr std::array<const char*, 9> kBasicCvarNames = {
-    "fullscreen",  "resolution",    "user_name",  "user_language", "gpu_backend",
+constexpr std::array<const char*, 10> kBasicCvarNames = {
+    "fullscreen",  "vsync", "resolution",    "user_name",  "user_language", "gpu_backend",
     "vulkan_device", "audio_mute", "audio_volume", "graphics_style_enhanced"};
 
 // Named resolution presets offered by DrawResolutionRow, ordered ascending.
@@ -309,6 +309,7 @@ class CuratedSettingsDialog : public rex::ui::ImGuiDialog {
     DrawUpdateSection();
 
     DrawFullscreenRow();
+    DrawVsyncRow();
     DrawResolutionRow();
     DrawGraphicsStyleRow();
     DrawAudioMuteRow();
@@ -488,6 +489,19 @@ class CuratedSettingsDialog : public rex::ui::ImGuiDialog {
     ImGui::TextUnformatted("Fullscreen");
     ImGui::SameLine(180.0f);
     ImGui::PushID("fullscreen");
+    if (rex::ui::DrawCvarWidget(*entry, 160.0f, /*persist=*/true)) {
+      SaveBasic();
+    }
+    ImGui::PopID();
+  }
+
+  void DrawVsyncRow() {
+    const auto* entry = rex::cvar::GetFlagInfo("vsync");
+    if (!entry)
+      return;
+    ImGui::TextUnformatted("VSync");
+    ImGui::SameLine(180.0f);
+    ImGui::PushID("vsync");
     if (rex::ui::DrawCvarWidget(*entry, 160.0f, /*persist=*/true)) {
       SaveBasic();
     }
