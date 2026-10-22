@@ -234,6 +234,8 @@ set(NOCTURNERECOMP_SOURCES
     src/graphics_settings.cpp
     src/host_timer_resolution.cpp
     src/native_options.cpp
+    src/player_inspector.cpp
+    src/player_status.cpp
     src/ppc_interpreter.cpp
     src/rando_menu.cpp
     src/rando_xex.cpp

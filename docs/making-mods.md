@@ -384,6 +384,16 @@ per guest frame on GPU swap, useful for anything that needs to react every
 frame rather than just at startup or launch. Ticks run on the
 command-processor thread, not the render/UI thread.
 
+**Player status (relics, items, stats)**: the base game registers
+`"player.status"` (the live `g_Status` struct) and publishes
+`player.save_loaded`, `player.save_unloaded`, `player.relic_changed` (u64 =
+relic index, bytes = old/new flags) and `player.item_changed` (u64 = item id,
+bytes = old/new count) from a per-frame tick. `rexmod/player_status.h` has the
+layout constants, relic/item enums and name tables, and a read-only
+`rexmod::player::View` over the struct. The layout and its confidence notes live
+in the base game's `src/player_status.cpp`; the header mirrors it. The base game's
+inventory inspector (I) shows all of this live.
+
 **Ordering**: producers register in `OnCreateDialogs` (dispatched in
 `enabled_mods` order, before `OnModuleLaunched`); consumers look up lazily,
 on first use, rather than assuming a specific dispatch order themselves.
