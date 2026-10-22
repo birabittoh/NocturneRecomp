@@ -42,6 +42,7 @@
 #include "native_renderer.h"
 #include "native_renderer_overlay.h"
 #include "native_renderer_plume.h"
+#include "rando_menu.h"
 #include "rando_xex.h"
 #include "room_presence.h"
 #include "settings.h"
@@ -286,6 +287,7 @@ class NocturnerecompApp : public rex::ReXApp {
     nocturne::Achievements().AttachWatcher(drawer);
     nocturne::GetAccentColor().AttachWatcher(drawer);
     nocturne::GetFastForward().AttachWatcher(drawer);
+    nocturne::GetRandoMenu().Attach(drawer, game_data_root(), user_data_root());
   }
 
   // Replace the SDK's default pixel font with a serif face that fits the

@@ -235,7 +235,10 @@ set(NOCTURNERECOMP_SOURCES
     src/host_timer_resolution.cpp
     src/native_options.cpp
     src/ppc_interpreter.cpp
+    src/rando_menu.cpp
     src/rando_xex.cpp
+    src/rando/rando_core.cpp
+    src/rando/rando_host.cpp
     src/room_presence.cpp
     src/settings.cpp
     src/xbox_live.cpp
@@ -269,6 +272,21 @@ rexglue_setup_target(nocturnerecomp)
 
 target_link_libraries(nocturnerecomp PRIVATE plume)
 target_include_directories(nocturnerecomp PRIVATE src/gpu ext/KryptonRecomp)
+
+# MottZilla's SOTN_XB_RANDO core (see src/rando/rando_core.cpp). It is a Win32
+# program's source: off Windows, src/rando/compat supplies the two headers
+# (windows.h, process.h) it includes. Its code is compiled as shipped, so its
+# warnings are not ours to fix.
+set(NOCTURNE_RANDO_DIR "${CMAKE_SOURCE_DIR}/ext/SOTN_XB_RANDO/Source")
+if(NOT EXISTS "${NOCTURNE_RANDO_DIR}/xb_rando.cpp")
+    message(FATAL_ERROR
+        "SOTN_XB_RANDO submodule is missing. Run: git submodule update --init --recursive")
+endif()
+target_include_directories(nocturnerecomp PRIVATE "${NOCTURNE_RANDO_DIR}")
+if(NOT WIN32)
+    target_include_directories(nocturnerecomp PRIVATE src/rando/compat)
+endif()
+set_source_files_properties(src/rando/rando_core.cpp PROPERTIES COMPILE_OPTIONS "-w")
 # The `.S` only names the pack; the pack itself must exist before it assembles.
 set_source_files_properties(${NOCTURNE_GUEST_SHADER_PACK_ASM} PROPERTIES
     OBJECT_DEPENDS ${NOCTURNE_GUEST_SHADER_PACK})

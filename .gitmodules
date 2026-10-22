@@ -4,3 +4,6 @@
 [submodule "ext/plume"]
 	path = ext/plume
 	url = https://github.com/birabittoh/plume.git
+[submodule "ext/SOTN_XB_RANDO"]
+	path = ext/SOTN_XB_RANDO
+	url = https://github.com/MottZilla/SOTN_XB_RANDO
