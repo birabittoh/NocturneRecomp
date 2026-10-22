@@ -36,6 +36,7 @@ extern "C" REX_FUNC(__imp__D3DDevice__DrawVertices);
 extern "C" REX_FUNC(__imp__D3DDevice__DrawIndexedVertices);
 extern "C" REX_FUNC(__imp__D3DDevice__BeginVertices);
 extern "C" REX_FUNC(__imp__D3DDevice__Resolve);
+extern "C" REX_FUNC(__imp__D3DDevice__ClearF);
 extern "C" REX_FUNC(__imp__D3DDevice__SetRenderTarget);
 extern "C" REX_FUNC(__imp__D3DDevice__SetTexture);
 extern "C" REX_FUNC(__imp__D3DDevice__SetVertexShader);
@@ -218,9 +219,18 @@ REX_HOOK_RAW(D3DDevice__Resolve) {
   }
   // (device, flags, source rect, destination texture, destination point,
   // level, slice, clear colour, ...).
-  const uint32_t dev = ctx.r3.u32, flags = ctx.r4.u32, clear_color = ctx.r10.u32;
+  const uint32_t dev = ctx.r3.u32, flags = ctx.r4.u32, destination = ctx.r6.u32,
+                 clear_color = ctx.r10.u32;
   __imp__D3DDevice__Resolve(ctx, base);
-  nocturne::GuestResolve(base, dev, flags, clear_color);
+  nocturne::GuestResolve(base, dev, flags, destination, clear_color);
+}
+
+// Clear reaches this once per rect (or once with none), so it covers both.
+REX_HOOK_RAW(D3DDevice__ClearF) {
+  FlushInline(base);
+  const uint32_t dev = ctx.r3.u32, flags = ctx.r4.u32, rect = ctx.r5.u32, color = ctx.r6.u32;
+  __imp__D3DDevice__ClearF(ctx, base);
+  nocturne::GuestClear(base, dev, flags, rect, color);
 }
 
 REX_HOOK_RAW(D3DDevice__SetRenderTarget) {

@@ -18,6 +18,7 @@
 #include "guest_shaders.h"
 #include "native_renderer_plume.h"
 #include "native_renderer_plume_internal.h"
+#include "native_renderer_texture.h"
 #ifdef _WIN32
 #include "shaders/blitVert.hlsl.dxil.h"
 #include "shaders/blitFrag.hlsl.dxil.h"
@@ -79,6 +80,10 @@ constexpr uint32_t kBoundDeclaration = 0x2D14;
 constexpr uint32_t kBoundVertexShader = 0x3080;
 constexpr uint32_t kBoundPixelShader = 0x307C;
 constexpr uint32_t kBoundRenderTarget0 = 0x2F80;
+constexpr uint32_t kTextureFetchConstants = 1024;  // 24 bytes per stage
+// A texture object's own copy of its fetch constant, which SetTexture and
+// Resolve both read.
+constexpr uint32_t kTextureObjectFetch = 0x1C;
 constexpr uint32_t Reg2200(uint32_t reg) { return 10420 + 4 * (reg - 0x2200); }
 constexpr uint32_t Reg2100(uint32_t reg) { return 10316 + 4 * (reg - 0x2100); }
 
@@ -125,6 +130,7 @@ enum DropReason {
   kDropTopology,
   kDropPipeline,
   kDropArena,
+  kDropTextures,
   kDropCount,
 };
 constexpr const char* kDropNames[kDropCount] = {
@@ -135,6 +141,7 @@ constexpr const char* kDropNames[kDropCount] = {
     "a primitive type with no host topology",
     "pipeline creation failed",
     "the upload arena could not grow",
+    "a texture descriptor set could not be created",
 };
 uint64_t g_drops[kDropCount] = {};
 
@@ -233,8 +240,6 @@ struct Resources {
   std::unique_ptr<RenderPipelineLayout> layout;
   std::unique_ptr<RenderTexture> white;
   std::unique_ptr<RenderSampler> sampler;
-  std::unique_ptr<RenderDescriptorSet> texture_set;
-  std::unique_ptr<RenderDescriptorSet> sampler_set;
 
   // The guest's render target, and the image a Resolve copies it into, which
   // is what the present shows.
@@ -249,6 +254,24 @@ struct Resources {
   std::unique_ptr<RenderShader> vertex_shaders[256];
   std::unique_ptr<RenderShader> pixel_shaders[256];
 } g_res;
+
+// Descriptor sets by what they hold. A set cannot be rewritten while a frame
+// that bound it may still be in flight, so each distinct binding gets its own
+// and keeps it; the title binds few distinct combinations. The textures and
+// samplers they point at live as long as the mirror's cache, i.e. until
+// shutdown.
+struct TextureBinding {
+  RenderTexture* textures[kTextureSlots] = {};
+  RenderSampler* samplers[kTextureSlots] = {};
+  std::unique_ptr<RenderDescriptorSet> texture_set;
+  std::unique_ptr<RenderDescriptorSet> sampler_set;
+};
+std::vector<std::unique_ptr<TextureBinding>> g_bindings;
+
+// The base address of the texture the last Resolve wrote into. A draw sampling
+// it samples the host image the Resolve produced, not guest memory, which the
+// host never writes.
+uint32_t g_resolve_address = 0;
 
 // Per frame recording state, reset when a new frame's command list begins.
 uint64_t g_frame_serial = 0;
@@ -358,23 +381,28 @@ bool CreateBlit(RenderDevice* device) {
   return true;
 }
 
+// The texture and sampler set layouts. One range per slot rather than one
+// sixteen wide: Plume turns a range into a single Vulkan binding with an array
+// count, and the HLSL declares sixteen separate objects at bindings 0..15 (see
+// Eternal Sonata's layout).
+RenderDescriptorSetDesc SlotSetDesc(RenderDescriptorRangeType type) {
+  static RenderDescriptorRange texture_ranges[kTextureSlots];
+  static RenderDescriptorRange sampler_ranges[kTextureSlots];
+  RenderDescriptorRange* ranges =
+      type == RenderDescriptorRangeType::TEXTURE ? texture_ranges : sampler_ranges;
+  for (uint32_t slot = 0; slot < kTextureSlots; ++slot)
+    ranges[slot] = RenderDescriptorRange(type, slot, 1);
+  return RenderDescriptorSetDesc(ranges, kTextureSlots);
+}
+
 bool EnsureResources(RenderDevice* device) {
   if (g_res.attempted)
     return g_res.ready;
   g_res.attempted = true;
 
-  // One range per slot rather than one sixteen wide: Plume turns a range into
-  // a single Vulkan binding with an array count, and the HLSL declares sixteen
-  // separate objects at bindings 0..15 (see Eternal Sonata's layout).
-  RenderDescriptorRange texture_ranges[kTextureSlots];
-  RenderDescriptorRange sampler_ranges[kTextureSlots];
-  for (uint32_t slot = 0; slot < kTextureSlots; ++slot) {
-    texture_ranges[slot] = RenderDescriptorRange(RenderDescriptorRangeType::TEXTURE, slot, 1);
-    sampler_ranges[slot] = RenderDescriptorRange(RenderDescriptorRangeType::SAMPLER, slot, 1);
-  }
   const RenderDescriptorSetDesc set_descs[] = {
-      RenderDescriptorSetDesc(texture_ranges, kTextureSlots),
-      RenderDescriptorSetDesc(sampler_ranges, kTextureSlots),
+      SlotSetDesc(RenderDescriptorRangeType::TEXTURE),
+      SlotSetDesc(RenderDescriptorRangeType::SAMPLER),
   };
   RenderRootDescriptorDesc root_descriptors[kRootCount];
   for (uint32_t i = 0; i < kRootCount; ++i) {
@@ -401,15 +429,9 @@ bool EnsureResources(RenderDevice* device) {
   sampler_desc.addressV = RenderTextureAddressMode::CLAMP;
   sampler_desc.addressW = RenderTextureAddressMode::CLAMP;
   g_res.sampler = device->createSampler(sampler_desc);
-  g_res.texture_set = device->createDescriptorSet(set_descs[0]);
-  g_res.sampler_set = device->createDescriptorSet(set_descs[1]);
-  if (!g_res.white || !g_res.sampler || !g_res.texture_set || !g_res.sampler_set) {
+  if (!g_res.white || !g_res.sampler) {
     REXLOG_ERROR("native_renderer: could not create the placeholder texture bindings");
     return false;
-  }
-  for (uint32_t slot = 0; slot < kTextureSlots; ++slot) {
-    g_res.texture_set->setTexture(slot, g_res.white.get(), RenderTextureLayout::SHADER_READ);
-    g_res.sampler_set->setSampler(slot, g_res.sampler.get());
   }
 
   if (!CreateTarget(device, g_res.target) || !CreateTarget(device, g_res.front)) {
@@ -442,6 +464,7 @@ RenderCommandList* BeginRecording() {
     g_arena_slot = PlumeFrameSlot();
     for (ArenaBlock& block : g_arenas[g_arena_slot])
       block.used = 0;
+    TextureMirrorBeginFrame(g_arena_slot);
     g_target_bound = false;
   }
   if (!g_targets_cleared) {
@@ -851,7 +874,8 @@ void ScreenTransform(const uint8_t* base, uint32_t device, float out[4]) {
 // XeDrawState, words in the order xenos_hlsl.py declares them.
 constexpr uint32_t kDrawStateWords = 32;
 
-void BuildDrawState(const uint8_t* base, uint32_t device, uint32_t words[kDrawStateWords]) {
+void BuildDrawState(const uint8_t* base, uint32_t device, const uint32_t swizzles[kTextureSlots],
+                    uint32_t words[kDrawStateWords]) {
   std::memset(words, 0, kDrawStateWords * 4);
   // RB_COLORCONTROL: alpha_func +0 (3 bits), alpha_test_enable +3. A disabled
   // test is sent as ALWAYS.
@@ -861,10 +885,65 @@ void BuildDrawState(const uint8_t* base, uint32_t device, uint32_t words[kDrawSt
   const float one = 1.0f;
   for (uint32_t i : {12u, 13u, 14u, 15u})
     std::memcpy(&words[i], &one, 4);  // xe_clip_scale, xe_texture0_scale
-  // The identity swizzle (xyzw) for every stage, until the texture mirror
-  // supplies the guest's.
+  // The fetch constants' swizzles, applied by xe_texture_fetch_post: the
+  // mirror keeps every texel in Xenos component order (see
+  // native_renderer_texture.h).
   for (uint32_t stage = 0; stage < kTextureSlots; ++stage)
-    words[16 + stage] = 0x688u;
+    words[16 + stage] = swizzles[stage];
+}
+
+// The descriptor sets for the textures the pixel shader declares, out of the
+// device's fetch constants. Uploads anything new through `commands`, so this
+// runs before the target is bound. A slot the shader does not declare, or one
+// the mirror cannot produce, samples the white placeholder.
+const TextureBinding* BindTextures(RenderCommandList* commands, RenderDevice* device,
+                                   uint8_t* base, uint32_t dev, uint32_t texture_mask,
+                                   uint32_t swizzles[kTextureSlots]) {
+  TextureBinding wanted;
+  for (uint32_t stage = 0; stage < kTextureSlots; ++stage) {
+    wanted.textures[stage] = g_res.white.get();
+    wanted.samplers[stage] = g_res.sampler.get();
+    swizzles[stage] = 0x688u;
+    TextureFetch fetch;
+    if ((texture_mask & (1u << stage)) == 0 ||
+        !ReadTextureFetch(base, dev + kTextureFetchConstants + 24 * stage, fetch))
+      continue;
+    RenderTexture* texture = nullptr;
+    if (fetch.base_address == g_resolve_address) {
+      g_res.front.Transition(commands, RenderTextureLayout::SHADER_READ);
+      texture = g_res.front.texture.get();
+    } else {
+      texture = MirrorTexture(commands, base, fetch);
+    }
+    if (texture == nullptr)
+      continue;
+    wanted.textures[stage] = texture;
+    wanted.samplers[stage] = MirrorSampler(fetch);
+    swizzles[stage] = fetch.swizzle;
+  }
+
+  for (const auto& binding : g_bindings) {
+    if (std::equal(std::begin(wanted.textures), std::end(wanted.textures),
+                   std::begin(binding->textures)) &&
+        std::equal(std::begin(wanted.samplers), std::end(wanted.samplers),
+                   std::begin(binding->samplers)))
+      return binding.get();
+  }
+  auto binding = std::make_unique<TextureBinding>();
+  std::copy(std::begin(wanted.textures), std::end(wanted.textures), binding->textures);
+  std::copy(std::begin(wanted.samplers), std::end(wanted.samplers), binding->samplers);
+  binding->texture_set = device->createDescriptorSet(SlotSetDesc(RenderDescriptorRangeType::TEXTURE));
+  binding->sampler_set = device->createDescriptorSet(SlotSetDesc(RenderDescriptorRangeType::SAMPLER));
+  if (!binding->texture_set || !binding->sampler_set)
+    return nullptr;
+  for (uint32_t slot = 0; slot < kTextureSlots; ++slot) {
+    binding->texture_set->setTexture(slot, binding->textures[slot], RenderTextureLayout::SHADER_READ);
+    binding->sampler_set->setSampler(slot, binding->samplers[slot]);
+  }
+  if (g_bindings.size() % 256 == 255)
+    REXLOG_WARN("native_renderer: {} distinct texture bindings", g_bindings.size() + 1);
+  g_bindings.push_back(std::move(binding));
+  return g_bindings.back().get();
 }
 
 // ---------------------------------------------------------------------------
@@ -1017,7 +1096,14 @@ void GuestDrawInline(uint8_t* base, const GuestInlineDraw& draw) {
   }
   CopySwapped(bools.cpu, base, dev + kBoolShadow, 32);
   CopySwapped(bools.cpu + 32, base, dev + kLoopShadow, 128);
-  BuildDrawState(base, dev, reinterpret_cast<uint32_t*>(draw_state.cpu));
+  uint32_t swizzles[kTextureSlots];
+  const TextureBinding* textures =
+      BindTextures(commands, device, base, dev, pipeline->pixel->texture_mask, swizzles);
+  if (textures == nullptr) {
+    Drop(kDropTextures, 0);
+    return;
+  }
+  BuildDrawState(base, dev, swizzles, reinterpret_cast<uint32_t*>(draw_state.cpu));
   ScreenTransform(base, dev, reinterpret_cast<float*>(screen.cpu));
 
   BindTarget(commands);
@@ -1029,8 +1115,8 @@ void GuestDrawInline(uint8_t* base, const GuestInlineDraw& draw) {
   commands->setGraphicsRootDescriptor(bools.ref, kRootPixelBools);
   commands->setGraphicsRootDescriptor(draw_state.ref, kRootDrawState);
   commands->setGraphicsRootDescriptor(screen.ref, kRootScreenTransform);
-  commands->setGraphicsDescriptorSet(g_res.texture_set.get(), kTextureDescriptorSet);
-  commands->setGraphicsDescriptorSet(g_res.sampler_set.get(), kSamplerDescriptorSet);
+  commands->setGraphicsDescriptorSet(textures->texture_set.get(), kTextureDescriptorSet);
+  commands->setGraphicsDescriptorSet(textures->sampler_set.get(), kSamplerDescriptorSet);
 
   const RenderInputSlot slot(0, draw.stride);
   const RenderVertexBufferView vertex_view(vertices.ref, vertex_bytes);
@@ -1044,11 +1130,20 @@ void GuestDrawInline(uint8_t* base, const GuestInlineDraw& draw) {
   }
 }
 
-void GuestResolve(uint8_t* base, uint32_t device, uint32_t flags, uint32_t clear_color) {
+void GuestResolve(uint8_t* base, uint32_t device, uint32_t flags, uint32_t destination,
+                  uint32_t clear_color) {
   (void)device;
   RenderCommandList* commands = BeginRecording();
   if (commands == nullptr)
     return;
+
+  TextureFetch fetch;
+  if (destination != 0 && ReadTextureFetch(base, destination + kTextureObjectFetch, fetch) &&
+      fetch.base_address != g_resolve_address) {
+    g_resolve_address = fetch.base_address;
+    REXLOG_INFO("native_renderer: resolving into a {}x{} format {} texture at {:08X}", fetch.width,
+                fetch.height, fetch.format, fetch.base_address);
+  }
 
   g_res.target.Transition(commands, RenderTextureLayout::COPY_SOURCE);
   g_res.front.Transition(commands, RenderTextureLayout::COPY_DEST);
@@ -1065,6 +1160,32 @@ void GuestResolve(uint8_t* base, uint32_t device, uint32_t flags, uint32_t clear
     BindTarget(commands);
     commands->clearColor(0, RenderColor(color[0], color[1], color[2], color[3]));
   }
+}
+
+void GuestClear(uint8_t* base, uint32_t device, uint32_t flags, uint32_t rect, uint32_t color) {
+  (void)device;
+  RenderCommandList* commands = BeginRecording();
+  if (commands == nullptr)
+    return;
+  float rgba[4] = {0.0f, 0.0f, 0.0f, 0.0f};
+  if (color != 0) {
+    for (uint32_t i = 0; i < 4; ++i)
+      rgba[i] = LoadFloat(base, color + 4 * i);
+  }
+  RenderRect host_rect(0, 0, int32_t(kTargetWidth), int32_t(kTargetHeight));
+  if (rect != 0) {
+    host_rect = RenderRect(int32_t(Load32(base, rect)), int32_t(Load32(base, rect + 4)),
+                           int32_t(Load32(base, rect + 8)), int32_t(Load32(base, rect + 12)));
+  }
+  static uint32_t logged = 0;
+  if (logged < 8) {
+    ++logged;
+    REXLOG_INFO("native_renderer: clear flags {:X} rect ({}, {}, {}, {}) colour ({}, {}, {}, {})",
+                flags, host_rect.left, host_rect.top, host_rect.right, host_rect.bottom, rgba[0],
+                rgba[1], rgba[2], rgba[3]);
+  }
+  BindTarget(commands);
+  commands->clearColor(0, RenderColor(rgba[0], rgba[1], rgba[2], rgba[3]), &host_rect, 1);
 }
 
 void CompositeGuestImage(RenderCommandList* commands, const RenderFramebuffer* framebuffer,
@@ -1126,6 +1247,9 @@ void ShutdownGuestDraw() {
     if (g_drops[i] != 0)
       REXLOG_INFO("native_renderer: dropped {} draw(s): {}", g_drops[i], kDropNames[i]);
   }
+  g_bindings.clear();
+  ShutdownTextureMirror();
+  g_resolve_address = 0;
   g_pipelines.clear();
   for (auto& arena : g_arenas)
     arena.clear();
