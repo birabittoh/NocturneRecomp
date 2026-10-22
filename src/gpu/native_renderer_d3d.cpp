@@ -168,8 +168,8 @@ void TraceDraw(uint8_t* base, const InlineBlock& b) {
 }  // namespace
 
 // The one patch draw (the smoke strip): stream 0 holds the four control
-// points, which the vertex buffer header locates (physical address at +0x18,
-// low bits flags). Consumed right after the guest's draw, before it unbinds the
+// points, which the vertex buffer header locates (address at +0x18, low bits
+// flags). Consumed right after the guest's draw, before it unbinds the
 // stream.
 REX_HOOK_RAW(D3DDevice__DrawVerticesTessellated) {
   FlushInline(base);
@@ -177,7 +177,12 @@ REX_HOOK_RAW(D3DDevice__DrawVerticesTessellated) {
   __imp__D3DDevice__DrawVerticesTessellated(ctx, base);
   const uint32_t vb = U32(base, dev + 4 * 0xbe5);
   if (vb && count == 4)
-    nocturne::GuestDrawTessellatedQuad(base, dev, 0xC0000000u | (U32(base, vb + 0x18) & 0x1FFFFFFCu));
+  {
+    // The header holds the data's virtual address (flags in the low bits); only
+    // a physical one needs a view.
+    const uint32_t data = U32(base, vb + 0x18) & ~3u;
+    nocturne::GuestDrawTessellatedQuad(base, dev, data >= 0x80000000u ? data : 0xC0000000u | (data & 0x1FFFFFFFu));
+  }
 }
 
 bool g_inline_pending = false;
