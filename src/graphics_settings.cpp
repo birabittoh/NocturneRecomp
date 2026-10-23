@@ -31,6 +31,8 @@
 #include <rex/system/mod_registry.h>
 #include <rex/system/mod_storage.h>
 
+#include "function_hooks.h"
+
 namespace nocturne {
 
 // Y position (in the front-end's 640-wide coordinate space) of the persistent
@@ -240,10 +242,10 @@ const char16_t* PresetsLabelForCurrentLanguage() {
   }
 }
 
-PPCFunc* g_original_stretch_fn = nullptr;
-PPCFunc* g_original_perframe_fn = nullptr;
-PPCFunc* g_original_percent_to_rect_fn = nullptr;
-PPCFunc* g_original_set_widget_text_fn = nullptr;
+PPCFunc* g_original_stretch_fn = NOCTURNE_ORIGINAL_FN(kChangeScreenSizeFnAddr);
+PPCFunc* g_original_perframe_fn = NOCTURNE_ORIGINAL_FN(kFixedTimestepTickFnAddr);
+PPCFunc* g_original_percent_to_rect_fn = NOCTURNE_ORIGINAL_FN(kStretchPercentToRectFnAddr);
+PPCFunc* g_original_set_widget_text_fn = NOCTURNE_ORIGINAL_FN(kSetWidgetTextByIdFnAddr);
 PPCFunc* g_widget_reposition_fn = nullptr;
 rex::system::ModRegistry* g_mod_registry = nullptr;
 
@@ -1266,9 +1268,15 @@ void GraphicsSettings::Bind(rex::Runtime* runtime) {
     g_restoring.store(true, std::memory_order_release);
   }
 
-  // The SDK no longer lets us replace arbitrary recompiled functions, so none of the stretch
-  // screen overrides are installed. See docs/function-override-handoff.md.
-  REXLOG_INFO("[graphics_settings] disabled: function overrides are unavailable");
+  g_widget_reposition_fn = dispatcher->GetFunction(kStretchWidgetRepositionFnAddr);
+  g_alloc_fn = dispatcher->GetFunction(kAllocFnAddr);
+  g_text_widget_ctor_fn = dispatcher->GetFunction(kTextWidgetCtorFnAddr);
+  g_set_text_fn = dispatcher->GetFunction(kSetTextFnAddr);
+  g_text_width_fn = dispatcher->GetFunction(kTextWidthFnAddr);
+  g_set_text_colour_fn = dispatcher->GetFunction(kSetTextColourFnAddr);
+
+  // The stretch screen's functions are hooked at codegen time (nocturnerecomp_config.toml).
+  REXLOG_INFO("[graphics_settings] hooks installed");
 }
 
 GraphicsSettings& GetGraphicsSettings() {
@@ -1277,3 +1285,17 @@ GraphicsSettings& GetGraphicsSettings() {
 }
 
 }  // namespace nocturne
+
+// Entry hooks, wired up in nocturnerecomp_config.toml.
+bool GraphicsSettings_PercentToRectHook(PPCRegister& r3) {
+  return nocturne::fnhook::Enter(r3, nocturne::kStretchPercentToRectFnAddr, &nocturne::GraphicsSettings_PercentToRect);
+}
+bool GraphicsSettings_StretchScreenHook(PPCRegister& r3) {
+  return nocturne::fnhook::Enter(r3, nocturne::kChangeScreenSizeFnAddr, &nocturne::GraphicsSettings_StretchScreen);
+}
+bool GraphicsSettings_PerFrameHook(PPCRegister& r3) {
+  return nocturne::fnhook::Enter(r3, nocturne::kFixedTimestepTickFnAddr, &nocturne::GraphicsSettings_PerFrame);
+}
+bool GraphicsSettings_SetWidgetTextHook(PPCRegister& r3) {
+  return nocturne::fnhook::Enter(r3, nocturne::kSetWidgetTextByIdFnAddr, &nocturne::GraphicsSettings_SetWidgetText);
+}

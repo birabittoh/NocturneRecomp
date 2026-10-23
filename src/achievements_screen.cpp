@@ -34,6 +34,7 @@
 #include <rex/runtime.h>
 #include <rex/system/achievement_manager.h>
 #include <rex/system/function_dispatcher.h>
+#include "function_hooks.h"
 #include <rex/system/kernel_state.h>
 
 namespace nocturne {
@@ -231,9 +232,9 @@ constexpr uint32_t kMsgController = 12;
 constexpr uint32_t kMsgClassButton = 0;
 constexpr uint32_t kButtonCancel = 5;
 
-PPCFunc* g_original_screen_event_fn = nullptr;
-PPCFunc* g_original_screen_activate_fn = nullptr;
-PPCFunc* g_original_screen_update_fn = nullptr;
+PPCFunc* g_original_screen_event_fn = NOCTURNE_ORIGINAL_FN(kScreenEventFnAddr);
+PPCFunc* g_original_screen_activate_fn = NOCTURNE_ORIGINAL_FN(kScreenActivateFnAddr);
+PPCFunc* g_original_screen_update_fn = NOCTURNE_ORIGINAL_FN(kScreenUpdateFnAddr);
 PPCFunc* g_post_event_fn = nullptr;
 PPCFunc* g_alloc_fn = nullptr;
 PPCFunc* g_image_ctor_fn = nullptr;
@@ -993,10 +994,51 @@ void AchievementsScreen::Bind(rex::Runtime* runtime) {
   }
   auto* dispatcher = runtime_->function_dispatcher();
 
-  // The SDK no longer lets us replace arbitrary recompiled functions, so the screen is never
-  // installed and available_ stays false. See docs/function-override-handoff.md.
-  (void)dispatcher;
-  REXLOG_INFO("[achievements_screen] disabled: function overrides are unavailable");
+  g_post_event_fn = dispatcher->GetFunction(kPostEventFnAddr);
+  if (!g_post_event_fn) {
+    REXLOG_WARN("[achievements_screen] page-switch post {:08X} unavailable; the Achievements "
+                "entry keeps opening the SDK overlay",
+                kPostEventFnAddr);
+    return;
+  }
+
+  // The screen's handlers are hooked at codegen time (nocturnerecomp_config.toml); from here on
+  // failures are survivable: the screen still opens and still backs out, it just has nothing on it.
+  available_ = true;
+
+  g_alloc_fn = dispatcher->GetFunction(kAllocFnAddr);
+  g_image_ctor_fn = dispatcher->GetFunction(kImageCtorFnAddr);
+  g_image_set_rect_fn = dispatcher->GetFunction(kImageSetRectFnAddr);
+  g_image_set_tint_fn = dispatcher->GetFunction(kImageSetTintFnAddr);
+  g_text_ctor_fn = dispatcher->GetFunction(kTextCtorFnAddr);
+  g_text_set_text_fn = dispatcher->GetFunction(kTextSetTextFnAddr);
+  g_text_set_scale_fn = dispatcher->GetFunction(kTextSetScaleFnAddr);
+  g_text_set_colour_fn = dispatcher->GetFunction(kTextSetColourFnAddr);
+  g_find_image_fn = dispatcher->GetFunction(kFindImageFnAddr);
+  g_prompt_ctor_fn = dispatcher->GetFunction(kPromptCtorFnAddr);
+  g_prompt_set_glyph_fn = dispatcher->GetFunction(kPromptSetGlyphFnAddr);
+  g_prompt_show_glyph_fn = dispatcher->GetFunction(kPromptShowGlyphFnAddr);
+  g_prompt_set_text_by_id_fn = dispatcher->GetFunction(kPromptSetTextByIdFnAddr);
+  g_prompt_text_offset_fn = dispatcher->GetFunction(kPromptTextOffsetFnAddr);
+  g_prompt_set_colour_fn = dispatcher->GetFunction(kPromptSetColourFnAddr);
+  g_prompt_set_pos_fn = dispatcher->GetFunction(kPromptSetPosFnAddr);
+  g_text_width_fn = dispatcher->GetFunction(kTextWidthFnAddr);
+  g_text_set_text_by_id_fn = dispatcher->GetFunction(kTextSetTextByIdFnAddr);
+
+  REXLOG_INFO("[achievements_screen] hooks installed");
 }
 
 }  // namespace nocturne
+
+// Entry hooks, wired up in nocturnerecomp_config.toml.
+bool AchievementsScreen_ScreenEventHook(PPCRegister& r3) {
+  return nocturne::fnhook::Enter(r3, nocturne::kScreenEventFnAddr, &nocturne::AchievementsScreen_ScreenEvent);
+}
+bool AchievementsScreen_ScreenActivateHook(PPCRegister& r3) {
+  return nocturne::fnhook::Enter(r3, nocturne::kScreenActivateFnAddr,
+                                 &nocturne::AchievementsScreen_ScreenActivate);
+}
+bool AchievementsScreen_ScreenUpdateHook(PPCRegister& r3) {
+  return nocturne::fnhook::Enter(r3, nocturne::kScreenUpdateFnAddr,
+                                 &nocturne::AchievementsScreen_ScreenUpdate);
+}

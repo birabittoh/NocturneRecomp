@@ -77,3 +77,404 @@ jump_address_on_true = 0x825C1B44
 address = 0x825C2CD0
 name = "LeaderboardEventSigninBypass"
 jump_address_on_true = 0x825C2D0C
+
+# ---------------------------------------------------------------------------
+# Function wraps. Each hook sits on a function's first instruction and runs the
+# replacement in src/*.cpp through nocturne::fnhook::Enter (src/function_hooks.h);
+# the replacement calls the original body back through a one-shot pass-through.
+# ---------------------------------------------------------------------------
+
+# Achievements screen (src/achievements_screen.cpp)
+[[midasm_hook]]
+address = 0x825B6ED0
+name = "AchievementsScreen_ScreenEventHook"
+registers = ["r3"]
+return_on_true = true
+
+[[midasm_hook]]
+address = 0x825B7000
+name = "AchievementsScreen_ScreenActivateHook"
+registers = ["r3"]
+return_on_true = true
+
+[[midasm_hook]]
+address = 0x825B7240
+name = "AchievementsScreen_ScreenUpdateHook"
+registers = ["r3"]
+return_on_true = true
+
+# Settings screen (src/native_options.cpp)
+[[midasm_hook]]
+address = 0x825D32B0
+name = "NativeOptions_ListSetupHook"
+registers = ["r3"]
+return_on_true = true
+
+[[midasm_hook]]
+address = 0x825D36B8
+name = "NativeOptions_BindRowsHook"
+registers = ["r3"]
+return_on_true = true
+
+[[midasm_hook]]
+address = 0x825D35C0
+name = "NativeOptions_CycleRowHook"
+registers = ["r3"]
+return_on_true = true
+
+[[midasm_hook]]
+address = 0x825D38A8
+name = "NativeOptions_ListUpdateHook"
+registers = ["r3"]
+return_on_true = true
+
+[[midasm_hook]]
+address = 0x825B3F58
+name = "NativeOptions_SettingsEventHook"
+registers = ["r3"]
+return_on_true = true
+
+[[midasm_hook]]
+address = 0x825B43E0
+name = "NativeOptions_SettingsActivateHook"
+registers = ["r3"]
+return_on_true = true
+
+[[midasm_hook]]
+address = 0x825CA820
+name = "NativeOptions_PromptBarLayoutHook"
+registers = ["r3"]
+return_on_true = true
+
+[[midasm_hook]]
+address = 0x825B4650
+name = "NativeOptions_SettingsBuildHook"
+registers = ["r3"]
+return_on_true = true
+
+[[midasm_hook]]
+address = 0x825CE8E8
+name = "NativeOptions_PostEventHook"
+registers = ["r3"]
+return_on_true = true
+
+[[midasm_hook]]
+address = 0x825B4CC0
+name = "NativeOptions_SettingsUpdateHook"
+registers = ["r3"]
+return_on_true = true
+
+# Stretch / timestep presets (src/graphics_settings.cpp)
+[[midasm_hook]]
+address = 0x825BB2B0
+name = "GraphicsSettings_PercentToRectHook"
+registers = ["r3"]
+return_on_true = true
+
+[[midasm_hook]]
+address = 0x825BA678
+name = "GraphicsSettings_StretchScreenHook"
+registers = ["r3"]
+return_on_true = true
+
+[[midasm_hook]]
+address = 0x8258B3B8
+name = "GraphicsSettings_PerFrameHook"
+registers = ["r3"]
+return_on_true = true
+
+[[midasm_hook]]
+address = 0x825CFC68
+name = "GraphicsSettings_SetWidgetTextHook"
+registers = ["r3"]
+return_on_true = true
+
+# Randomizer code patches (src/rando_runtime.cpp, src/rando_hooked_functions.inc)
+[[midasm_hook]]
+address = 0x8223AB38
+name = "RandoHook_8223AB38"
+registers = ["r3"]
+return_on_true = true
+
+[[midasm_hook]]
+address = 0x8223DBC8
+name = "RandoHook_8223DBC8"
+registers = ["r3"]
+return_on_true = true
+
+[[midasm_hook]]
+address = 0x8223F2A0
+name = "RandoHook_8223F2A0"
+registers = ["r3"]
+return_on_true = true
+
+[[midasm_hook]]
+address = 0x8224E208
+name = "RandoHook_8224E208"
+registers = ["r3"]
+return_on_true = true
+
+[[midasm_hook]]
+address = 0x8225AED0
+name = "RandoHook_8225AED0"
+registers = ["r3"]
+return_on_true = true
+
+[[midasm_hook]]
+address = 0x822AB3C0
+name = "RandoHook_822AB3C0"
+registers = ["r3"]
+return_on_true = true
+
+[[midasm_hook]]
+address = 0x822AB528
+name = "RandoHook_822AB528"
+registers = ["r3"]
+return_on_true = true
+
+[[midasm_hook]]
+address = 0x822AB688
+name = "RandoHook_822AB688"
+registers = ["r3"]
+return_on_true = true
+
+[[midasm_hook]]
+address = 0x822C3D58
+name = "RandoHook_822C3D58"
+registers = ["r3"]
+return_on_true = true
+
+[[midasm_hook]]
+address = 0x822CC688
+name = "RandoHook_822CC688"
+registers = ["r3"]
+return_on_true = true
+
+[[midasm_hook]]
+address = 0x822CCA08
+name = "RandoHook_822CCA08"
+registers = ["r3"]
+return_on_true = true
+
+[[midasm_hook]]
+address = 0x822CE0D8
+name = "RandoHook_822CE0D8"
+registers = ["r3"]
+return_on_true = true
+
+[[midasm_hook]]
+address = 0x822D7490
+name = "RandoHook_822D7490"
+registers = ["r3"]
+return_on_true = true
+
+[[midasm_hook]]
+address = 0x822E4D90
+name = "RandoHook_822E4D90"
+registers = ["r3"]
+return_on_true = true
+
+[[midasm_hook]]
+address = 0x822E80C0
+name = "RandoHook_822E80C0"
+registers = ["r3"]
+return_on_true = true
+
+[[midasm_hook]]
+address = 0x8230A020
+name = "RandoHook_8230A020"
+registers = ["r3"]
+return_on_true = true
+
+[[midasm_hook]]
+address = 0x82311E38
+name = "RandoHook_82311E38"
+registers = ["r3"]
+return_on_true = true
+
+[[midasm_hook]]
+address = 0x82314AE8
+name = "RandoHook_82314AE8"
+registers = ["r3"]
+return_on_true = true
+
+[[midasm_hook]]
+address = 0x8231CDF8
+name = "RandoHook_8231CDF8"
+registers = ["r3"]
+return_on_true = true
+
+[[midasm_hook]]
+address = 0x82343678
+name = "RandoHook_82343678"
+registers = ["r3"]
+return_on_true = true
+
+[[midasm_hook]]
+address = 0x82347BB0
+name = "RandoHook_82347BB0"
+registers = ["r3"]
+return_on_true = true
+
+[[midasm_hook]]
+address = 0x8234CC40
+name = "RandoHook_8234CC40"
+registers = ["r3"]
+return_on_true = true
+
+[[midasm_hook]]
+address = 0x8234DC28
+name = "RandoHook_8234DC28"
+registers = ["r3"]
+return_on_true = true
+
+[[midasm_hook]]
+address = 0x82395868
+name = "RandoHook_82395868"
+registers = ["r3"]
+return_on_true = true
+
+[[midasm_hook]]
+address = 0x823AB6B8
+name = "RandoHook_823AB6B8"
+registers = ["r3"]
+return_on_true = true
+
+[[midasm_hook]]
+address = 0x823C9228
+name = "RandoHook_823C9228"
+registers = ["r3"]
+return_on_true = true
+
+[[midasm_hook]]
+address = 0x823CBB60
+name = "RandoHook_823CBB60"
+registers = ["r3"]
+return_on_true = true
+
+[[midasm_hook]]
+address = 0x824024E8
+name = "RandoHook_824024E8"
+registers = ["r3"]
+return_on_true = true
+
+[[midasm_hook]]
+address = 0x82405F98
+name = "RandoHook_82405F98"
+registers = ["r3"]
+return_on_true = true
+
+[[midasm_hook]]
+address = 0x8240DDA0
+name = "RandoHook_8240DDA0"
+registers = ["r3"]
+return_on_true = true
+
+[[midasm_hook]]
+address = 0x8240E890
+name = "RandoHook_8240E890"
+registers = ["r3"]
+return_on_true = true
+
+[[midasm_hook]]
+address = 0x82428938
+name = "RandoHook_82428938"
+registers = ["r3"]
+return_on_true = true
+
+[[midasm_hook]]
+address = 0x8242AC30
+name = "RandoHook_8242AC30"
+registers = ["r3"]
+return_on_true = true
+
+[[midasm_hook]]
+address = 0x8242F0D0
+name = "RandoHook_8242F0D0"
+registers = ["r3"]
+return_on_true = true
+
+[[midasm_hook]]
+address = 0x82434598
+name = "RandoHook_82434598"
+registers = ["r3"]
+return_on_true = true
+
+[[midasm_hook]]
+address = 0x82444F00
+name = "RandoHook_82444F00"
+registers = ["r3"]
+return_on_true = true
+
+[[midasm_hook]]
+address = 0x8244BB58
+name = "RandoHook_8244BB58"
+registers = ["r3"]
+return_on_true = true
+
+[[midasm_hook]]
+address = 0x82467318
+name = "RandoHook_82467318"
+registers = ["r3"]
+return_on_true = true
+
+[[midasm_hook]]
+address = 0x82471740
+name = "RandoHook_82471740"
+registers = ["r3"]
+return_on_true = true
+
+[[midasm_hook]]
+address = 0x824789D0
+name = "RandoHook_824789D0"
+registers = ["r3"]
+return_on_true = true
+
+[[midasm_hook]]
+address = 0x8248A6C8
+name = "RandoHook_8248A6C8"
+registers = ["r3"]
+return_on_true = true
+
+[[midasm_hook]]
+address = 0x8248EE88
+name = "RandoHook_8248EE88"
+registers = ["r3"]
+return_on_true = true
+
+[[midasm_hook]]
+address = 0x824A1400
+name = "RandoHook_824A1400"
+registers = ["r3"]
+return_on_true = true
+
+[[midasm_hook]]
+address = 0x824A8C10
+name = "RandoHook_824A8C10"
+registers = ["r3"]
+return_on_true = true
+
+[[midasm_hook]]
+address = 0x824B1ED0
+name = "RandoHook_824B1ED0"
+registers = ["r3"]
+return_on_true = true
+
+[[midasm_hook]]
+address = 0x824BD7A0
+name = "RandoHook_824BD7A0"
+registers = ["r3"]
+return_on_true = true
+
+[[midasm_hook]]
+address = 0x824D79B0
+name = "RandoHook_824D79B0"
+registers = ["r3"]
+return_on_true = true
+
+[[midasm_hook]]
+address = 0x824DB330
+name = "RandoHook_824DB330"
+registers = ["r3"]
+return_on_true = true
+

@@ -104,6 +104,8 @@
 #include <rex/ui/window.h>
 #include <rex/ui/windowed_app_context.h>
 
+#include "function_hooks.h"
+
 namespace nocturne {
 
 namespace {
@@ -984,22 +986,22 @@ int32_t RowMultiplier(const CustomRow& row) { return IsEnumRow(row) ? 1 : row.mu
 // State
 // ---------------------------------------------------------------------------
 
-PPCFunc* g_original_list_setup_fn = nullptr;
-PPCFunc* g_original_bind_rows_fn = nullptr;
-PPCFunc* g_original_cycle_row_fn = nullptr;
-PPCFunc* g_original_settings_event_fn = nullptr;
-PPCFunc* g_original_settings_activate_fn = nullptr;
+PPCFunc* g_original_list_setup_fn = NOCTURNE_ORIGINAL_FN(kListSetupFnAddr);
+PPCFunc* g_original_bind_rows_fn = NOCTURNE_ORIGINAL_FN(kBindRowsFnAddr);
+PPCFunc* g_original_cycle_row_fn = NOCTURNE_ORIGINAL_FN(kCycleRowFnAddr);
+PPCFunc* g_original_settings_event_fn = NOCTURNE_ORIGINAL_FN(kSettingsEventFnAddr);
+PPCFunc* g_original_settings_activate_fn = NOCTURNE_ORIGINAL_FN(kSettingsActivateFnAddr);
 PPCFunc* g_set_widget_text_fn = nullptr;
 PPCFunc* g_set_text_scale_fn = nullptr;
 PPCFunc* g_enable_row_fn = nullptr;
-PPCFunc* g_original_list_update_fn = nullptr;
+PPCFunc* g_original_list_update_fn = NOCTURNE_ORIGINAL_FN(kListUpdateFnAddr);
 PPCFunc* g_set_widget_colour_fn = nullptr;
 PPCFunc* g_set_widget_text_by_id_fn = nullptr;
 PPCFunc* g_alloc_fn = nullptr;
-PPCFunc* g_original_settings_update_fn = nullptr;
-PPCFunc* g_original_post_event_fn = nullptr;
-PPCFunc* g_original_prompt_bar_layout_fn = nullptr;
-PPCFunc* g_original_settings_build_fn = nullptr;
+PPCFunc* g_original_settings_update_fn = NOCTURNE_ORIGINAL_FN(kSettingsUpdateFnAddr);
+PPCFunc* g_original_post_event_fn = NOCTURNE_ORIGINAL_FN(kPostEventFnAddr);
+PPCFunc* g_original_prompt_bar_layout_fn = NOCTURNE_ORIGINAL_FN(kPromptBarLayoutFnAddr);
+PPCFunc* g_original_settings_build_fn = NOCTURNE_ORIGINAL_FN(kSettingsBuildFnAddr);
 PPCFunc* g_prompt_ctor_fn = nullptr;
 PPCFunc* g_prompt_set_glyph_fn = nullptr;
 PPCFunc* g_prompt_show_glyph_fn = nullptr;
@@ -1954,9 +1956,25 @@ void NativeOptions::Bind(rex::Runtime* runtime) {
     g_user_settings_path = runtime_->user_data_root() / "settings.toml";
   }
 
-  // The SDK no longer lets us replace arbitrary recompiled functions, so none of the settings
-  // screen overrides are installed. See docs/function-override-handoff.md.
-  REXLOG_INFO("[native_options] disabled: function overrides are unavailable");
+  g_set_widget_text_fn = dispatcher->GetFunction(kSetWidgetTextFnAddr);
+  g_set_text_scale_fn = dispatcher->GetFunction(kSetTextScaleFnAddr);
+  g_enable_row_fn = dispatcher->GetFunction(kEnableRowFnAddr);
+  g_set_widget_colour_fn = dispatcher->GetFunction(kSetWidgetColourFnAddr);
+  g_set_widget_text_by_id_fn = dispatcher->GetFunction(kSetWidgetTextByIdFnAddr);
+  g_prompt_ctor_fn = dispatcher->GetFunction(kPromptCtorFnAddr);
+  g_prompt_set_glyph_fn = dispatcher->GetFunction(kPromptSetGlyphFnAddr);
+  g_prompt_show_glyph_fn = dispatcher->GetFunction(kPromptShowGlyphFnAddr);
+  g_prompt_text_offset_fn = dispatcher->GetFunction(kPromptTextOffsetFnAddr);
+  g_prompt_set_pos_fn = dispatcher->GetFunction(kPromptSetPosFnAddr);
+  g_text_width_fn = dispatcher->GetFunction(kTextWidthFnAddr);
+  g_find_image_fn = dispatcher->GetFunction(kFindImageFnAddr);
+  g_alloc_fn = dispatcher->GetFunction(kAllocFnAddr);
+  if (!g_set_widget_text_fn || !g_alloc_fn) {
+    REXLOG_WARN("[native_options] set-widget-text/alloc unavailable; extra rows will misbehave");
+  }
+
+  // The screen's functions are hooked at codegen time (nocturnerecomp_config.toml).
+  REXLOG_INFO("[native_options] hooks installed ({} row(s) in table)", kCustomRowCount);
 }
 
 NativeOptions& GetNativeOptions() {
@@ -1965,3 +1983,35 @@ NativeOptions& GetNativeOptions() {
 }
 
 }  // namespace nocturne
+
+// Entry hooks, wired up in nocturnerecomp_config.toml.
+bool NativeOptions_ListSetupHook(PPCRegister& r3) {
+  return nocturne::fnhook::Enter(r3, nocturne::kListSetupFnAddr, &nocturne::NativeOptions_ListSetup);
+}
+bool NativeOptions_BindRowsHook(PPCRegister& r3) {
+  return nocturne::fnhook::Enter(r3, nocturne::kBindRowsFnAddr, &nocturne::NativeOptions_BindRows);
+}
+bool NativeOptions_CycleRowHook(PPCRegister& r3) {
+  return nocturne::fnhook::Enter(r3, nocturne::kCycleRowFnAddr, &nocturne::NativeOptions_CycleRow);
+}
+bool NativeOptions_ListUpdateHook(PPCRegister& r3) {
+  return nocturne::fnhook::Enter(r3, nocturne::kListUpdateFnAddr, &nocturne::NativeOptions_ListUpdate);
+}
+bool NativeOptions_SettingsEventHook(PPCRegister& r3) {
+  return nocturne::fnhook::Enter(r3, nocturne::kSettingsEventFnAddr, &nocturne::NativeOptions_SettingsEvent);
+}
+bool NativeOptions_SettingsActivateHook(PPCRegister& r3) {
+  return nocturne::fnhook::Enter(r3, nocturne::kSettingsActivateFnAddr, &nocturne::NativeOptions_SettingsActivate);
+}
+bool NativeOptions_PromptBarLayoutHook(PPCRegister& r3) {
+  return nocturne::fnhook::Enter(r3, nocturne::kPromptBarLayoutFnAddr, &nocturne::NativeOptions_PromptBarLayout);
+}
+bool NativeOptions_SettingsBuildHook(PPCRegister& r3) {
+  return nocturne::fnhook::Enter(r3, nocturne::kSettingsBuildFnAddr, &nocturne::NativeOptions_SettingsBuild);
+}
+bool NativeOptions_PostEventHook(PPCRegister& r3) {
+  return nocturne::fnhook::Enter(r3, nocturne::kPostEventFnAddr, &nocturne::NativeOptions_PostEvent);
+}
+bool NativeOptions_SettingsUpdateHook(PPCRegister& r3) {
+  return nocturne::fnhook::Enter(r3, nocturne::kSettingsUpdateFnAddr, &nocturne::NativeOptions_SettingsUpdate);
+}

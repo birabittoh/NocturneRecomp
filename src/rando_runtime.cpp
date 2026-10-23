@@ -5,6 +5,7 @@
 #include <algorithm>
 #include <cctype>
 #include <array>
+#include <atomic>
 #include <cinttypes>
 #include <cstring>
 #include <fstream>
@@ -22,6 +23,7 @@
 #include "generated/nocturnerecomp_init.h"
 
 #include "enhancements.h"
+#include "function_hooks.h"
 #include "game_state.h"
 #include "ppc_interpreter.h"
 
@@ -68,6 +70,21 @@ size_t SlotFor(uint32_t start, uint32_t end) {
     g_thunk_bounds[it->second] = {start, end};
   }
   return it->second;
+}
+
+// Functions with an entry hook (rando_hooked_functions.inc), and the ones the active seed has
+// patched, with their end address. The hook runs a patched function through the interpreter.
+constexpr uint32_t kHookedFunctions[] = {
+#define RANDO_HOOKED_FUNCTION(addr, name) addr,
+#include "rando_hooked_functions.inc"
+#undef RANDO_HOOKED_FUNCTION
+};
+std::mutex g_patched_mutex;
+std::map<uint32_t, uint32_t> g_patched;  // start -> end
+std::atomic<bool> g_any_patched{false};
+
+bool IsHooked(uint32_t start) {
+  return std::binary_search(std::begin(kHookedFunctions), std::end(kHookedFunctions), start);
 }
 
 // The active seed's code caves: regions it writes into previously-zero
@@ -151,6 +168,28 @@ std::string HashText(uint64_t hash) {
   return buf;
 }
 
+}  // namespace
+
+// Entry hook body: a function the active seed has patched is run by the interpreter instead of
+// the recompiled body.
+bool RandoEnter(PPCRegister& r3, uint32_t start) {
+  if (!g_any_patched.load(std::memory_order_acquire)) {
+    return false;
+  }
+  uint32_t end;
+  {
+    std::lock_guard lock(g_patched_mutex);
+    auto it = g_patched.find(start);
+    if (it == g_patched.end()) {
+      return false;
+    }
+    end = it->second;
+  }
+  PpcInterpret(fnhook::ContextFromR3(r3), g_membase, start, end);
+  return true;
+}
+
+namespace {
 }  // namespace
 
 void RandoRuntime::Bind(rex::Runtime* runtime, const std::filesystem::path& game_data_root,
@@ -572,14 +611,30 @@ bool RandoRuntime::Apply(std::shared_ptr<const rando::Result> seed, std::string*
     g_cave_regions = caves;
   }
 
-  // The SDK no longer lets us replace a recompiled function, so a changed function can't be
-  // handed to the interpreter and its change stays inactive. See
-  // docs/function-override-handoff.md.
-  const size_t inactive = changed.size();
+  size_t inactive = 0;
+  std::map<uint32_t, uint32_t> patched;
   for (size_t idx : changed) {
-    REXLOG_WARN("[rando] patched function {:08X} can't be overridden -- this change stays "
-                "inactive",
-                starts[idx]);
+    const uint32_t start = starts[idx];
+    const uint32_t end = idx + 1 < starts.size() ? starts[idx + 1] : code_end;
+    uint32_t bad_pc = 0, bad_insn = 0;
+    if (!PpcScanFunction(g_membase, start, end, &bad_pc, &bad_insn)) {
+      REXLOG_WARN("[rando] patched function {:08X} uses instruction {:08X} at {:08X} the "
+                  "interpreter doesn't support -- this change stays inactive",
+                  start, bad_insn, bad_pc);
+      ++inactive;
+    } else if (!IsHooked(start)) {
+      REXLOG_WARN("[rando] patched function {:08X} has no entry hook -- this change stays "
+                  "inactive (add it to rando_hooked_functions.inc and the config)",
+                  start);
+      ++inactive;
+    } else {
+      patched.emplace(start, end);
+    }
+  }
+  {
+    std::lock_guard lock(g_patched_mutex);
+    g_patched = patched;
+    g_any_patched = !g_patched.empty();
   }
 
   REXLOG_INFO("[rando] applied {} with enhancements {:05X}/{}/{:08X}/{}: {} runs, {} bytes, {} "
@@ -588,7 +643,7 @@ bool RandoRuntime::Apply(std::shared_ptr<const rando::Result> seed, std::string*
               seed ? "seed \"" + seed->options.seed + "\"" : "the vanilla game",
               written.flags, written.wing_smash_color, written.alchemy_vats,
               static_cast<int>(written.game_mode), patches->runs.size(),
-              patches->ByteCount(), size_t{0}, inactive, caves.size(), live_mismatches);
+              patches->ByteCount(), patched.size(), inactive, caves.size(), live_mismatches);
   applied_ = std::move(patches);
   std::lock_guard lock(mutex_);
   state_.active = std::move(seed);
@@ -598,6 +653,11 @@ bool RandoRuntime::Apply(std::shared_ptr<const rando::Result> seed, std::string*
 }
 
 void RandoRuntime::Revert() {
+  {
+    std::lock_guard lock(g_patched_mutex);
+    g_patched.clear();
+    g_any_patched = false;
+  }
   {
     std::lock_guard lock(g_cave_mutex);
     g_cave_regions.clear();
@@ -693,3 +753,8 @@ REX_HOOK_RAW(sub_825D8218) {
   __imp__sub_825D8218(ctx, base);
   nocturne::GetRandoRuntime().OnSaveDeleted(slot);
 }
+
+#define RANDO_HOOKED_FUNCTION(addr, name) \
+  bool RandoHook_##name(PPCRegister& r3) { return nocturne::RandoEnter(r3, addr); }
+#include "rando_hooked_functions.inc"
+#undef RANDO_HOOKED_FUNCTION
