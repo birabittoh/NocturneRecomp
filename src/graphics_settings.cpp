@@ -1266,41 +1266,9 @@ void GraphicsSettings::Bind(rex::Runtime* runtime) {
     g_restoring.store(true, std::memory_order_release);
   }
 
-  if (!dispatcher->OverrideFunction(kStretchPercentToRectFnAddr,
-                                    &GraphicsSettings_PercentToRect,
-                                    &g_original_percent_to_rect_fn)) {
-    REXLOG_WARN("[graphics_settings] OverrideFunction failed for {:08X} (percent-to-rect); "
-                "presets will stay clamped to the native range",
-                kStretchPercentToRectFnAddr);
-  }
-  g_widget_reposition_fn = dispatcher->GetFunction(kStretchWidgetRepositionFnAddr);
-  g_alloc_fn = dispatcher->GetFunction(kAllocFnAddr);
-  g_text_widget_ctor_fn = dispatcher->GetFunction(kTextWidgetCtorFnAddr);
-  g_set_text_fn = dispatcher->GetFunction(kSetTextFnAddr);
-  g_text_width_fn = dispatcher->GetFunction(kTextWidthFnAddr);
-  g_set_text_colour_fn = dispatcher->GetFunction(kSetTextColourFnAddr);
-
-  if (!dispatcher->OverrideFunction(kChangeScreenSizeFnAddr, &GraphicsSettings_StretchScreen,
-                                    &g_original_stretch_fn)) {
-    REXLOG_WARN("[graphics_settings] OverrideFunction failed for {:08X} (stretch screen)",
-                kChangeScreenSizeFnAddr);
-  }
-
-  if (!dispatcher->OverrideFunction(kFixedTimestepTickFnAddr, &GraphicsSettings_PerFrame,
-                                    &g_original_perframe_fn)) {
-    REXLOG_WARN("[graphics_settings] OverrideFunction failed for {:08X} (per-frame); cycling "
-                "will still work but only on the next real button press",
-                kFixedTimestepTickFnAddr);
-  }
-
-  if (!dispatcher->OverrideFunction(kSetWidgetTextByIdFnAddr, &GraphicsSettings_SetWidgetText,
-                                    &g_original_set_widget_text_fn)) {
-    REXLOG_WARN("[graphics_settings] OverrideFunction failed for {:08X} (set-widget-text); the "
-                "X prompt will keep saying \"Default\"",
-                kSetWidgetTextByIdFnAddr);
-  }
-
-  REXLOG_INFO("[graphics_settings] hooks installed");
+  // The SDK no longer lets us replace arbitrary recompiled functions, so none of the stretch
+  // screen overrides are installed. See docs/function-override-handoff.md.
+  REXLOG_INFO("[graphics_settings] disabled: function overrides are unavailable");
 }
 
 GraphicsSettings& GetGraphicsSettings() {

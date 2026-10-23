@@ -260,7 +260,6 @@ set(NOCTURNERECOMP_SOURCES
     ${NOCTURNE_ICON_HEADER}
     ${CMAKE_SOURCE_DIR}/ext/KryptonRecomp/guest_shader_pack.cpp
     ${NOCTURNE_GUEST_SHADER_PACK_ASM}
-    ${GENERATED_SOURCES}
 )
 
 if(WIN32)

@@ -107,9 +107,6 @@ PPCFunc* CaveResolver(uint32_t target) {
   return g_thunks[slot];
 }
 
-// Functions currently overridden, with the pointer RestoreFunction needs.
-std::vector<std::pair<uint32_t, PPCFunc*>> g_overrides;
-
 // Recompiled function starts, sorted.
 const std::vector<uint32_t>& FunctionStarts() {
   static const std::vector<uint32_t> starts = [] {
@@ -497,7 +494,6 @@ bool RandoRuntime::Apply(std::shared_ptr<const rando::Result> seed, std::string*
     }
   }
   auto* memory = runtime_->memory();
-  auto* dispatcher = runtime_->function_dispatcher();
   const uint32_t code_start = REX_CODE_BASE;
   const uint32_t code_end = REX_CODE_BASE + REX_CODE_SIZE;
   const uint32_t image_end = base_->image_base +
@@ -576,28 +572,14 @@ bool RandoRuntime::Apply(std::shared_ptr<const rando::Result> seed, std::string*
     g_cave_regions = caves;
   }
 
-  size_t inactive = 0;
+  // The SDK no longer lets us replace a recompiled function, so a changed function can't be
+  // handed to the interpreter and its change stays inactive. See
+  // docs/function-override-handoff.md.
+  const size_t inactive = changed.size();
   for (size_t idx : changed) {
-    const uint32_t start = starts[idx];
-    const uint32_t end = idx + 1 < starts.size() ? starts[idx + 1] : code_end;
-    uint32_t bad_pc = 0, bad_insn = 0;
-    if (!PpcScanFunction(g_membase, start, end, &bad_pc, &bad_insn)) {
-      REXLOG_WARN("[rando] patched function {:08X} uses instruction {:08X} at {:08X} the "
-                  "interpreter doesn't support -- this change stays inactive",
-                  start, bad_insn, bad_pc);
-      ++inactive;
-      continue;
-    }
-    const size_t slot = SlotFor(start, end);
-    PPCFunc* original = nullptr;
-    if (slot == kNoSlot || !dispatcher->OverrideFunction(start, g_thunks[slot], &original)) {
-      REXLOG_WARN("[rando] couldn't override patched function {:08X} -- this change stays "
-                  "inactive",
-                  start);
-      ++inactive;
-      continue;
-    }
-    g_overrides.emplace_back(start, original);
+    REXLOG_WARN("[rando] patched function {:08X} can't be overridden -- this change stays "
+                "inactive",
+                starts[idx]);
   }
 
   REXLOG_INFO("[rando] applied {} with enhancements {:05X}/{}/{:08X}/{}: {} runs, {} bytes, {} "
@@ -606,7 +588,7 @@ bool RandoRuntime::Apply(std::shared_ptr<const rando::Result> seed, std::string*
               seed ? "seed \"" + seed->options.seed + "\"" : "the vanilla game",
               written.flags, written.wing_smash_color, written.alchemy_vats,
               static_cast<int>(written.game_mode), patches->runs.size(),
-              patches->ByteCount(), g_overrides.size(), inactive, caves.size(), live_mismatches);
+              patches->ByteCount(), size_t{0}, inactive, caves.size(), live_mismatches);
   applied_ = std::move(patches);
   std::lock_guard lock(mutex_);
   state_.active = std::move(seed);
@@ -616,11 +598,6 @@ bool RandoRuntime::Apply(std::shared_ptr<const rando::Result> seed, std::string*
 }
 
 void RandoRuntime::Revert() {
-  auto* dispatcher = runtime_->function_dispatcher();
-  for (const auto& [start, original] : g_overrides) {
-    dispatcher->RestoreFunction(start, original);
-  }
-  g_overrides.clear();
   {
     std::lock_guard lock(g_cave_mutex);
     g_cave_regions.clear();

@@ -1954,85 +1954,9 @@ void NativeOptions::Bind(rex::Runtime* runtime) {
     g_user_settings_path = runtime_->user_data_root() / "settings.toml";
   }
 
-  g_set_widget_text_fn = dispatcher->GetFunction(kSetWidgetTextFnAddr);
-  g_set_text_scale_fn = dispatcher->GetFunction(kSetTextScaleFnAddr);
-  g_enable_row_fn = dispatcher->GetFunction(kEnableRowFnAddr);
-  g_set_widget_colour_fn = dispatcher->GetFunction(kSetWidgetColourFnAddr);
-  g_set_widget_text_by_id_fn = dispatcher->GetFunction(kSetWidgetTextByIdFnAddr);
-  g_prompt_ctor_fn = dispatcher->GetFunction(kPromptCtorFnAddr);
-  g_prompt_set_glyph_fn = dispatcher->GetFunction(kPromptSetGlyphFnAddr);
-  g_prompt_show_glyph_fn = dispatcher->GetFunction(kPromptShowGlyphFnAddr);
-  g_prompt_text_offset_fn = dispatcher->GetFunction(kPromptTextOffsetFnAddr);
-  g_prompt_set_pos_fn = dispatcher->GetFunction(kPromptSetPosFnAddr);
-  g_text_width_fn = dispatcher->GetFunction(kTextWidthFnAddr);
-  g_find_image_fn = dispatcher->GetFunction(kFindImageFnAddr);
-  g_alloc_fn = dispatcher->GetFunction(kAllocFnAddr);
-  if (!g_set_widget_text_fn || !g_alloc_fn) {
-    REXLOG_WARN("[native_options] set-widget-text/alloc unavailable; no extra rows");
-    return;
-  }
-
-  if (!dispatcher->OverrideFunction(kListSetupFnAddr, &NativeOptions_ListSetup,
-                                    &g_original_list_setup_fn)) {
-    REXLOG_WARN("[native_options] OverrideFunction failed for {:08X} (list setup); the settings "
-                "screen will keep its three stock rows",
-                kListSetupFnAddr);
-    return;
-  }
-  if (!dispatcher->OverrideFunction(kBindRowsFnAddr, &NativeOptions_BindRows,
-                                    &g_original_bind_rows_fn)) {
-    REXLOG_WARN("[native_options] OverrideFunction failed for {:08X} (bind rows)", kBindRowsFnAddr);
-    return;
-  }
-  if (!dispatcher->OverrideFunction(kCycleRowFnAddr, &NativeOptions_CycleRow,
-                                    &g_original_cycle_row_fn)) {
-    REXLOG_WARN("[native_options] OverrideFunction failed for {:08X} (cycle row); the extra rows "
-                "will show but not respond to left/right",
-                kCycleRowFnAddr);
-  }
-  if (!dispatcher->OverrideFunction(kListUpdateFnAddr, &NativeOptions_ListUpdate,
-                                    &g_original_list_update_fn)) {
-    REXLOG_WARN("[native_options] OverrideFunction failed for {:08X} (list update); appended rows "
-                "will keep the highlight colour after the cursor leaves them",
-                kListUpdateFnAddr);
-  }
-  if (!dispatcher->OverrideFunction(kSettingsEventFnAddr, &NativeOptions_SettingsEvent,
-                                    &g_original_settings_event_fn)) {
-    REXLOG_WARN("[native_options] OverrideFunction failed for {:08X} (settings events); the extra "
-                "rows will cycle but never commit",
-                kSettingsEventFnAddr);
-  }
-  if (!dispatcher->OverrideFunction(kSettingsActivateFnAddr, &NativeOptions_SettingsActivate,
-                                    &g_original_settings_activate_fn)) {
-    REXLOG_WARN("[native_options] OverrideFunction failed for {:08X} (settings activate); Volume "
-                "and Preset will stay greyed out until a save is loaded",
-                kSettingsActivateFnAddr);
-  }
-
-  if (!dispatcher->OverrideFunction(kPromptBarLayoutFnAddr, &NativeOptions_PromptBarLayout,
-                                    &g_original_prompt_bar_layout_fn) ||
-      !dispatcher->OverrideFunction(kSettingsBuildFnAddr, &NativeOptions_SettingsBuild,
-                                    &g_original_settings_build_fn)) {
-    REXLOG_WARN("[native_options] OverrideFunction failed for {:08X}/{:08X} (prompt bar); Y will "
-                "still open the stretch screen but the bar will show no prompt for it",
-                kPromptBarLayoutFnAddr, kSettingsBuildFnAddr);
-  }
-
-  if (!dispatcher->OverrideFunction(kPostEventFnAddr, &NativeOptions_PostEvent,
-                                    &g_original_post_event_fn)) {
-    REXLOG_WARN("[native_options] OverrideFunction failed for {:08X} (page switches); Y will not "
-                "open the stretch screen",
-                kPostEventFnAddr);
-  }
-
-  if (!dispatcher->OverrideFunction(kSettingsUpdateFnAddr, &NativeOptions_SettingsUpdate,
-                                    &g_original_settings_update_fn)) {
-    REXLOG_WARN("[native_options] OverrideFunction failed for {:08X} (settings update); the Preset "
-                "row will cycle but show no left/right arrows",
-                kSettingsUpdateFnAddr);
-  }
-
-  REXLOG_INFO("[native_options] hooks installed ({} row(s) in table)", kCustomRowCount);
+  // The SDK no longer lets us replace arbitrary recompiled functions, so none of the settings
+  // screen overrides are installed. See docs/function-override-handoff.md.
+  REXLOG_INFO("[native_options] disabled: function overrides are unavailable");
 }
 
 NativeOptions& GetNativeOptions() {

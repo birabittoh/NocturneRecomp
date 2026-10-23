@@ -304,8 +304,9 @@ class NocturnerecompApp : public rex::ReXApp {
   // at this point, so this matches the game's own shipped default (0, 0, 8).
   static constexpr ImVec4 kDefaultAccentColor = ImVec4(0.00f, 0.00f, 8.0f / 15.0f, 1.00f);
 
-  void OnConfigureStyle(ImGuiStyle& style) override {
-    rex::ui::ApplyAccentTheme(style, kDefaultAccentColor);
+  void OnConfigureStyle(ImGuiStyle& imgui_style, rex::ui::Style& ui_style) override {
+    (void)ui_style;
+    rex::ui::ApplyAccentTheme(imgui_style, kDefaultAccentColor);
   }
 
   // Detached overlay mode: with no GPU plugin the SDK creates no presenter and

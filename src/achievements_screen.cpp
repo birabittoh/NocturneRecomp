@@ -993,64 +993,10 @@ void AchievementsScreen::Bind(rex::Runtime* runtime) {
   }
   auto* dispatcher = runtime_->function_dispatcher();
 
-  g_post_event_fn = dispatcher->GetFunction(kPostEventFnAddr);
-  if (!g_post_event_fn) {
-    REXLOG_WARN("[achievements_screen] page-switch post {:08X} unavailable; the Achievements "
-                "entry keeps opening the SDK overlay",
-                kPostEventFnAddr);
-    return;
-  }
-
-  if (!dispatcher->OverrideFunction(kScreenEventFnAddr, &AchievementsScreen_ScreenEvent,
-                                    &g_original_screen_event_fn)) {
-    REXLOG_WARN("[achievements_screen] OverrideFunction failed for {:08X} (screen events); "
-                "without a way back out the Achievements entry keeps opening the SDK overlay",
-                kScreenEventFnAddr);
-    return;
-  }
-
-  // From here on failures are survivable: the screen still opens and still backs
-  // out, it just has nothing on it.
-  available_ = true;
-
-  g_alloc_fn = dispatcher->GetFunction(kAllocFnAddr);
-  g_image_ctor_fn = dispatcher->GetFunction(kImageCtorFnAddr);
-  g_image_set_rect_fn = dispatcher->GetFunction(kImageSetRectFnAddr);
-  g_image_set_tint_fn = dispatcher->GetFunction(kImageSetTintFnAddr);
-  g_text_ctor_fn = dispatcher->GetFunction(kTextCtorFnAddr);
-  g_text_set_text_fn = dispatcher->GetFunction(kTextSetTextFnAddr);
-  g_text_set_scale_fn = dispatcher->GetFunction(kTextSetScaleFnAddr);
-  g_text_set_colour_fn = dispatcher->GetFunction(kTextSetColourFnAddr);
-  g_find_image_fn = dispatcher->GetFunction(kFindImageFnAddr);
-  g_prompt_ctor_fn = dispatcher->GetFunction(kPromptCtorFnAddr);
-  g_prompt_set_glyph_fn = dispatcher->GetFunction(kPromptSetGlyphFnAddr);
-  g_prompt_show_glyph_fn = dispatcher->GetFunction(kPromptShowGlyphFnAddr);
-  g_prompt_set_text_by_id_fn = dispatcher->GetFunction(kPromptSetTextByIdFnAddr);
-  g_prompt_text_offset_fn = dispatcher->GetFunction(kPromptTextOffsetFnAddr);
-  g_prompt_set_colour_fn = dispatcher->GetFunction(kPromptSetColourFnAddr);
-  g_prompt_set_pos_fn = dispatcher->GetFunction(kPromptSetPosFnAddr);
-  g_text_width_fn = dispatcher->GetFunction(kTextWidthFnAddr);
-  g_text_set_text_by_id_fn = dispatcher->GetFunction(kTextSetTextByIdFnAddr);
-
-  if (!g_alloc_fn || !g_image_ctor_fn || !g_text_ctor_fn || !g_text_set_text_fn) {
-    REXLOG_WARN("[achievements_screen] widget builders unavailable; the screen will open empty");
-    return;
-  }
-
-  if (!dispatcher->OverrideFunction(kScreenActivateFnAddr, &AchievementsScreen_ScreenActivate,
-                                    &g_original_screen_activate_fn)) {
-    REXLOG_WARN("[achievements_screen] OverrideFunction failed for {:08X} (screen activate); the "
-                "screen will open empty",
-                kScreenActivateFnAddr);
-  }
-
-  if (!dispatcher->OverrideFunction(kScreenUpdateFnAddr, &AchievementsScreen_ScreenUpdate,
-                                    &g_original_screen_update_fn)) {
-    REXLOG_WARN("[achievements_screen] OverrideFunction failed for {:08X} (screen update); the "
-                "screen's stock dismissal timer will buzz the cancel sound every frame after "
-                "~3 seconds",
-                kScreenUpdateFnAddr);
-  }
+  // The SDK no longer lets us replace arbitrary recompiled functions, so the screen is never
+  // installed and available_ stays false. See docs/function-override-handoff.md.
+  (void)dispatcher;
+  REXLOG_INFO("[achievements_screen] disabled: function overrides are unavailable");
 }
 
 }  // namespace nocturne
