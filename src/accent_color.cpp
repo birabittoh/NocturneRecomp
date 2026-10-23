@@ -31,15 +31,7 @@ namespace {
 //   3. Confirmed stable across process restarts (it sits in the XEX's
 //      static data, not a runtime heap allocation), by loading a save in a
 //      fresh instance and reading the same address back.
-// The title update relocates the whole image (see NOCTURNE_TU in
-// achievements_menu.cpp), so this address shifts too; re-derived for the TU
-// build the same way (address confirmed live-tracking R/G/B changes with
-// scripts/re/scan_guest_memory.py against a --tu build).
-#ifdef NOCTURNE_TU
-constexpr uint32_t kAccentColorGuestAddress = 0x83173A88;
-#else
 constexpr uint32_t kAccentColorGuestAddress = 0x83173CC8;
-#endif
 constexpr uint32_t kRedOffset = 0;
 constexpr uint32_t kGreenOffset = 4;
 constexpr uint32_t kBlueOffset = 8;

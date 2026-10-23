@@ -53,12 +53,6 @@ namespace {
 //     greppable against the image. (The app object and its save-loaded latch
 //     are shared, in in_game_latch.h.)
 //
-// The TU (title update) values are the vanilla ones plus the regional shift
-// native_options.cpp documents for this address range (+0x200 for 0x825Bxxxx
-// code, -0x240 for the .data pointers). They have NOT been verified against a
-// patched-image codegen the way native_options.cpp's were -- if the achievements
-// screen misbehaves under --tu, re-derive kScreenEventFnAddr with
-// scripts/match_tu_functions.py before assuming anything else is wrong.
 // The widget-building addresses below are the same vocabulary the settings
 // screen's own builder (sub_825B4650) uses, read straight off it:
 //   * an image widget is alloc(612) + sub_825D0C48(mem, parent, x, y, image);
@@ -74,33 +68,6 @@ namespace {
 //   * a prompt is alloc(552) + sub_825D1DB0(mem, parent, 0), the same recipe
 //     native_options.cpp documents for the settings screen's prompt bar.
 // Both widget kinds take their position from +4/+8 directly.
-#ifdef NOCTURNE_TU
-constexpr uint32_t kScreenEventFnAddr = 0x825B70D0u;     // (screen, message)
-constexpr uint32_t kScreenActivateFnAddr = 0x825B7200u;  // (screen, arg1)
-constexpr uint32_t kScreenUpdateFnAddr = 0x825B7440u;    // (screen)
-constexpr uint32_t kPostEventFnAddr = 0x825CEAE8u;       // (class, arg1, page, controller)
-constexpr uint32_t kAllocFnAddr = 0x82576B28u;           // (size) -> pointer
-constexpr uint32_t kImageCtorFnAddr = 0x825D0E48u;       // (mem, parent, x, y, image)
-constexpr uint32_t kImageSetRectFnAddr = 0x825D04A8u;    // (image, x0, y0, x1, y1)
-constexpr uint32_t kImageSetTintFnAddr = 0x825D0590u;    // (image, argb)
-constexpr uint32_t kTextCtorFnAddr = 0x825CEFA8u;        // (mem, parent) -> text widget
-constexpr uint32_t kTextSetTextFnAddr = 0x825CF040u;     // (text, utf16_text)
-constexpr uint32_t kTextSetScaleFnAddr = 0x825CF1A0u;    // (text, scale) -- scale in f1
-constexpr uint32_t kTextSetColourFnAddr = 0x825CF200u;   // (text, argb)
-constexpr uint32_t kFindImageFnAddr = 0x825CED68u;       // (image_bank, name) -> image
-constexpr uint32_t kPromptCtorFnAddr = 0x825D1FB0u;      // (memory, parent, flag) -> prompt
-constexpr uint32_t kPromptSetGlyphFnAddr = 0x825D20F8u;  // (prompt, image)
-constexpr uint32_t kPromptShowGlyphFnAddr = 0x825D2210u; // (prompt)
-constexpr uint32_t kPromptSetTextByIdFnAddr = 0x825D20E8u;  // (prompt, string_id)
-constexpr uint32_t kPromptTextOffsetFnAddr = 0x825D2218u;   // (prompt, dx, dy)
-constexpr uint32_t kPromptSetColourFnAddr = 0x825D2338u;    // (prompt, argb)
-constexpr uint32_t kPromptSetPosFnAddr = 0x825D21A8u;       // (prompt, x, y)
-constexpr uint32_t kTextWidthFnAddr = 0x825CF208u;          // (text_widget) -> pixels
-constexpr uint32_t kTextSetTextByIdFnAddr = 0x825CFE68u;    // (text_widget, string_id)
-constexpr uint32_t kUiManagerPtrAddr = 0x82E79DECu;
-constexpr uint32_t kImageBankPtrAddr = 0x82E7A330u;
-constexpr uint32_t kBGlyphNameAddr = 0x82202300u;
-#else
 constexpr uint32_t kScreenEventFnAddr = 0x825B6ED0u;     // (screen, message)
 constexpr uint32_t kScreenActivateFnAddr = 0x825B7000u;  // (screen, arg1)
 constexpr uint32_t kScreenUpdateFnAddr = 0x825B7240u;    // (screen)
@@ -129,7 +96,6 @@ constexpr uint32_t kImageBankPtrAddr = 0x82E7A570u;
 // ("Z" at 0x82202270, 4 bytes per entry), so "B" is 24 entries in. The settings
 // screen's own B prompt uses this exact pointer.
 constexpr uint32_t kBGlyphNameAddr = 0x822022D0u;
-#endif
 
 // Allocation sizes, taken from the stock builders' own alloc calls.
 constexpr uint32_t kImageWidgetSize = 612;

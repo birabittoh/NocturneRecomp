@@ -22,7 +22,6 @@ env:
   ASSETS_REPO: ${{ vars.ASSETS_REPO }}
   ASSET_PATH: default.xex
   ASSET_CACHE_KEY: codegen-assets-v1
-  TU_ASSET_CACHE_KEY: tu-assets-v1
 
 jobs:
   build:
@@ -99,33 +98,6 @@ jobs:
           echo "Fetched ${{ env.ASSET_PATH }} ($size bytes)"
           [ "$size" -ge 1048576 ] || { echo "Asset too small — fetch likely failed"; exit 1; }
 
-      - name: Cache TU packages
-        id: tu-cache
-        uses: actions/cache@v5
-        with:
-          path: tu_packages/
-          key: ${{ env.TU_ASSET_CACHE_KEY }}
-
-      - name: Fetch TU packages
-        if: steps.tu-cache.outputs.cache-hit != 'true'
-        env:
-          GH_TOKEN: ${{ secrets.ASSETS_TOKEN }}
-        shell: bash
-        run: |
-          mkdir -p tu_packages
-          files=$(gh api "repos/${{ env.ASSETS_REPO }}/contents" \
-            --jq '.[] | select(.name | startswith("TU_")) | .name')
-          for f in $files; do
-            gh api -H "Accept: application/vnd.github.raw" \
-              "repos/${{ env.ASSETS_REPO }}/contents/${f}" \
-              > "tu_packages/${f}"
-            echo "Fetched ${f} ($(wc -c < "tu_packages/${f}") bytes)"
-          done
-
-      # Download the SDK once per platform/arch and reuse it for both the
-      # vanilla and TU builds below, instead of each variant fetching its
-      # own copy — the SDK release API is rate-limited and doubling the
-      # number of downloads was tripping it.
       - name: Download SDK
         shell: bash
         run: python scripts/download-sdk.py "sdk/${{ matrix.platform }}" --pinned
@@ -157,36 +129,6 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: release-vanilla-${{ matrix.platform }}
-          path: ${{ env.ARTIFACT_PATH }}
-          if-no-files-found: error
-
-      - name: Build (tu)
-        shell: bash
-        run: python scripts/build.py --release --sdk-dir sdk/${{ matrix.platform }} --tu tu_packages/
-
-      - name: Package (tu)
-        shell: bash
-        run: |
-          if [ "${{ inputs.publish_mode }}" = "artifact" ]; then
-            out="${{ inputs.artifact_name }}-tu-${{ matrix.platform }}"
-          else
-            out="nocturnerecomp-tu-${{ inputs.tag }}-${{ matrix.platform }}"
-          fi
-          python scripts/build.py --package "${out}"
-
-      - name: Upload CI artifact (tu)
-        if: inputs.publish_mode == 'artifact'
-        uses: actions/upload-artifact@v4
-        with:
-          name: ${{ inputs.artifact_name }}-tu-${{ matrix.platform }}
-          path: pkg/
-          if-no-files-found: error
-
-      - name: Upload release artifact (tu)
-        if: inputs.publish_mode == 'release'
-        uses: actions/upload-artifact@v4
-        with:
-          name: release-tu-${{ matrix.platform }}
           path: ${{ env.ARTIFACT_PATH }}
           if-no-files-found: error
 

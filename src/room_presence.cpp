@@ -27,43 +27,14 @@ constexpr char kDiscordClientId[] = "1528401288918728744";
 // the 3/4-letter room code below. Found by locating that state machine via
 // its "load:c:\bin\%s.bin\n" debug format string and tracing back to the
 // index variable driving its switch statement.
-//
-// TU address re-derived by matching sub_82250D10 to its TU counterpart
-// (sub_82250E30, scripts/match_tu_functions.py, delta +0x120) and comparing
-// the load/store offset literal for this address at the same body line in
-// both a vanilla and --tu codegen tree (both use the same base register,
-// itself set from an unchanged `lis r10,-31981` immediate in both builds --
-// only the offset moved, 15084 -> 14508, i.e. delta -0x240, the same delta
-// used throughout this file). Confirmed live against a running --tu process:
-// reads a plausible non-zero index while actually in a room (32, matching
-// the table lookup below resolving to a real room code), and 0 at the main
-// menu as expected.
-#ifdef NOCTURNE_TU
-constexpr uint32_t kRoomIndexGuestAddress = 0x831338ACu;
-#else
 constexpr uint32_t kRoomIndexGuestAddress = 0x83133AECu;
-#endif
 
 // Base of the game's own room table: an array of fixed-size (44-byte)
 // records, one per room index, with a pointer to the room's 3/4-letter code
 // string (e.g. "NO0", "ARE") at offset 0. Same table the state machine above
 // reads via `off_82E00D08 + 11 * v6` (11 dwords == 44 bytes) to build the
 // "c:\bin\<code>.bin" load path.
-//
-// TU address re-derived the same way as kRoomIndexGuestAddress above (same
-// matched function, sub_82250D10 -> sub_82250E30): the table base is built
-// from `lis r11,-32032 / addi r11,r11,<X> / addi r11,r11,32`, where X is
-// 3304 in vanilla and 2744 in the TU -- delta -0x230, notably NOT the -0x240
-// used for kRoomIndexGuestAddress and everywhere else in this file, another
-// reminder the TU's .data shift is regional rather than a single constant.
-// Confirmed live end-to-end: read the index-32 entry's code-pointer field at
-// this TU address + 32*44, dereferenced it, and got back the ASCII string
-// "RNO0" (Black Marble Gallery) -- a real room code, not garbage.
-#ifdef NOCTURNE_TU
-constexpr uint32_t kRoomTableGuestAddress = 0x82E00AD8u;
-#else
 constexpr uint32_t kRoomTableGuestAddress = 0x82E00D08u;
-#endif
 constexpr uint32_t kRoomTableStride = 44;
 // Highest known-populated index in the table (id 56, "RBO0"); anything past
 // this is out of bounds for the vanilla image and skipped rather than read.
@@ -74,14 +45,8 @@ constexpr uint32_t kRoomTableMaxIndex = 56;
 // both taken from ../NocturneRecomp-Mods/src/game_symbols/mod_main.cpp
 // ("player.stats"), which is where these were originally reverse-engineered
 // (exact-pattern scan for the STR/CON/INT/LCK sequence shown consecutively
-// on the character screen). The TU address was independently re-derived
-// there the same way and cross-checked against the vanilla/TU delta shared
-// with kAccentAddrVanilla/TU in that file (0x240) -- not just guessed.
-#ifdef NOCTURNE_TU
-constexpr uint32_t kPlayerStatsGuestAddress = 0x8317493Cu;
-#else
+// on the character screen).
 constexpr uint32_t kPlayerStatsGuestAddress = 0x83174B7Cu;
-#endif
 constexpr uint32_t kHpCurrentOffset = 0x00;
 constexpr uint32_t kHpMaxOffset = 0x04;
 constexpr uint32_t kLevelOffset = 0x48;
@@ -92,27 +57,15 @@ constexpr uint32_t kPlayerStatsSpanSize = kLevelOffset + 4;
 // Guest address of the real rooms-visited counter -- a separate, standalone
 // address, not part of the player-stats struct above.
 //
-// Both addresses were confirmed live via scripts/re/scan_guest_memory.py's
+// The address was confirmed live via scripts/re/scan_guest_memory.py's
 // value-transition technique: scanned the whole process for every host
 // address holding 57 (the on-screen ROOMS value), asked the user to walk
 // into one new room (ROOMS -> 58), rescanned, and intersected the two sets.
-// Each build collapsed to exactly 2 candidates -- the address below plus its
+// That collapsed to exactly 2 candidates -- the address below plus its
 // usual +0x10000000 heap-alias mirror -- both confirmed reading 58
 // afterward.
 //
-// The vanilla address is 0x83164F10, NOT the 0x83164CD0 documented as
-// "player.rooms" in ../NocturneRecomp-Mods/src/game_symbols/mod_main.cpp --
-// that address reads as a stale 0 against the current vanilla build/save.
-// Re-running the same scan against a NOCTURNE_TU build found the ROOMS
-// counter at exactly 0x83164CD0 -- i.e. game_symbols' "vanilla" address was
-// actually the TU one, and the delta between it and the real vanilla address
-// above (0x240) matches the vanilla/TU delta used everywhere else in this
-// file, confirming the pairing.
-#ifdef NOCTURNE_TU
-constexpr uint32_t kRoomsGuestAddress = 0x83164CD0u;
-#else
 constexpr uint32_t kRoomsGuestAddress = 0x83164F10u;
-#endif
 
 uint32_t ReadGuestU32BE(rex::memory::Memory* memory, uint32_t guest_address) {
   const uint8_t* host_address = memory->TranslateVirtual<const uint8_t*>(guest_address);

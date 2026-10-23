@@ -665,7 +665,6 @@ RandoRuntime& GetRandoRuntime() {
 // "load game" step, which starts the game right after, so the seed applied
 // here is in place before any of the save's world loads. Vanilla image only,
 // like the randomizer itself.
-#ifndef NOCTURNE_TU
 #include <rex/hook.h>
 
 extern "C" REX_FUNC(__imp__sub_824F8190);  // create + write a save
@@ -717,4 +716,3 @@ REX_HOOK_RAW(sub_825D8218) {
   __imp__sub_825D8218(ctx, base);
   nocturne::GetRandoRuntime().OnSaveDeleted(slot);
 }
-#endif

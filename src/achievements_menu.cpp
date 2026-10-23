@@ -46,22 +46,12 @@
 #include <rex/ui/window.h>
 #include <rex/ui/windowed_app_context.h>
 
-// The bridge hooks four guest XAM thunks by their guest address. The title
-// update relocates the whole image, so the thunks live at different guest VAs in
-// the patched image; -DNOCTURNE_TU (set by scripts/build.py --tu) selects that
-// address set. Both sets were verified against the patched-image codegen by the
-// XAM export each thunk tail-calls; map a vanilla VA with scripts/find_reloc.py.
-#ifdef NOCTURNE_TU
-#define ACH_SHOW_FN       sub_825D8228  // -> XamShowAchievementsUI
-#define ACH_GETSTATE_FN   sub_825DB1C0  // -> XamInputGetState (r3=user, r4=X_INPUT_STATE*)
-#define ACH_KEYSTROKE1_FN sub_825DB200  // -> XamInputGetKeystrokeEx (thin)
-#define ACH_KEYSTROKE2_FN sub_825DB220  // -> XamInputGetKeystrokeEx (stack wrapper)
-#else
+// The bridge hooks four guest XAM thunks by their guest address, verified by the
+// XAM export each thunk tail-calls.
 #define ACH_SHOW_FN       sub_825D8028  // -> XamShowAchievementsUI
 #define ACH_GETSTATE_FN   sub_825DAF30  // -> XamInputGetState (r3=user, r4=X_INPUT_STATE*)
 #define ACH_KEYSTROKE1_FN sub_825DAF70  // -> XamInputGetKeystrokeEx (thin)
 #define ACH_KEYSTROKE2_FN sub_825DAF90  // -> XamInputGetKeystrokeEx (stack wrapper)
-#endif
 
 // ACH_IMP(fn) -> __imp__<fn>, the real recompiled thunk body. The strong
 // REX_HOOK_RAW definitions below override the weak generated sub_* aliases, so

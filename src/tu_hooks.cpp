@@ -18,8 +18,7 @@
 // title update (assets/default.xexp) makes to the game code, so the update
 // package is no longer needed for it. Each hook names the vanilla address it
 // is wired to in nocturnerecomp_tu_hooks.toml; the patched-image equivalent is
-// given for cross-reference with nocturnerecomp_tu_config.toml / the TU
-// codegen output.
+// given for cross-reference with the title update's own codegen output.
 // ---------------------------------------------------------------------------
 
 namespace {

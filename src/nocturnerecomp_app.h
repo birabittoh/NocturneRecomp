@@ -80,16 +80,9 @@ class NocturnerecompApp : public rex::ReXApp {
     // Lets the SDK's AutoUpdater (F1 mod manager overlay) check
     // github.com/birabittoh/NocturneRecomp's Releases for a newer build and
     // offer to download + apply it. "{tag}"/"{platform}" are substituted by
-    // the SDK. A NOCTURNE_TU build must only ever be offered another TU
-    // build (never a vanilla one, and vice versa) since the two patch
-    // different base addresses so the asset name itself encodes which
-    // variant this binary is. {platform} is the SDK's own naming (win-amd64
-    // etc.), which is what the CI matrix publishes.
-#ifdef NOCTURNE_TU
-    config.update_asset_format = "nocturnerecomp-tu-{tag}-{platform}";
-#else
+    // the SDK. {platform} is the SDK's own naming (win-amd64 etc.), which is
+    // what the CI matrix publishes.
     config.update_asset_format = "nocturnerecomp-{tag}-{platform}";
-#endif
     config.update_repo = "birabittoh/NocturneRecomp";
 
     // One-shot toast shown top-left as the game starts
@@ -150,9 +143,6 @@ class NocturnerecompApp : public rex::ReXApp {
     settings.is_xbla = true;
     settings.config_path = config_path();
 
-#ifdef NOCTURNE_TU
-    settings.title_update_sha256 = "226420345845a2077ee362ad68e8d444afce549a5eeb7f8c43aebae232fb4b8c";
-#endif
 
     return rex::system::GameDataSelector::EnsureGameData(settings);
   }

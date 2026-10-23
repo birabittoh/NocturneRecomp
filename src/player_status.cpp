@@ -16,15 +16,8 @@ namespace nocturne::player {
 namespace {
 
 // Guest address of g_Status, the PS1 PlayerStatus struct, in the .data zero-fill
-// area. Found by scanning for lis/addi pairs resolving to it (119 uses). TU
-// build: -0x240, the same delta as the other .data globals.
-#ifdef NOCTURNE_TU
-constexpr uint32_t kStatusAddress = 0x83174700u;
-#else
+// area. Found by scanning for lis/addi pairs resolving to it (119 uses).
 constexpr uint32_t kStatusAddress = 0x83174940u;
-#endif
-constexpr uint32_t kStatusVanilla = 0x83174940u;
-constexpr uint32_t kStatusTu = 0x83174700u;
 
 // Layout, offsets from kStatusAddress. "confirmed" = seen in code or live;
 // relics, item counts, order lists and equipment were verified live in the inspector (player_inspector).
@@ -97,9 +90,8 @@ int Snapshot::ItemCount(ItemId id) const {
 
 void PlayerStatus::Bind(rex::Runtime* runtime) {
   runtime_ = runtime;
-  runtime->mod_registry()->RegisterAddress("player.status", kStatusVanilla, kStatusTu);
-  runtime->mod_registry()->RegisterAddress("app.state", kAppObjectPtrVanilla + 4,
-                                           kAppObjectPtrTu + 4);
+  runtime->mod_registry()->RegisterAddress("player.status", kStatusAddress);
+  runtime->mod_registry()->RegisterAddress("app.state", kAppObjectPtrAddr + 4);
   runtime->mod_registry()->RegisterTick([this] { Tick(); });
 }
 

@@ -63,11 +63,7 @@ python scripts/extract_game.py
 Use this script:
 
 ```bash
-# Vanilla
 python scripts/build.py
-
-# Title Update
-python scripts/build.py --tu /path/to/TU_*
 ```
 
 ## Credits
