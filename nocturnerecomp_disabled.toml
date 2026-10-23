@@ -1,0 +1,51 @@
+# Hooks ported from the title update but deliberately NOT enabled.
+# This file is not read by codegen/build; to re-enable one, move its entry
+# into nocturnerecomp_tu_hooks.toml. Both groups belong to the credits song swap
+# ("I Am the Wind" -> "Admiration of Clan"), which needs the update's
+# lament.WMA (copyrighted, cannot be shipped). The C++ is still in
+# src/tu_hooks.cpp (marked DISABLED); the replacement credits text
+# is the DISABLED entry in src/tu_dialogue_patch.h.
+
+# DISABLED (needs lament.WMA, which cannot be shipped): the credits music
+# change: TuLamentTrackRedirect here and TuSoundTestTrackName below.
+# sub_8250E4F0: the "IAM" track streams UPDATE:\data\sound\lament.WMA.
+[[midasm_hook]]
+address = 0x8250E584
+name = "TuLamentTrackRedirect"
+registers = ["r1", "r31"]
+
+# sub_82407B40 (sound test name lookup): "I Am the Wind" -> "Admiration of Clan".
+# Runs after the table load (lwzx r3,r11,r10) at 0x82407B4C.
+[[midasm_hook]]
+address = 0x82407B4C
+name = "TuSoundTestTrackName"
+registers = ["r3"]
+after_instruction = true
+
+
+# DISABLED (belongs to the credits song swap, see above; the vanilla song is
+# longer, so the scroll keeps its original speed): sub_8239CD00 credits scroll
+# at 3/4 speed.
+[[midasm_hook]]
+address = 0x8239CEC4
+name = "TuCreditsScrollTimer1"
+registers = ["r10"]
+after_instruction = true
+
+[[midasm_hook]]
+address = 0x8239CF90
+name = "TuCreditsScrollTimer2"
+registers = ["r10"]
+after_instruction = true
+
+[[midasm_hook]]
+address = 0x8239D200
+name = "TuCreditsLineTimer"
+registers = ["r11"]
+after_instruction = true
+
+[[midasm_hook]]
+address = 0x8239D31C
+name = "TuCreditsRowTimer"
+registers = ["r11"]
+after_instruction = true

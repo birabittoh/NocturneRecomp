@@ -1,0 +1,89 @@
+# Title Update 1 ports, included by nocturnerecomp_manifest.toml.
+
+# ---------------------------------------------------------------------------
+# Title Update 1 ports: the code changes of assets/default.xexp, re-created
+# as hooks on the vanilla image. Each entry is documented at its hook in
+# src/tu_hooks.cpp.
+# ---------------------------------------------------------------------------
+
+# sub_82231A50: new "flag clear -> state 3" check on the state machine's three
+# early returns (two arms that store state 4, and the not-found arm).
+[[midasm_hook]]
+address = 0x82231D78
+name = "TuStateFlagCheck"
+registers = ["r28"]
+
+[[midasm_hook]]
+address = 0x82231DB0
+name = "TuStateFlagCheck"
+registers = ["r28"]
+
+[[midasm_hook]]
+address = 0x82231D90
+name = "TuStateFlagCheckOnNoDevice"
+registers = ["r3", "r28"]
+jump_address_on_true = 0x82231E28
+jump_address_on_false = 0x82231D98
+
+# sub_82248538: the two controller-layout validations, now also refreshing the
+# per-slot button masks.
+[[midasm_hook]]
+address = 0x822485BC
+name = "TuControlsLayoutValid"
+jump_address_on_true = 0x822485EC
+jump_address_on_false = 0x8224A278
+
+[[midasm_hook]]
+address = 0x8224A228
+name = "TuControlsLayoutValid"
+jump_address_on_true = 0x8224A254
+jump_address_on_false = 0x8224A278
+
+# sub_823CBB60: signed-byte compare against -1 (was 0xFF, never true).
+[[midasm_hook]]
+address = 0x823CBD5C
+name = "TuSignedByteCompare"
+registers = ["r9"]
+jump_address_on_true = 0x823CC854
+jump_address_on_false = 0x823CBD64
+
+# sub_824F66F8: always pass 1 as the logon page's argument.
+[[midasm_hook]]
+address = 0x824F6738
+name = "TuLeaderboardLogonMode"
+registers = ["r31"]
+
+# sub_8257E130: status 8 is handled like status 1.
+[[midasm_hook]]
+address = 0x8257E220
+name = "TuStatusIs1Or8"
+registers = ["r3"]
+jump_address_on_true = 0x8257E228
+jump_address_on_false = 0x8257E244
+
+# sub_823D9080: sound effect 0x6CB when the 0x100 flag is consumed.
+[[midasm_hook]]
+address = 0x823D90B0
+name = "TuPlayFlagSound"
+
+# sub_82385DF0: extra entity (the Vandal Sword) spawned before the death loop
+# while the stage global is 0xD; runs after `or r29,r25,r25`.
+[[midasm_hook]]
+address = 0x82386690
+name = "TuExtraSpawn"
+registers = ["r28", "r29", "r31"]
+after_instruction = true
+
+# Credits / dialogue text blob: in-place byte patch (TuPatchDialoguePages),
+# re-applied whenever the page table or the page interpreter runs.
+[[midasm_hook]]
+address = 0x823936B4
+name = "TuPatchDialoguePages"
+
+[[midasm_hook]]
+address = 0x8239BB28
+name = "TuPatchDialoguePages"
+
+[[midasm_hook]]
+address = 0x8239CD00
+name = "TuPatchDialoguePages"

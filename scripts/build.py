@@ -257,6 +257,11 @@ def derive_tu_manifest(manifest_path, base_config, tu_config):
     manifest_text = open(manifest_path).read().replace(
         f'"{base_config}"', f'"{tu_config}"'
     )
+    # The vanilla-address TU hook ports must not apply to the patched image.
+    manifest_text = "".join(
+        line for line in manifest_text.splitlines(keepends=True)
+        if "_tu_hooks.toml" not in line
+    )
     tu_manifest = ".tu_build.toml"  # deliberately not '*_manifest.toml'
     with open(tu_manifest, "w") as f:
         f.write(manifest_text)
