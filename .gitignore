@@ -25,6 +25,7 @@ src/main.cpp.bak
 # Embedded fonts header, rebuilt from src/fonts/*.ttf by scripts/gen-fonts.py
 /src/fonts.generated.h
 /src/glyph_pack.generated.h
+/src/lang.generated.h
 
 # Embedded icon header/ico, rebuilt from assets/default.xex by scripts/gen-icon.py
 /src/icon.generated.h

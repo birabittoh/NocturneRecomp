@@ -15,12 +15,15 @@
 #include "player_status.h"
 #include "rando/rando.h"
 #include "rando_runtime.h"
+#include "ui_font.h"
+#include "ui_text.h"
 
 namespace nocturne {
 
 namespace {
 
 constexpr const char* kBaseXexName = "default.xex";
+// The title shown is translated; ImGui identifies the window by what follows ##.
 constexpr const char* kWindowTitle = "Randomizer##rando";
 
 // Items the randomizer can place that gate progression, shown next to the
@@ -84,8 +87,9 @@ class RandoMenuDialog : public rex::ui::ImGuiDialog {
     if (!visible_) {
       return;
     }
+    const UiFontScope font;
     ImGui::SetNextWindowSize(ImVec2(560, 640), ImGuiCond_FirstUseEver);
-    if (!ImGui::Begin(kWindowTitle, &visible_)) {
+    if (!ImGui::Begin((std::string(Tr("randomizer", "title")) + "##rando").c_str(), &visible_)) {
       ImGui::End();
       return;
     }
@@ -96,9 +100,7 @@ class RandoMenuDialog : public rex::ui::ImGuiDialog {
     auto& o = options_;
     bool changed = false;
 
-    ImGui::TextWrapped(
-        "Randomizer by MottZilla (github.com/MottZilla/SOTN_XB_RANDO). Randomize from the "
-        "title screen or main menu, then start a new game.");
+    ImGui::TextWrapped("%s", Tr("randomizer", "intro"));
     ImGui::Separator();
 
     const auto runtime = GetRandoRuntime().state();
@@ -114,16 +116,16 @@ class RandoMenuDialog : public rex::ui::ImGuiDialog {
 
     ImGui::BeginDisabled(running || runtime.request_pending);
 
-    ImGui::TextUnformatted("Seed");
+    ImGui::TextUnformatted(Tr("randomizer", "seed"));
     ImGui::SetNextItemWidth(-90);
     changed |= ImGui::InputText("##seed", seed_buf_, sizeof(seed_buf_));
     ImGui::SameLine();
-    if (ImGui::Button("Random")) {
+    if (ImGui::Button(Tr("randomizer", "random"))) {
       std::snprintf(seed_buf_, sizeof(seed_buf_), "%s", rando::RandomSeedName().c_str());
       changed = true;
     }
 
-    ImGui::TextUnformatted("Preset / Mode");
+    ImGui::TextUnformatted(Tr("randomizer", "preset_mode"));
     ImGui::SetNextItemWidth(-1);
     if (ImGui::BeginCombo("##preset", presets[o.preset].name)) {
       for (int i = 0; i < static_cast<int>(presets.size()); ++i) {
@@ -137,26 +139,26 @@ class RandoMenuDialog : public rex::ui::ImGuiDialog {
     const rando::Preset& preset = presets[o.preset];
 
     if (preset.picks_complexity) {
-      ImGui::TextUnformatted("Minimum Complexity");
+      ImGui::TextUnformatted(Tr("randomizer", "min_complexity"));
       ImGui::SetNextItemWidth(-1);
       changed |= ImGui::SliderInt("##complexity", &o.complexity, 1, 8);
     }
 
     ImGui::Spacing();
     if (!preset.fixes_randomization) {
-      changed |= ImGui::Checkbox("Randomize Relics", &o.relics);
-      changed |= ImGui::Checkbox("Randomize Starting Gear", &o.starting_gear);
-      changed |= ImGui::Checkbox("Randomize Equipment Pickups", &o.equipment);
-      changed |= ImGui::Checkbox("Randomize Enemy Drops", &o.drops);
-      changed |= ImGui::Checkbox("Randomize Shop Items", &o.shop);
-      changed |= ImGui::Checkbox("Randomize Candles", &o.candles);
+      changed |= ImGui::Checkbox(Tr("randomizer", "relics"), &o.relics);
+      changed |= ImGui::Checkbox(Tr("randomizer", "starting_gear"), &o.starting_gear);
+      changed |= ImGui::Checkbox(Tr("randomizer", "equipment"), &o.equipment);
+      changed |= ImGui::Checkbox(Tr("randomizer", "drops"), &o.drops);
+      changed |= ImGui::Checkbox(Tr("randomizer", "shop"), &o.shop);
+      changed |= ImGui::Checkbox(Tr("randomizer", "candles"), &o.candles);
     }
-    changed |= ImGui::Checkbox("Force No Minimum Complexity", &o.force_no_complexity);
-    changed |= ImGui::Checkbox("Map Tracker (In-Game Show Loc)", &o.map_tracker);
-    changed |= ImGui::Checkbox("Remove Clock Statue", &o.clock_statue);
-    changed |= ImGui::Checkbox("Boost Enemy Drops", &o.drop_rates);
-    changed |= ImGui::Checkbox("Fast Warps", &o.fast_warps);
-    changed |= ImGui::Checkbox("Anti-Freeze", &o.anti_freeze);
+    changed |= ImGui::Checkbox(Tr("randomizer", "force_no_complexity"), &o.force_no_complexity);
+    changed |= ImGui::Checkbox(Tr("randomizer", "map_tracker"), &o.map_tracker);
+    changed |= ImGui::Checkbox(Tr("randomizer", "clock_statue"), &o.clock_statue);
+    changed |= ImGui::Checkbox(Tr("randomizer", "drop_rates"), &o.drop_rates);
+    changed |= ImGui::Checkbox(Tr("randomizer", "fast_warps"), &o.fast_warps);
+    changed |= ImGui::Checkbox(Tr("randomizer", "anti_freeze"), &o.anti_freeze);
 
     ImGui::EndDisabled();
     if (changed) {
@@ -199,10 +201,10 @@ class RandoMenuDialog : public rex::ui::ImGuiDialog {
     // do until something changes.
     const bool already_active = runtime.active && runtime.active->options == options_;
     if (already_active && !running) {
-      ImGui::TextDisabled("This seed is active. Change the seed or an option to randomize again.");
+      ImGui::TextDisabled("%s", Tr("randomizer", "seed_active"));
     } else {
       ImGui::BeginDisabled(running || runtime.request_pending || !runtime.supported);
-      if (ImGui::Button("Randomize!")) {
+      if (ImGui::Button(Tr("randomizer", "randomize"))) {
         CopySeedToOptions();
         SaveOptions();
         gen.Start(game_root_ / kBaseXexName, user_root_ / "spoilers.txt", options_);
@@ -213,11 +215,11 @@ class RandoMenuDialog : public rex::ui::ImGuiDialog {
 
     if (running) {
       ImGui::SameLine();
-      if (ImGui::Button("Abort")) {
+      if (ImGui::Button(Tr("randomizer", "abort"))) {
         gen.Abort();
       }
       ImGui::SameLine();
-      ImGui::TextUnformatted("Generating...");
+      ImGui::TextUnformatted(Tr("randomizer", "generating"));
       return;
     }
     switch (gen.status()) {
@@ -229,16 +231,16 @@ class RandoMenuDialog : public rex::ui::ImGuiDialog {
         }
         break;
       case rando::Status::kFailed:
-        ImGui::TextWrapped("Generation failed; see the log below.");
+        ImGui::TextWrapped("%s", Tr("randomizer", "failed"));
         break;
       case rando::Status::kAborted:
-        ImGui::TextWrapped("Aborted.");
+        ImGui::TextWrapped("%s", Tr("randomizer", "aborted"));
         break;
       default:
         break;
     }
     if (runtime.request_pending) {
-      ImGui::TextUnformatted("Applying...");
+      ImGui::TextUnformatted(Tr("randomizer", "applying"));
     }
   }
 
@@ -246,15 +248,15 @@ class RandoMenuDialog : public rex::ui::ImGuiDialog {
   // from Randomize) or the vanilla game.
   void DrawActiveRando(bool running, const RandoRuntime::State& runtime) {
     if (!runtime.active) {
-      ImGui::TextUnformatted("Active: the vanilla game.");
+      ImGui::TextUnformatted(Tr("randomizer", "active_vanilla"));
     } else {
       DrawSeedHeader(*runtime.active, runtime);
       ImGui::BeginDisabled(running || runtime.request_pending);
-      if (ImGui::Button("Return to vanilla")) {
+      if (ImGui::Button(Tr("randomizer", "return_to_vanilla"))) {
         GetRandoRuntime().RequestRevert();
       }
       ImGui::EndDisabled();
-      if (ImGui::CollapsingHeader("Spoiler log")) {
+      if (ImGui::CollapsingHeader(Tr("randomizer", "spoiler_log"))) {
         DrawSpoilers(*runtime.active);
       }
     }
@@ -265,15 +267,18 @@ class RandoMenuDialog : public rex::ui::ImGuiDialog {
 
   void DrawSeedHeader(const rando::Result& seed, const RandoRuntime::State& runtime) {
     const auto& presets = rando::Presets();
-    ImGui::TextWrapped("Active seed: %s", seed.options.seed.c_str());
-    ImGui::Text("Preset: %s    Complexity: %d    Hash: %016" PRIx64,
-                presets[std::min<size_t>(seed.options.preset, presets.size() - 1)].name,
-                seed.complexity, seed.patches.Hash());
+    ImGui::TextWrapped("%s", Tr("randomizer", "active_seed", seed.options.seed).c_str());
+    char hash[17];
+    std::snprintf(hash, sizeof(hash), "%016" PRIx64, seed.patches.Hash());
+    ImGui::TextUnformatted(
+        TrArgs("randomizer", "seed_summary",
+               {presets[std::min<size_t>(seed.options.preset, presets.size() - 1)].name,
+                std::to_string(seed.complexity), hash})
+            .c_str());
     if (runtime.inactive_code_patches) {
       ImGui::TextWrapped(
-          "%zu code patch(es) of this seed couldn't be activated, so parts of the preset may "
-          "misbehave. See the log.",
-          runtime.inactive_code_patches);
+          "%s", Tr("randomizer", "inactive_patches", std::to_string(runtime.inactive_code_patches))
+                    .c_str());
     }
   }
 
@@ -288,27 +293,27 @@ class RandoMenuDialog : public rex::ui::ImGuiDialog {
     if (runtime.active) {
       DrawSeedHeader(*runtime.active, runtime);
     } else {
-      ImGui::TextUnformatted("Playing the vanilla game.");
+      ImGui::TextUnformatted(Tr("randomizer", "playing_vanilla"));
     }
     if (!runtime.message.empty()) {
       ImGui::TextWrapped("%s", runtime.message.c_str());
     }
-    ImGui::TextDisabled("Quit to the title screen to change the seed.");
+    ImGui::TextDisabled("%s", Tr("randomizer", "quit_to_change"));
     ImGui::Separator();
 
     player::Snapshot snap;
     if (!player::GetPlayerStatus().Read(snap)) {
-      ImGui::TextUnformatted("Waiting for a save to load...");
+      ImGui::TextUnformatted(Tr("randomizer", "waiting_for_save"));
       return;
     }
 
-    ImGui::SeparatorText("Relics");
+    ImGui::SeparatorText(Tr("randomizer", "relics_header"));
     const int vlad_first = static_cast<int>(player::Relic::HeartOfVlad);
     DrawRelicGrid(snap, 0, vlad_first);
-    ImGui::SeparatorText("Vlad relics");
+    ImGui::SeparatorText(Tr("randomizer", "vlad_relics_header"));
     DrawRelicGrid(snap, vlad_first, player::kRelicCount);
 
-    ImGui::SeparatorText("Key items");
+    ImGui::SeparatorText(Tr("randomizer", "key_items_header"));
     if (ImGui::BeginTable("##key_items", 2)) {
       for (const char* name : kKeyItemNames) {
         ImGui::TableNextColumn();
@@ -319,7 +324,7 @@ class RandoMenuDialog : public rex::ui::ImGuiDialog {
 
     if (runtime.active) {
       ImGui::Spacing();
-      ImGui::Checkbox("Reveal spoilers", &reveal_spoilers_);
+      ImGui::Checkbox(Tr("randomizer", "reveal_spoilers"), &reveal_spoilers_);
       if (reveal_spoilers_) {
         DrawSpoilers(*runtime.active);
       }
@@ -329,9 +334,9 @@ class RandoMenuDialog : public rex::ui::ImGuiDialog {
     for (int id = 0; id < player::kHandItemCount + player::kBodyItemCount; ++id) {
       owned += snap.ItemCount(player::ItemId{static_cast<uint16_t>(id)}) > 0;
     }
-    char label[64];
-    std::snprintf(label, sizeof(label), "Inventory (%d)###inventory", owned);
-    if (ImGui::CollapsingHeader(label)) {
+    const std::string label =
+        Tr("randomizer", "inventory", std::to_string(owned)) + "###inventory";
+    if (ImGui::CollapsingHeader(label.c_str())) {
       ImGui::BeginChild("##inventory", ImVec2(0, 0), ImGuiChildFlags_Borders);
       for (int id = 0; id < player::kHandItemCount + player::kBodyItemCount; ++id) {
         player::ItemId item{static_cast<uint16_t>(id)};

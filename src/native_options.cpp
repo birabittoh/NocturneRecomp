@@ -93,6 +93,7 @@
 #include "game_state.h"
 #include "graphics_settings.h"
 #include "settings.h"
+#include "ui_text.h"
 
 #include <fmt/format.h>
 #include <fmt/ranges.h>
@@ -305,45 +306,6 @@ constexpr uint32_t kButtonDefaults = 6;
 // displaced; see NativeOptions_SettingsEvent.
 constexpr uint32_t kButtonStretchScreen = 7;
 
-// Mirrors graphics_settings.cpp's XLanguageId -- the six languages the
-// in-game Language dropdown offers; anything else falls back to English.
-enum class XLanguageId : uint32_t {
-  kEnglish = 1,
-  kJapanese = 2,
-  kGerman = 3,
-  kFrench = 4,
-  kSpanish = 5,
-  kItalian = 6,
-};
-
-XLanguageId CurrentLanguage() {
-  return static_cast<XLanguageId>(REXCVAR_QUERY(uint32_t, user_language));
-}
-
-// Keys a translating mod publishes via the "settings.native_string" event
-// (see settings.h's RegisterNativeStringListener) to override one of this
-// file's own synthesized strings. Rows the base game's string table already
-// covers (stock Graphics/Volume) aren't here -- they render correctly for
-// any language strings_<code>.bin supplies, with no help needed from this
-// mechanism.
-constexpr const char* kNativeStringKeyPresetLabel = "preset_label";
-constexpr const char* kNativeStringKeyCustomPromptLabel = "custom_prompt_label";
-constexpr const char* kNativeStringKeyFullscreenLabel = "fullscreen_label";
-constexpr const char* kNativeStringKeyFullscreenOff = "fullscreen_off";
-constexpr const char* kNativeStringKeyFullscreenOn = "fullscreen_on";
-constexpr const char* kNativeStringKeyLanguageLabel = "language_label";
-constexpr const char* kNativeStringKeyVsyncLabel = "vsync_label";
-
-// Prefers a mod-registered translation (see kNativeStringKey* above) for the
-// current language over the compiled-in `fallback`.
-const char16_t* TranslatedOr(const char* key, const char16_t* fallback) {
-  if (const char16_t* translated = nocturne::FindNativeStringTranslation(
-          static_cast<uint32_t>(CurrentLanguage()), key)) {
-    return translated;
-  }
-  return fallback;
-}
-
 // True if ANY cvar changed this session (through this screen or otherwise --
 // GetPendingRestartFlags() doesn't distinguish the source) still needs a
 // restart to take effect. Mirrors settings.cpp's own AnyPendingRestart, which
@@ -459,11 +421,11 @@ constexpr std::array<const char*, 2> kFullscreenCvarValues = {"false", "true"};
 // registers after this row's already been read once still takes effect on
 // the next visit. `values` needs a fixed, compile-time-addressable buffer
 // (see CustomRow::values) -- this is that buffer's storage.
-std::array<const char16_t*, 2> g_fullscreen_values = {u"Off", u"On"};
+std::array<const char16_t*, 2> g_fullscreen_values = {u"", u""};
 
 uint32_t SyncFullscreenText() {
-  g_fullscreen_values[0] = TranslatedOr(kNativeStringKeyFullscreenOff, u"Off");
-  g_fullscreen_values[1] = TranslatedOr(kNativeStringKeyFullscreenOn, u"On");
+  g_fullscreen_values[0] = TrNative("fullscreen_off");
+  g_fullscreen_values[1] = TrNative("fullscreen_on");
   return static_cast<uint32_t>(g_fullscreen_values.size());
 }
 
@@ -471,26 +433,7 @@ uint32_t SyncFullscreenText() {
 // here rather than looked up. Title case to match the stock rows, not the
 // all-caps prompt bar.
 const char16_t* FullscreenLabel() {
-  const char16_t* base = [] {
-    switch (CurrentLanguage()) {
-      case XLanguageId::kItalian:
-        return u"Schermo intero";
-      // See FullscreenLabel's comment: literal text renders through the same
-      // language-selected font as looked-up text, so this is safe.
-      case XLanguageId::kJapanese:
-        return u"フルスクリーン";
-      case XLanguageId::kGerman:
-        return u"Vollbild";
-      case XLanguageId::kFrench:
-        return u"Plein écran";
-      case XLanguageId::kSpanish:
-        return u"Pantalla completa";
-      case XLanguageId::kEnglish:
-      default:
-        return u"Fullscreen";
-    }
-  }();
-  return TranslatedOr(kNativeStringKeyFullscreenLabel, base);
+  return TrNative("fullscreen_label");
 }
 
 int32_t GetFullscreenIndex() {
@@ -581,26 +524,7 @@ uint32_t LanguageOptionCount() {
 }
 
 const char16_t* LanguageRowLabel() {
-  const char16_t* base = [] {
-    switch (CurrentLanguage()) {
-      case XLanguageId::kItalian:
-        return u"Lingua";
-      // See FullscreenLabel's comment: 言/語 aren't in font_ja.xpr's glyph
-      // atlas, so this uses the katakana loanword instead.
-      case XLanguageId::kJapanese:
-        return u"ランゲージ";
-      case XLanguageId::kGerman:
-        return u"Sprache";
-      case XLanguageId::kFrench:
-        return u"Langue";
-      case XLanguageId::kSpanish:
-        return u"Idioma";
-      case XLanguageId::kEnglish:
-      default:
-        return u"Language";
-    }
-  }();
-  return TranslatedOr(kNativeStringKeyLanguageLabel, base);
+  return TrNative("language_label");
 }
 
 int32_t GetLanguageIndex() {
@@ -640,24 +564,7 @@ void CommitLanguageIndex(int32_t index) {
 constexpr const char* kVsyncCvar = "vsync";
 
 const char16_t* VsyncLabel() {
-  const char16_t* base = [] {
-    switch (CurrentLanguage()) {
-      case XLanguageId::kItalian:
-        return u"Sincronizzazione verticale";
-      case XLanguageId::kJapanese:
-        return u"垂直同期";
-      case XLanguageId::kGerman:
-        return u"VSync";
-      case XLanguageId::kFrench:
-        return u"Synchro verticale";
-      case XLanguageId::kSpanish:
-        return u"Sincronización vertical";
-      case XLanguageId::kEnglish:
-      default:
-        return u"VSync";
-    }
-  }();
-  return TranslatedOr(kNativeStringKeyVsyncLabel, base);
+  return TrNative("vsync_label");
 }
 
 int32_t GetVsyncIndex() { return rex::cvar::GetFlagByName(kVsyncCvar) == "true" ? 1 : 0; }
@@ -733,25 +640,7 @@ void CommitMasterVolumeStep(int32_t step) {
 // this row is `live` -- the player sees each preset as they cycle onto it, one
 // frame later, and B puts the original back the same way.
 const char16_t* PresetLabel() {
-  const char16_t* base = [] {
-    switch (CurrentLanguage()) {
-      case XLanguageId::kItalian:
-        return u"Preset";
-      // See FullscreenLabel's comment on why this is safe.
-      case XLanguageId::kJapanese:
-        return u"プリセット";
-      case XLanguageId::kGerman:
-        return u"Voreinstellung";
-      case XLanguageId::kFrench:
-        return u"Préréglage";
-      case XLanguageId::kSpanish:
-        return u"Preajuste";
-      case XLanguageId::kEnglish:
-      default:
-        return u"Preset";
-    }
-  }();
-  return TranslatedOr(kNativeStringKeyPresetLabel, base);
+  return TrNative("preset_label");
 }
 
 // The Y prompt's text. All caps to match the prompt bar's own strings (the
@@ -763,32 +652,15 @@ const char16_t* PresetLabel() {
 // Read when the screen object is built, and again by RefreshNativeOptionsText
 // after a language switch.
 const char16_t* CustomPromptLabel() {
-  const char16_t* base = [] {
-    switch (CurrentLanguage()) {
-      case XLanguageId::kItalian:
-        return u"PERSONALIZZA";
-      // See FullscreenLabel's comment on why this is safe.
-      case XLanguageId::kJapanese:
-        return u"カスタマイズ";
-      case XLanguageId::kGerman:
-        return u"ANPASSEN";
-      case XLanguageId::kFrench:
-        return u"AJUSTER";
-      case XLanguageId::kSpanish:
-        return u"AJUSTAR";
-      case XLanguageId::kEnglish:
-      default:
-        return u"CUSTOMIZE";
-    }
-  }();
-  return TranslatedOr(kNativeStringKeyCustomPromptLabel, base);
+  return TrNative("custom_prompt_label");
 }
 
 // --- Graphics (stock row 0, relabelled) -------------------------------------
 
 // The Italian localisation of the Graphics row reads "Grafici" (the plural of
 // "graph"/"chart") where it should read "Grafica". Every other language's
-// string is fine, so this returns null for them -- RenderCustomRow skips a
+// string is fine, so res/lang has `graphics_label` for Italian only and this
+// returns null for the rest -- RenderCustomRow skips a
 // null label, leaving the game's own text in place, and no translation has to
 // be invented here.
 //
@@ -797,7 +669,7 @@ const char16_t* CustomPromptLabel() {
 // it (see docs/reverse-engineering.md for the static-text patching route,
 // which would be the wrong tool here).
 const char16_t* GraphicsLabel() {
-  return CurrentLanguage() == XLanguageId::kItalian ? u"Grafica" : nullptr;
+  return TrNativeCurrent("graphics_label");
 }
 
 // --- The table itself -------------------------------------------------------

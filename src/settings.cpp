@@ -6,6 +6,8 @@
 #include "enhancements.h"
 #include "graphics_settings.h"
 #include "rando_runtime.h"
+#include "ui_font.h"
+#include "ui_text.h"
 
 #include <algorithm>
 #include <array>
@@ -14,7 +16,6 @@
 #include <cstdlib>
 #include <string>
 #include <string_view>
-#include <unordered_map>
 #include <vector>
 
 #include <rex/cvar.h>
@@ -139,57 +140,6 @@ struct ModLanguageOption {
 };
 std::vector<ModLanguageOption> g_mod_language_options;
 
-// Extra native-options string translations mods register via the
-// "settings.native_string" event (see RegisterNativeStringListener in
-// settings.h). Keyed by "<XLanguage id>:<key>"; owns its own UTF-16
-// storage, since the event's payload.bytes is only valid for the duration
-// of Publish().
-std::unordered_map<std::string, std::u16string> g_native_string_translations;
-
-// Decodes UTF-8 to UTF-16 (BMP code points as a single unit, astral ones as
-// a surrogate pair). Mod-published label text is expected to be valid
-// UTF-8; an invalid lead byte is skipped rather than corrupting the rest of
-// the string.
-std::u16string Utf8ToUtf16(std::string_view s) {
-  std::u16string out;
-  out.reserve(s.size());
-  size_t i = 0;
-  while (i < s.size()) {
-    const auto byte_at = [&](size_t offset) {
-      return static_cast<unsigned char>(s[i + offset]);
-    };
-    const unsigned char c0 = byte_at(0);
-    uint32_t cp;
-    size_t len;
-    if (c0 < 0x80) {
-      cp = c0;
-      len = 1;
-    } else if ((c0 & 0xE0) == 0xC0 && i + 1 < s.size()) {
-      cp = ((c0 & 0x1Fu) << 6) | (byte_at(1) & 0x3Fu);
-      len = 2;
-    } else if ((c0 & 0xF0) == 0xE0 && i + 2 < s.size()) {
-      cp = ((c0 & 0x0Fu) << 12) | ((byte_at(1) & 0x3Fu) << 6) | (byte_at(2) & 0x3Fu);
-      len = 3;
-    } else if ((c0 & 0xF8) == 0xF0 && i + 3 < s.size()) {
-      cp = ((c0 & 0x07u) << 18) | ((byte_at(1) & 0x3Fu) << 12) | ((byte_at(2) & 0x3Fu) << 6) |
-           (byte_at(3) & 0x3Fu);
-      len = 4;
-    } else {
-      ++i;
-      continue;
-    }
-    if (cp <= 0xFFFF) {
-      out.push_back(static_cast<char16_t>(cp));
-    } else if (cp <= 0x10FFFF) {
-      cp -= 0x10000;
-      out.push_back(static_cast<char16_t>(0xD800 + (cp >> 10)));
-      out.push_back(static_cast<char16_t>(0xDC00 + (cp & 0x3FFu)));
-    }
-    i += len;
-  }
-  return out;
-}
-
 bool IsKnownLanguageId(std::string_view id) {
   for (const auto& opt : kLanguageOptions) {
     if (id == opt.id)
@@ -246,9 +196,10 @@ class CuratedSettingsDialog : public rex::ui::ImGuiDialog {
 
  protected:
   void OnDraw(ImGuiIO& /*io*/) override {
+    const UiFontScope font;
     ImGui::SetNextWindowSize(ImVec2(420, 0), ImGuiCond_FirstUseEver);
     ImGui::SetNextWindowBgAlpha(0.9f);
-    if (!ImGui::Begin("Settings##rex", nullptr,
+    if (!ImGui::Begin((std::string(Tr("settings", "title")) + "##rex").c_str(), nullptr,
                        ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_AlwaysAutoResize)) {
       ImGui::End();
       return;
@@ -256,10 +207,10 @@ class CuratedSettingsDialog : public rex::ui::ImGuiDialog {
 
     if (AnyPendingRestart()) {
       ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 0.85f, 0.2f, 1.0f));
-      ImGui::TextWrapped("Some changes require a restart to take effect.");
+      ImGui::TextWrapped("%s", Tr("settings", "restart_banner"));
       ImGui::PopStyleColor();
       ImGui::SameLine();
-      if (ImGui::SmallButton("Restart Now")) {
+      if (ImGui::SmallButton(Tr("settings", "restart_now"))) {
         if (rex::platform::process::Relaunch() && window_) {
           window_->RequestClose();
         }
@@ -268,11 +219,11 @@ class CuratedSettingsDialog : public rex::ui::ImGuiDialog {
     }
 
     if (ImGui::BeginTabBar("##settings_tabs")) {
-      if (ImGui::BeginTabItem("General")) {
+      if (ImGui::BeginTabItem(Tr("settings", "tab_general"))) {
         DrawGeneralTab();
         ImGui::EndTabItem();
       }
-      if (ImGui::BeginTabItem("Enhancements")) {
+      if (ImGui::BeginTabItem(Tr("settings", "tab_enhancements"))) {
         DrawEnhancementsTab();
         ImGui::EndTabItem();
       }
@@ -280,7 +231,7 @@ class CuratedSettingsDialog : public rex::ui::ImGuiDialog {
     }
 
     ImGui::Separator();
-    if (ImGui::Button("Reset All to Defaults")) {
+    if (ImGui::Button(Tr("settings", "reset_all"))) {
       for (const char* name : kBasicCvarNames) {
         rex::cvar::ResetToDefault(name);
       }
@@ -305,7 +256,8 @@ class CuratedSettingsDialog : public rex::ui::ImGuiDialog {
     // ("All Settings##rexdev") so its ImGui window doesn't share an ID with
     // this dialog's own "Settings##rex" -- same ID would merge both
     // dialogs' draws into a single squeezed window instead of two.
-    if (ImGui::Button(dev_settings_overlay_ ? "Close All Settings" : "All Settings...")) {
+    if (ImGui::Button(dev_settings_overlay_ ? Tr("settings", "close_all_settings")
+                                         : Tr("settings", "all_settings"))) {
       if (dev_settings_overlay_) {
         dev_settings_overlay_.reset();
       } else {
@@ -374,7 +326,7 @@ class CuratedSettingsDialog : public rex::ui::ImGuiDialog {
 #endif
 
     ImGui::Separator();
-    if (ImGui::CollapsingHeader("Advanced")) {
+    if (ImGui::CollapsingHeader(Tr("settings", "advanced"))) {
       for (const char* name : kAdvancedCvarNames) {
         DrawAdvancedRow(name);
       }
@@ -388,18 +340,15 @@ class CuratedSettingsDialog : public rex::ui::ImGuiDialog {
     const auto runtime = GetRandoRuntime().state();
     const float wrap_width = 400.0f;
     ImGui::PushTextWrapPos(ImGui::GetCursorPosX() + wrap_width);
-    ImGui::TextUnformatted(
-        "Fixes and tweaks from MottZilla's SOTN_XB_RANDO randomizer. They apply to the vanilla "
-        "game and on top of randomizer seeds.");
+    ImGui::TextUnformatted(Tr("enhancements", "intro"));
     if (!runtime.supported) {
       ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 0.85f, 0.2f, 1.0f));
       ImGui::TextUnformatted(runtime.unsupported_reason.c_str());
       ImGui::PopStyleColor();
     } else if (CurrentEnhancements() != runtime.enhancements) {
       ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 0.85f, 0.2f, 1.0f));
-      ImGui::TextUnformatted(GetRandoRuntime().InFrontEnd()
-                                 ? "Applying..."
-                                 : "Changes take effect at the title screen.");
+      ImGui::TextUnformatted(GetRandoRuntime().InFrontEnd() ? Tr("enhancements", "applying")
+                                                            : Tr("enhancements", "takes_effect"));
       ImGui::PopStyleColor();
     }
     ImGui::PopTextWrapPos();
@@ -413,7 +362,7 @@ class CuratedSettingsDialog : public rex::ui::ImGuiDialog {
         continue;
       }
       if (e.section) {
-        ImGui::SeparatorText(e.section);
+        ImGui::SeparatorText(Tr("enhancements", e.section));
       }
       ImGui::PushID(e.cvar);
       const SeedUse use = seed ? e.seed_use(*seed) : SeedUse::kNone;
@@ -424,15 +373,15 @@ class CuratedSettingsDialog : public rex::ui::ImGuiDialog {
         SaveEnhancements();
       }
       ImGui::SameLine();
-      ImGui::TextUnformatted(e.label);
+      ImGui::TextUnformatted(Tr("enhancements", e.cvar));
       DrawSeedMarker(use);
       ImGui::EndGroup();
-      EnhancementTooltip(e.description, use);
+      EnhancementTooltip(Tr("enhancements", (std::string(e.cvar) + "_desc").c_str()), use);
       ImGui::PopID();
     }
 
     const rando::Enhancements current = CurrentEnhancements();
-    ImGui::SeparatorText("Cosmetic");
+    ImGui::SeparatorText(Tr("enhancements", "section_cosmetic"));
     ImGui::PushID(kAlchemyVatsCvar);
     const SeedUse vats_use = seed ? AlchemyVatsSeedUse(*seed) : SeedUse::kNone;
     bool shuffle_vats = current.alchemy_vats != 0;
@@ -441,20 +390,20 @@ class CuratedSettingsDialog : public rex::ui::ImGuiDialog {
       SetAlchemyVatsShuffle(shuffle_vats ? NewShuffleSeed() : 0);
     }
     ImGui::SameLine();
-    ImGui::TextUnformatted("Shuffle Alchemy Lab Vats");
+    ImGui::TextUnformatted(Tr("enhancements", "shuffle_vats"));
     DrawSeedMarker(vats_use);
     ImGui::EndGroup();
-    EnhancementTooltip("Shuffles the sub-weapons in the Alchemy Laboratory vats.", vats_use);
+    EnhancementTooltip(Tr("enhancements", "shuffle_vats_desc"), vats_use);
     if (shuffle_vats) {
       ImGui::SameLine();
-      if (ImGui::SmallButton("Reshuffle")) {
+      if (ImGui::SmallButton(Tr("enhancements", "reshuffle"))) {
         SetAlchemyVatsShuffle(NewShuffleSeed());
       }
     }
     ImGui::PopID();
 
     ImGui::Spacing();
-    ImGui::TextUnformatted("Wing Smash Trail Color");
+    ImGui::TextUnformatted(Tr("enhancements", "wing_smash_color"));
     ImGui::SameLine(180.0f);
     ImGui::SetNextItemWidth(160.0f);
     const int color = current.wing_smash_color;
@@ -468,13 +417,12 @@ class CuratedSettingsDialog : public rex::ui::ImGuiDialog {
       ImGui::EndCombo();
     }
 
-    ImGui::SeparatorText("Game mode");
+    ImGui::SeparatorText(Tr("enhancements", "section_game_mode"));
     const rando::GameMode mode = current.game_mode;
     const SeedUse mode_use = seed ? GameModeSeedUse(*seed, mode) : SeedUse::kNone;
-    constexpr const char* kModeNote =
-        "A mode changes the game's rules: start a new game to play it.";
+    const char* kModeNote = Tr("enhancements", "mode_note");
     ImGui::BeginGroup();
-    ImGui::TextUnformatted("Mode");
+    ImGui::TextUnformatted(Tr("enhancements", "mode"));
     DrawSeedMarker(mode_use);
     ImGui::EndGroup();
     EnhancementTooltip(GameModeDescription(mode), mode_use,
@@ -508,10 +456,10 @@ class CuratedSettingsDialog : public rex::ui::ImGuiDialog {
     }
     ImGui::SameLine();
     if (use == SeedUse::kIncluded) {
-      ImGui::TextDisabled("(in seed)");
+      ImGui::TextDisabled("%s", Tr("enhancements", "in_seed"));
     } else {
       ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 0.85f, 0.2f, 1.0f));
-      ImGui::TextUnformatted("(not applied)");
+      ImGui::TextUnformatted(Tr("enhancements", "not_applied"));
       ImGui::PopStyleColor();
     }
   }
@@ -531,10 +479,10 @@ class CuratedSettingsDialog : public rex::ui::ImGuiDialog {
       ImGui::TextDisabled("%s", note);
     }
     if (use == SeedUse::kIncluded) {
-      ImGui::TextDisabled("Always on with the active randomizer seed.");
+      ImGui::TextDisabled("%s", Tr("enhancements", "tip_in_seed"));
     } else if (use == SeedUse::kConflicts) {
       ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 0.85f, 0.2f, 1.0f));
-      ImGui::TextUnformatted("Not applied: the active seed's preset patches the same thing.");
+      ImGui::TextUnformatted(Tr("enhancements", "tip_conflicts"));
       ImGui::PopStyleColor();
     }
     ImGui::PopTextWrapPos();
@@ -582,10 +530,10 @@ class CuratedSettingsDialog : public rex::ui::ImGuiDialog {
     // restart regardless of auto_updater_'s own in-memory state.
     if (rex::system::AutoUpdater::HasPendingSelfUpdate(rex::filesystem::GetExecutableFolder())) {
       ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.45f, 0.85f, 0.55f, 1.0f));
-      ImGui::TextWrapped("An update has been downloaded.");
+      ImGui::TextWrapped("%s", Tr("settings", "update_downloaded"));
       ImGui::PopStyleColor();
       ImGui::SameLine();
-      if (ImGui::SmallButton("Restart & Apply##autoupdate")) {
+      if (ImGui::SmallButton((std::string(Tr("settings", "restart_apply")) + "##autoupdate").c_str())) {
         // This install root contains the running executable itself,
         // which stays locked for this process's whole lifetime (see
         // AutoUpdater::ApplyAndRestart's contract). The spawned helper
@@ -603,11 +551,13 @@ class CuratedSettingsDialog : public rex::ui::ImGuiDialog {
     auto install = auto_updater_.InstallSnapshot();
     if (install.in_progress) {
       if (install.total_bytes > 0) {
-        ImGui::TextDisabled("Downloading update... %.0f%%",
-                            100.0 * static_cast<double>(install.downloaded_bytes) /
-                                static_cast<double>(install.total_bytes));
+        char percent[16];
+        std::snprintf(percent, sizeof(percent), "%.0f",
+                      100.0 * static_cast<double>(install.downloaded_bytes) /
+                          static_cast<double>(install.total_bytes));
+        ImGui::TextDisabled("%s", Tr("settings", "downloading_percent", percent).c_str());
       } else {
-        ImGui::TextDisabled("Downloading update...");
+        ImGui::TextDisabled("%s", Tr("settings", "downloading"));
       }
       ImGui::Separator();
       return;
@@ -628,10 +578,10 @@ class CuratedSettingsDialog : public rex::ui::ImGuiDialog {
       return;
     }
     ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.45f, 0.85f, 0.55f, 1.0f));
-    ImGui::TextWrapped("Update available: v%s", info->version.c_str());
+    ImGui::TextWrapped("%s", Tr("settings", "update_available", info->version).c_str());
     ImGui::PopStyleColor();
     ImGui::SameLine();
-    if (ImGui::SmallButton("Download Update")) {
+    if (ImGui::SmallButton(Tr("settings", "download_update"))) {
       auto_updater_.InstallAsync(*info, rex::filesystem::GetExecutableFolder());
     }
     ImGui::Separator();
@@ -641,7 +591,7 @@ class CuratedSettingsDialog : public rex::ui::ImGuiDialog {
     const auto* entry = rex::cvar::GetFlagInfo("fullscreen");
     if (!entry)
       return;
-    ImGui::TextUnformatted("Fullscreen");
+    ImGui::TextUnformatted(Tr("settings", "fullscreen"));
     ImGui::SameLine(180.0f);
     ImGui::PushID("fullscreen");
     if (rex::ui::DrawCvarWidget(*entry, 160.0f, /*persist=*/true)) {
@@ -654,7 +604,7 @@ class CuratedSettingsDialog : public rex::ui::ImGuiDialog {
     const auto* entry = rex::cvar::GetFlagInfo("vsync");
     if (!entry)
       return;
-    ImGui::TextUnformatted("VSync");
+    ImGui::TextUnformatted(Tr("settings", "vsync"));
     ImGui::SameLine(180.0f);
     ImGui::PushID("vsync");
     if (rex::ui::DrawCvarWidget(*entry, 160.0f, /*persist=*/true)) {
@@ -667,7 +617,7 @@ class CuratedSettingsDialog : public rex::ui::ImGuiDialog {
     const auto* entry = rex::cvar::GetFlagInfo("audio_mute");
     if (!entry)
       return;
-    ImGui::TextUnformatted("Mute Audio");
+    ImGui::TextUnformatted(Tr("settings", "mute_audio"));
     ImGui::SameLine(180.0f);
     ImGui::PushID("audio_mute");
     if (rex::ui::DrawCvarWidget(*entry, 160.0f, /*persist=*/true)) {
@@ -691,7 +641,7 @@ class CuratedSettingsDialog : public rex::ui::ImGuiDialog {
 
     int percent = VolumePercentFromAmplitude(std::atof(entry->getter().c_str()));
 
-    ImGui::TextUnformatted("Volume");
+    ImGui::TextUnformatted(Tr("settings", "volume"));
     ImGui::SameLine(180.0f);
     ImGui::SetNextItemWidth(160.0f);
     ImGui::PushID("audio_volume");
@@ -708,7 +658,7 @@ class CuratedSettingsDialog : public rex::ui::ImGuiDialog {
     const auto* entry = rex::cvar::GetFlagInfo("graphics_style_enhanced");
     if (!entry)
       return;
-    ImGui::TextUnformatted("Enhanced Graphics");
+    ImGui::TextUnformatted(Tr("settings", "enhanced_graphics"));
     ImGui::SameLine(180.0f);
     ImGui::PushID("graphics_style_enhanced");
     bool enhanced = entry->getter() == "true";
@@ -728,7 +678,7 @@ class CuratedSettingsDialog : public rex::ui::ImGuiDialog {
     const auto* entry = rex::cvar::GetFlagInfo("user_name");
     if (!entry)
       return;
-    ImGui::TextUnformatted("Player Name");
+    ImGui::TextUnformatted(Tr("settings", "player_name"));
     ImGui::SameLine(180.0f);
     ImGui::PushID("user_name");
     if (rex::ui::DrawCvarWidget(*entry, 160.0f, /*persist=*/true)) {
@@ -753,7 +703,7 @@ class CuratedSettingsDialog : public rex::ui::ImGuiDialog {
       }
     }
 
-    ImGui::TextUnformatted("Language");
+    ImGui::TextUnformatted(Tr("settings", "language"));
     ImGui::SameLine(180.0f);
     ImGui::SetNextItemWidth(160.0f);
     ImGui::PushID("user_language");
@@ -795,7 +745,7 @@ class CuratedSettingsDialog : public rex::ui::ImGuiDialog {
       }
     }
 
-    ImGui::TextUnformatted("GPU Backend");
+    ImGui::TextUnformatted(Tr("settings", "gpu_backend"));
     ImGui::SameLine(180.0f);
     ImGui::SetNextItemWidth(160.0f);
     ImGui::PushID("gpu_backend");
@@ -829,11 +779,11 @@ class CuratedSettingsDialog : public rex::ui::ImGuiDialog {
 
     int current = std::atoi(entry->getter().c_str());
     auto label_for = [this](int real_idx) -> const std::string& {
-      static const std::string kAuto = "Auto";
+      static const std::string kAuto = Tr("settings", "auto");
       return real_idx < 0 ? kAuto : vulkan_devices_[real_idx].name;
     };
 
-    ImGui::TextUnformatted("Vulkan Device");
+    ImGui::TextUnformatted(Tr("settings", "vulkan_device"));
     if (!entry->description.empty() && ImGui::IsItemHovered()) {
       ImGui::SetTooltip("%s", entry->description.c_str());
     }
@@ -844,7 +794,7 @@ class CuratedSettingsDialog : public rex::ui::ImGuiDialog {
       {
         bool selected = (current < 0);
         ImGui::PushID(-1);
-        if (ImGui::Selectable("Auto", selected)) {
+        if (ImGui::Selectable(Tr("settings", "auto"), selected)) {
           rex::cvar::SetFlagByName("vulkan_device", "-1", /*persist=*/true);
           SaveBasic();
         }
@@ -1045,22 +995,13 @@ void RegisterNativeStringListener(rex::system::ModRegistry* registry) {
               "[settings] ignoring settings.native_string payload with empty key or value");
           return;
         }
-        std::string map_key = std::to_string(payload.u64) + ":" + std::string(key);
-        if (g_native_string_translations.contains(map_key)) {
-          REXLOG_WARN(
-              "[settings] ignoring duplicate settings.native_string {} for language {} (already "
-              "registered)",
-              key, payload.u64);
-          return;
-        }
-        g_native_string_translations.emplace(std::move(map_key), Utf8ToUtf16(value));
+        AddUiString(static_cast<uint32_t>(payload.u64), "native", key, value);
       });
 }
 
 const char16_t* FindNativeStringTranslation(uint32_t language_id, std::string_view key) {
-  const auto it =
-      g_native_string_translations.find(std::to_string(language_id) + ":" + std::string(key));
-  return it != g_native_string_translations.end() ? it->second.c_str() : nullptr;
+  const char* text = FindModUiString(language_id, "native", key);
+  return text ? CachedUtf16(text) : nullptr;
 }
 
 std::unique_ptr<rex::ui::ImGuiDialog> CreateSettingsDialog(

@@ -118,7 +118,28 @@ add_custom_command(
     DEPENDS
         ${CMAKE_SOURCE_DIR}/scripts/gen-fonts.py
         ${CMAKE_SOURCE_DIR}/src/fonts/PTSerif-Regular.ttf
+        ${CMAKE_SOURCE_DIR}/src/fonts/DotGothic16-Subset.ttf
     COMMENT "Generating src/fonts.generated.h"
+    VERBATIM
+)
+
+# Interface text, one file per language (res/lang/*.toml, the checked-in source
+# of truth); src/lang.generated.h is a gitignored build artifact. The files are
+# globbed and listed in a file the command depends on, so adding a language
+# regenerates the header.
+set(NOCTURNE_LANG_HEADER ${CMAKE_SOURCE_DIR}/src/lang.generated.h)
+file(GLOB NOCTURNE_LANG_SOURCES CONFIGURE_DEPENDS ${CMAKE_SOURCE_DIR}/res/lang/*.toml)
+set(NOCTURNE_LANG_LIST ${CMAKE_BINARY_DIR}/lang_sources.txt)
+string(REPLACE ";" "\n" _lang_list "${NOCTURNE_LANG_SOURCES}")
+file(CONFIGURE OUTPUT ${NOCTURNE_LANG_LIST} CONTENT "${_lang_list}\n")
+add_custom_command(
+    OUTPUT ${NOCTURNE_LANG_HEADER}
+    COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/scripts/gen-lang.py
+    DEPENDS
+        ${CMAKE_SOURCE_DIR}/scripts/gen-lang.py
+        ${NOCTURNE_LANG_LIST}
+        ${NOCTURNE_LANG_SOURCES}
+    COMMENT "Generating src/lang.generated.h"
     VERBATIM
 )
 
@@ -247,6 +268,7 @@ set(NOCTURNERECOMP_SOURCES
     src/rando/rando_host.cpp
     src/room_presence.cpp
     src/settings.cpp
+    src/ui_text.cpp
     src/video_mode.cpp
     src/xbox_live.cpp
     src/gpu/guest_shaders.cpp
@@ -259,6 +281,7 @@ set(NOCTURNERECOMP_SOURCES
     src/gpu/native_renderer_texture.cpp
     ${NOCTURNE_FONTS_HEADER}
     ${NOCTURNE_GLYPHS_HEADER}
+    ${NOCTURNE_LANG_HEADER}
     ${NOCTURNE_ICON_HEADER}
     ${CMAKE_SOURCE_DIR}/ext/KryptonRecomp/guest_shader_pack.cpp
     ${NOCTURNE_GUEST_SHADER_PACK_ASM}

@@ -7,6 +7,8 @@
 
 #include <rex/cvar.h>
 
+#include "ui_text.h"
+
 REXCVAR_DEFINE_BOOL(enh_fast_warps, false, "Enhancements", "Faster warp room teleports");
 REXCVAR_DEFINE_BOOL(enh_anti_freeze, false, "Enhancements",
                     "No screen freeze on level-ups and acquisitions");
@@ -79,124 +81,83 @@ SeedUse Always(const Options&) { return SeedUse::kIncluded; }
 // Every preset but Bingo (XB_PresetWrites).
 SeedUse UnlessBingo(const Options& o) { return IncludedIf(!PresetIs(o, "Bingo")); }
 
-// Names for upstream's WS_COLORS (PS1 15-bit colors), in its order.
-constexpr const char* kWingSmashColorNames[rando::kWingSmashColorCount + 1] = {
-    "Default", "Magenta", "Violet", "Olive", "Red", "Blue", "Green", "Orange", "Maroon"};
-
-struct GameModeText {
-  const char* name;
-  const char* preset;  // the preset whose patches these are
-  const char* description;
-};
-constexpr GameModeText kGameModes[] = {
-    {"Normal", nullptr, "The game as it is."},
-    {"Bat Master", "Bat Master",
-     "All bat abilities upgraded: cheap Fire of Bat and Wing Smash, free bat form, a huge Echo "
-     "of Bat hitbox, and the bat opens doors. Y cancels Wing Smash; holding Y moves the bat at "
-     "normal speed."},
-    {"Leg Day", "LegDay",
-     "Infinite Leap Stone jumping and a super backdash that opens red doors. Upstream marks it "
-     "beta: other doors don't open this way yet."},
-    {"Richter", "Richter Rando",
-     "Play as Richter without his relics: find the Holy Glasses and all five Vlad relics to "
-     "reach the end. He can use the shop, food, Library Cards and Life Apples. Library Card "
-     "teleport with Faerie Scroll or Library Card: hold LB+RB and press B; use food by holding "
-     "Up and pressing RT."},
-};
-static_assert(std::size(kGameModes) == static_cast<size_t>(GameMode::kCount));
+// The preset each game mode takes its patches from.
+constexpr const char* kGameModePresets[] = {nullptr, "Bat Master", "LegDay", "Richter Rando"};
+static_assert(std::size(kGameModePresets) == static_cast<size_t>(GameMode::kCount));
 
 }  // namespace
 
 const std::vector<EnhancementInfo>& EnhancementList() {
+  // Label and description are res/lang's [enhancements] <cvar> and <cvar>_desc.
   static const std::vector<EnhancementInfo> list = {
-      {Enhancement::kFastWarps, "enh_fast_warps", "Fast Warps",
-       "Warp rooms teleport faster.", [](const Options& o) { return IncludedIf(o.fast_warps); },
-       "Quality of life"},
-      {Enhancement::kAntiFreeze, "enh_anti_freeze", "Anti-Freeze",
-       "Removes the screen freeze when you level up or pick something up.",
+      {Enhancement::kFastWarps, "enh_fast_warps",
+       [](const Options& o) { return IncludedIf(o.fast_warps); }, "section_quality_of_life"},
+      {Enhancement::kAntiFreeze, "enh_anti_freeze",
        [](const Options& o) { return IncludedIf(o.anti_freeze); }},
-      {Enhancement::kRemoveClockStatue, "enh_remove_clock_statue", "Remove Clock Statue",
-       "Removes the statue in the Marble Gallery clock room.",
+      {Enhancement::kRemoveClockStatue, "enh_remove_clock_statue",
        [](const Options& o) { return IncludedIf(o.clock_statue); }},
-      {Enhancement::kBoostDropRates, "enh_boost_drop_rates", "Boost Enemy Drops",
-       "Raises every enemy's item drop rates.",
+      {Enhancement::kBoostDropRates, "enh_boost_drop_rates",
        [](const Options& o) { return IncludedIf(o.drops && o.drop_rates); }},
-      {Enhancement::kDeathOnVacation, "enh_death_on_vacation", "Death on Vacation",
-       "Death doesn't take Alucard's equipment at the castle entrance.",
+      {Enhancement::kDeathOnVacation, "enh_death_on_vacation",
        [](const Options& o) { return IncludedIf(IsBountyHunter(o)); }},
-      {Enhancement::kSkipMariaAlchemy, "enh_skip_maria_alchemy", "Skip Maria in Alchemy Lab",
-       "Removes the meeting with Maria in the Alchemy Laboratory.", &Always},
+      {Enhancement::kSkipMariaAlchemy, "enh_skip_maria_alchemy", &Always},
       {Enhancement::kSkipMariaSilverRing, "enh_skip_maria_silver_ring",
-       "Skip Maria at the Silver Ring", "Removes Maria's cutscene at the Silver Ring.",
        [](const Options& o) { return IncludedIf(IsGlitchOrNoLogic(o)); }},
-      {Enhancement::kOuterWallElevator, "enh_outer_wall_elevator", "Outer Wall Elevator Fix",
-       "The randomizer's fix for the Outer Wall elevator.", &Always, "Fixes"},
-      {Enhancement::kScyllaSoftlock, "enh_scylla_softlock", "Scylla Softlock Fix",
-       "Fixes a softlock in the Scylla fight in the Underground Caverns.", &Always},
-      {Enhancement::kBridgeInput, "enh_bridge_input", "Bridge Collapse on Down + Y",
-       "Player 1 can collapse the bridge by pressing Down + Y.", &Always},
-      {Enhancement::kCatacombsEscape, "enh_catacombs_escape", "Catacombs Escape Blocks",
-       "Adds blocks so you can climb out of the Catacombs without Leap Stone, Gravity Boots "
-       "or flight.",
-       &Always},
-      {Enhancement::kClockRoomDoor, "enh_clock_room_door", "Clock Room Door Rings",
-       "The Clock Room door opens with the Gold and Silver Ring in the inventory; they no "
-       "longer need to be worn.",
-       &UnlessBingo},
-      {Enhancement::kKeyItemsStay, "enh_key_items_stay", "Key Items Stay",
-       "Items lying in the castle (like the one by the Spirit Orb) don't despawn.",
-       &UnlessBingo},
-      {Enhancement::kDemonCardDoor, "enh_demon_card_door", "Open Demon Card Door",
-       "Removes the switch door in the Abandoned Mine that needs the Demon familiar.",
+      {Enhancement::kOuterWallElevator, "enh_outer_wall_elevator", &Always, "section_fixes"},
+      {Enhancement::kScyllaSoftlock, "enh_scylla_softlock", &Always},
+      {Enhancement::kBridgeInput, "enh_bridge_input", &Always},
+      {Enhancement::kCatacombsEscape, "enh_catacombs_escape", &Always},
+      {Enhancement::kClockRoomDoor, "enh_clock_room_door", &UnlessBingo},
+      {Enhancement::kKeyItemsStay, "enh_key_items_stay", &UnlessBingo},
+      {Enhancement::kDemonCardDoor, "enh_demon_card_door",
        [](const Options& o) { return IncludedIf(IsBountyHunter(o)); }},
-      {Enhancement::kReverseLibraryCard, "enh_reverse_library_card", "Reverse Library Card",
-       "In the inverted castle, the Library Card takes you to the Reverse Library.",
+      {Enhancement::kReverseLibraryCard, "enh_reverse_library_card",
        [](const Options& o) {
          return IncludedIf(PresetIs(o, "Expedition") || IsBountyHunter(o));
        },
-       "Items and shop"},
-      {Enhancement::kInfiniteItems, "enh_infinite_items", "Infinite-Use Items",
-       "Library Card, Heart Refresh, Antivenom, Fire Boomerang and Toadstool are never used "
-       "up.",
+       "section_items_and_shop"},
+      {Enhancement::kInfiniteItems, "enh_infinite_items",
        [](const Options& o) { return IncludedIf(IsGlitchOrNoLogic(o)); }},
-      {Enhancement::kFreeJewelOfOpen, "enh_free_jewel_of_open", "Free Jewel of Open",
-       "The Librarian sells the Jewel of Open for nothing instead of 500 gold.",
+      {Enhancement::kFreeJewelOfOpen, "enh_free_jewel_of_open",
        [](const Options& o) {
          // Glitch sets it to 500,000 on purpose.
          return PresetIs(o, "Glitch") ? SeedUse::kConflicts : SeedUse::kIncluded;
        }},
-      {Enhancement::kCheapDuplicator, "enh_cheap_duplicator", "Cheaper Duplicator",
-       "The Librarian's Duplicator costs 15,000 gold instead of 500,000.",
+      {Enhancement::kCheapDuplicator, "enh_cheap_duplicator",
        [](const Options& o) { return IncludedIf(o.shop); }},
-      {Enhancement::kMapTracker, "enh_map_tracker", "Map Tracker",
-       "Marks the relic locations on the castle map, as the randomizer's in-game tracker.",
-       [](const Options& o) { return IncludedIf(o.map_tracker); }, "Other"},
-      {Enhancement::kClearFile, "enh_clear_file", "Cleared-Game Files",
-       "Every file counts as a cleared game (the randomizer's PatchClearFile).", &Always},
+      {Enhancement::kMapTracker, "enh_map_tracker",
+       [](const Options& o) { return IncludedIf(o.map_tracker); }, "section_other"},
+      {Enhancement::kClearFile, "enh_clear_file", &Always},
   };
   return list;
 }
 
+// Names for upstream's WS_COLORS (PS1 15-bit colors), in its order.
 const char* WingSmashColorName(int index) {
-  return index >= 0 && index <= rando::kWingSmashColorCount ? kWingSmashColorNames[index]
-                                                            : kWingSmashColorNames[0];
+  static constexpr const char* kKeys[rando::kWingSmashColorCount + 1] = {
+      "color_0", "color_1", "color_2", "color_3", "color_4", "color_5", "color_6", "color_7",
+      "color_8"};
+  return Tr("enhancements", kKeys[index >= 0 && index <= rando::kWingSmashColorCount ? index : 0]);
 }
 
 SeedUse AlchemyVatsSeedUse(const Options&) { return SeedUse::kIncluded; }
 
 const char* GameModeName(GameMode mode) {
-  return kGameModes[static_cast<size_t>(mode)].name;
+  static constexpr const char* kKeys[] = {"mode_0", "mode_1", "mode_2", "mode_3"};
+  return Tr("enhancements", kKeys[static_cast<size_t>(mode)]);
 }
 
 const char* GameModeDescription(GameMode mode) {
-  return kGameModes[static_cast<size_t>(mode)].description;
+  static constexpr const char* kKeys[] = {"mode_0_desc", "mode_1_desc", "mode_2_desc",
+                                          "mode_3_desc"};
+  return Tr("enhancements", kKeys[static_cast<size_t>(mode)]);
 }
 
 SeedUse GameModeSeedUse(const Options& seed, GameMode mode) {
   if (mode == GameMode::kNormal) {
     return SeedUse::kNone;
   }
-  if (PresetIs(seed, kGameModes[static_cast<size_t>(mode)].preset)) {
+  if (PresetIs(seed, kGameModePresets[static_cast<size_t>(mode)])) {
     return SeedUse::kIncluded;
   }
   // These presets put their own code in the cave the modes use.

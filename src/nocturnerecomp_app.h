@@ -49,6 +49,8 @@
 #include "rando_runtime.h"
 #include "room_presence.h"
 #include "settings.h"
+#include "ui_font.h"
+#include "ui_text.h"
 #include "version.generated.h"
 
 #include <rex/system/kernel_state.h>
@@ -109,9 +111,10 @@ class NocturnerecompApp : public rex::ReXApp {
     // loads mod plugins and dispatches their OnCreateDialogs afterward (see
     // rex_app.cpp). This is the last point to subscribe before a mod's
     // OnCreateDialogs might publish a "settings.language_option" or
-    // "settings.native_string" event. See settings.h.
+    // "settings.native_string" or "settings.ui_string" event. See settings.h.
     nocturne::RegisterLanguageOptionsListener(runtime()->mod_registry());
     nocturne::RegisterNativeStringListener(runtime()->mod_registry());
+    nocturne::RegisterUiStringListener(runtime()->mod_registry());
   }
 
   bool SetupEnvironment() override {
@@ -298,6 +301,16 @@ class NocturnerecompApp : public rex::ReXApp {
 
     ImFontConfig cfg;
     cfg.FontDataOwnedByAtlas = false;
+    // The Japanese overlays: PT Serif has no kana. Added before it so PT Serif
+    // stays the default; the overlays switch to this one with UiFontScope.
+    {
+      ImFontConfig ja_cfg = cfg;
+      static const ImWchar kRanges[] = {0x0020, 0xFFEF, 0};
+      ja_cfg.GlyphRanges = kRanges;
+      nocturne::SetJapaneseFont(atlas->AddFontFromMemoryTTF(
+          const_cast<unsigned char*>(nocturne::kDotGothic16SubsetTTF),
+          static_cast<int>(nocturne::kDotGothic16SubsetTTFSize), 16.0f, &ja_cfg));
+    }
     atlas->AddFontFromMemoryTTF(const_cast<unsigned char*>(nocturne::kPTSerifRegularTTF),
                                 static_cast<int>(nocturne::kPTSerifRegularTTFSize), 16.0f, &cfg);
   }

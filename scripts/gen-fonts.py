@@ -15,6 +15,8 @@ OUT_PATH = os.path.join(ROOT, "src", "fonts.generated.h")
 FONTS = [
     ("PTSerif-Regular.ttf", "PTSerifRegular", "PT Serif Regular",
      "SIL Open Font License 1.1 - https://github.com/google/fonts/tree/main/ofl/ptserif"),
+    ("DotGothic16-Subset.ttf", "DotGothic16Subset", "DotGothic16 (JIS X 0208 level 1 subset)",
+     "SIL Open Font License 1.1 - https://github.com/google/fonts/tree/main/ofl/dotgothic16"),
 ]
 
 

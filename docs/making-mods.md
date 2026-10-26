@@ -438,34 +438,46 @@ settings, `src/native_options.cpp`) offers the same Language row, built from
 the same list, so a language added this way shows up there too, with no
 separate registration needed.
 
-**Translating the native options screen's own text**: most of that screen's
-rows are the base game's own, already localized by whatever `strings_<code>.bin`
-the language switch loads (see "Patching static game text/data" below), so
-there's nothing to do for those. A handful of rows (Resolution, Fullscreen, Language,
-GPU Backend, Preset, and the "Change Screen Size..." prompt) are ones
-NocturneRecomp itself appends, with their label text authored directly in
-`native_options.cpp` rather than read from the string table, and that text is
-only ever written in the base game's six languages. A mod adding a language
-that also wants those particular rows translated publishes one
-`"settings.native_string"` event per string, the same way as a language
-option:
+**Interface text and translations**: everything NocturneRecomp writes itself
+(the settings and randomizer overlays, and the rows it adds to the game's
+Options screen) lives in `res/lang/<code>.toml`, one file per language and one
+table per screen (`[settings]`, `[enhancements]`, `[randomizer]`, and `[native]`
+for the text the game itself draws). Each key is looked up in the language
+`user_language` selects, then in English. `scripts/check-lang.py` verifies every
+language has every key English has, that `{}` placeholders match, and that no
+key is unused or missing; it runs clean before a commit. A language may leave
+a whole table out and fall back to English there. The overlays use PT Serif,
+or the embedded DotGothic16 pixel font (JIS X 0208 level 1) while the
+interface is Japanese.
+
+Mods can replace any of these strings, or translate all of them for a language
+they added, by publishing one `"settings.ui_string"` event per string. The
+payload is `"section.key=value"` (UTF-8) and `payload.u64` is the XLanguage id
+(1 to 6 for the built-in languages, to replace one of their strings):
 
 ```cpp
 void OnCreateDialogs(rex::ui::ImGuiDrawer* drawer) override {
   rex::system::ModRegistry::EventPayload payload;
   payload.u64 = 9;  // XLanguage id this translation applies to
-  const char* kv = "resolution_label=Resolução";  // "key=value", UTF-8
+  const char* kv = "settings.fullscreen=Ecrã inteiro";  // "section.key=value", UTF-8
   payload.bytes = {reinterpret_cast<const uint8_t*>(kv), std::strlen(kv)};
-  runtime_->mod_registry()->Publish("settings.native_string", payload);
+  runtime_->mod_registry()->Publish("settings.ui_string", payload);
 }
 ```
 
-See `native_options.cpp`'s `kNativeStringKey*` constants for the full list of
-keys (`resolution_label`, `fullscreen_label`, `fullscreen_off`,
-`fullscreen_on`, `language_label`, `gpu_backend_label`, `preset_label`,
-`custom_prompt_label`). A malformed payload (no `=`, or an empty key/value)
-is dropped with a WARN log; a duplicate (language id, key) pair keeps the
-first registration, same first-wins rule as the language dropdown event.
+Keys a mod does not set fall back to English. A malformed payload (no `=` or
+no `.` before it, or an empty section, key or value) is dropped with a WARN log;
+a duplicate (language id, section, key) keeps the first registration, the same
+first-wins rule as the language dropdown event. Text in `[native]` is drawn by
+the game in the language's own font, so it must only use characters that font
+has; the overlay tables use PT Serif, or DotGothic16 for Japanese, so a mod language whose script is neither will not draw. `{}` marks where a value
+(a version, a seed, a count) goes.
+
+The older `"settings.native_string"` event still works and is the same as a
+`settings.ui_string` in the `[native]` table, with a bare `key=value` payload
+(`fullscreen_label`, `fullscreen_off`, `fullscreen_on`, `language_label`,
+`vsync_label`, `preset_label`, `custom_prompt_label`). It also carries the
+achievement text (`achv_name_<id>`, `achv_desc_<id>`, `achv_desc_locked_<id>`).
 
 **Keybind collisions**: `rex::ui::RegisterBind` auto-resolves collisions
 rather than silently shadowing one bind. If two mods both default to the

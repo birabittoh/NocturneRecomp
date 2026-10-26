@@ -79,6 +79,9 @@ struct LanguageOption {
 // native_options.cpp's in-game equivalent, so both offer the same choices.
 std::vector<LanguageOption> GetLanguageOptions();
 
+// Mods can also replace any interface string (res/lang) through the
+// "settings.ui_string" event; see ui_text.h and docs/making-mods.md.
+//
 // Subscribes to the "settings.native_string" mod-registry event, letting a
 // mod translate the native in-game options screen's own row text (see
 // native_options.cpp) into a language it added via

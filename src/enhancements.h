@@ -29,15 +29,14 @@ enum class SeedUse {
 struct EnhancementInfo {
   rando::Enhancement id;
   const char* cvar;
-  const char* label;
-  const char* description;
   SeedUse (*seed_use)(const rando::Options&);
-  const char* section = nullptr;  // set on the first entry of each section
+  const char* section = nullptr;  // an [enhancements] key, set on the first entry of each section
 };
 
 const std::vector<EnhancementInfo>& EnhancementList();
 
-// "Wing Smash Trail Color"; index 0 is the game's own color. Seeds roll
+// "Wing Smash Trail Color"; index 0 is the game's own color. Names are in the
+// current language. Seeds roll
 // their own color; this one is written over it.
 inline constexpr const char* kWingSmashColorCvar = "enh_wing_smash_color";
 const char* WingSmashColorName(int index);
