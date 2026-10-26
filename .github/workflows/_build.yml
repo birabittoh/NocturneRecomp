@@ -102,11 +102,11 @@ jobs:
         shell: bash
         run: python scripts/download-sdk.py "sdk/${{ matrix.platform }}" --pinned
 
-      - name: Build (vanilla)
+      - name: Build
         shell: bash
         run: python scripts/build.py --release --sdk-dir sdk/${{ matrix.platform }}
 
-      - name: Package (vanilla)
+      - name: Package
         shell: bash
         run: |
           if [ "${{ inputs.publish_mode }}" = "artifact" ]; then
@@ -116,7 +116,7 @@ jobs:
           fi
           python scripts/build.py --package "${out}"
 
-      - name: Upload CI artifact (vanilla)
+      - name: Upload CI artifact
         if: inputs.publish_mode == 'artifact'
         uses: actions/upload-artifact@v4
         with:
@@ -124,11 +124,11 @@ jobs:
           path: pkg/
           if-no-files-found: error
 
-      - name: Upload release artifact (vanilla)
+      - name: Upload release artifact
         if: inputs.publish_mode == 'release'
         uses: actions/upload-artifact@v4
         with:
-          name: release-vanilla-${{ matrix.platform }}
+          name: release-${{ matrix.platform }}
           path: ${{ env.ARTIFACT_PATH }}
           if-no-files-found: error
 
