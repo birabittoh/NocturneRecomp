@@ -13,11 +13,15 @@
 //   player.save_unloaded  Snapshot::loaded edge 1 -> 0 (Quit to Title)
 //   player.relic_changed  u64 = relic index, bytes = {old flags, new flags}
 //   player.item_changed   u64 = item id,     bytes = {old count, new count}
+// Requests (mods publish, the game applies on the guest thread):
+//   player.request_level_up  one real level up (sets exp to the threshold, runs the game's tick)
 #pragma once
 
 #include <array>
 #include <cstdint>
 #include <string_view>
+
+struct PPCContext;
 
 namespace rex {
 class Runtime;
@@ -123,6 +127,10 @@ class PlayerStatus {
   rex::Runtime* runtime_ = nullptr;
   Snapshot last_;
 };
+
+// Performs a level up queued by the "player.request_level_up" event (any payload). Needs a live
+// guest context, so it is called from the per-frame hook (GraphicsSettings_PerFrame).
+void ApplyRequestedLevelUp(PPCContext& ctx, uint8_t* base);
 
 PlayerStatus& GetPlayerStatus();
 

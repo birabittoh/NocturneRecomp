@@ -1,9 +1,13 @@
 #include "player_status.h"
 
+#include <atomic>
 #include <cstring>
 
+#include <rex/logging.h>
 #include <rex/memory/utils.h>
+#include <rex/ppc/context.h>
 #include <rex/runtime.h>
+#include <rex/system/function_dispatcher.h>
 #include <rex/system/kernel_state.h>
 #include <rex/system/mod_registry.h>
 #include <rex/system/xmemory.h>
@@ -37,6 +41,15 @@ constexpr uint32_t kStatMp = 0x10, kStatMpMax = 0x14;
 constexpr uint32_t kStatStr = 0x38;  // second copy (equipment-adjusted)
 constexpr uint32_t kStatLevel = 0x48, kStatExp = 0x4C, kStatGold = 0x50, kStatKills = 0x54;
 constexpr uint32_t kStatPlay = 0x90;
+
+// Level up, driven by the "player.request_level_up" event (see ApplyRequestedLevelUp).
+// The game's own level-up tick (sub_82256CC0) rolls HP/MP max and a random subset of the
+// four stats, like an exp-triggered level-up. The table holds the exp needed per level (BE u32,
+// indexed by current level).
+constexpr uint32_t kLevelUpTickFnAddress = 0x82256CC0u;
+constexpr uint32_t kExpToLevelTableAddress = 0x82E440E4u;
+constexpr int32_t kMaxLevel = 99;
+std::atomic<bool> g_level_up_requested{false};
 
 constexpr uint32_t kBodyFirstHead = 26, kBodyFirstCape = 48, kBodyFirstAccessory = 57;
 
@@ -93,6 +106,10 @@ void PlayerStatus::Bind(rex::Runtime* runtime) {
   runtime->mod_registry()->RegisterAddress("player.status", kStatusAddress);
   runtime->mod_registry()->RegisterAddress("app.state", kAppObjectPtrAddr + 4);
   runtime->mod_registry()->RegisterTick([this] { Tick(); });
+  runtime->mod_registry()->Subscribe(
+      "player.request_level_up", [](const rex::system::ModRegistry::EventPayload&) {
+        g_level_up_requested.store(true, std::memory_order_release);
+      });
 }
 
 bool PlayerStatus::Read(Snapshot& out) const {
@@ -202,6 +219,34 @@ void PlayerStatus::Tick() {
   diff_items(now.hand_count.data(), last_.hand_count.data(), kHandItemCount, 0);
   diff_items(now.body_count.data(), last_.body_count.data(), kBodyItemCount, kHandItemCount);
   last_ = now;
+}
+
+void ApplyRequestedLevelUp(PPCContext& ctx, uint8_t* base) {
+  if (!g_level_up_requested.exchange(false, std::memory_order_acq_rel)) {
+    return;
+  }
+  if (!GameRunning(base)) {
+    return;
+  }
+  uint8_t* stats = base + kStatusAddress + kStatsOffset;
+  int32_t level = BE32(stats + kStatLevel);
+  if (level < 1 || level >= kMaxLevel) {
+    REXLOG_INFO("Level Up requested at level {}; ignoring", level);
+    return;
+  }
+  uint32_t needed = rex::memory::load_and_swap<uint32_t>(base + kExpToLevelTableAddress + level * 4);
+  if (static_cast<uint32_t>(BE32(stats + kStatExp)) < needed) {
+    rex::memory::store_and_swap<uint32_t>(stats + kStatExp, needed);
+  }
+  auto* fn = rex::system::kernel_state()->function_dispatcher()->GetFunction(kLevelUpTickFnAddress);
+  if (!fn) {
+    return;
+  }
+  // An unplanned nested call the caller's code didn't account for: keep its registers.
+  PPCContext saved = ctx;
+  fn(ctx, base);
+  ctx = saved;
+  REXLOG_INFO("Level Up: {} -> {}", level, BE32(stats + kStatLevel));
 }
 
 PlayerStatus& GetPlayerStatus() {
