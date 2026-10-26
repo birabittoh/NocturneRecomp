@@ -67,6 +67,21 @@ bool TuStateFlagCheckOnNoDevice(PPCRegister& r3, PPCRegister& r28) {
   return true;
 }
 
+// The flag itself: the update turns the two one-line wrappers sub_8250E690
+// and sub_8250E698 (patched 0x8250E848 / 0x8250E860; both pass 0 to an
+// XMsgStartIORequest wrapper, messages 0x70005 / 0x70003) into "store 1 / 0 to
+// 0x831D20DC, then do the same". State 3 of sub_82231A50 calls sub_8250E690 on
+// its way to state 0x30, so the flag is raised while that state waits. Without
+// these the flag stays 0 and the check bounces 0x30 back to 3 every frame: the
+// game spins on a black screen (seen pausing in the prologue).
+void TuStateFlagSet() {
+  rex::memory::store_and_swap<uint32_t>(GuestPtr(0x831D20DC), 1);
+}
+
+void TuStateFlagClear() {
+  rex::memory::store_and_swap<uint32_t>(GuestPtr(0x831D20DC), 0);
+}
+
 // sub_82248538 validates the controller layout twice (0x822485BC and
 // 0x8224A228): the seven words at 0x83173C00 hold, per slot, which of the seven
 // logical buttons it is bound to, and the layout is accepted when the bindings

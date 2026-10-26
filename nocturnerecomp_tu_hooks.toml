@@ -25,6 +25,16 @@ registers = ["r3", "r28"]
 jump_address_on_true = 0x82231E28
 jump_address_on_false = 0x82231D98
 
+# sub_8250E690 / sub_8250E698: the request pair the state machine waits on now
+# also raises / clears the flag the check above reads.
+[[midasm_hook]]
+address = 0x8250E690
+name = "TuStateFlagSet"
+
+[[midasm_hook]]
+address = 0x8250E698
+name = "TuStateFlagClear"
+
 # sub_82248538: the two controller-layout validations, now also refreshing the
 # per-slot button masks.
 [[midasm_hook]]
