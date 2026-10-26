@@ -66,6 +66,17 @@ def load_manifest(path):
         return tomllib.load(f)
 
 
+def blank_manifest_sdk_version(manifest_path):
+    with open(manifest_path, "r") as f:
+        lines = f.readlines()
+    with open(manifest_path, "w") as f:
+        for line in lines:
+            if line.startswith("sdk_version"):
+                f.write('sdk_version = ""\n')
+            else:
+                f.write(line)
+
+
 def compute_codegen_hash(manifest, manifest_path):
     """Hash every input that determines codegen output."""
     h = hashlib.sha256()
@@ -232,13 +243,6 @@ def main():
         print(f"error: XEX not found at '{xex_path}' — place the game's default.xex there before building", file=sys.stderr)
         sys.exit(1)
 
-    # The game is recompiled from the unpatched image (the title update's fixes
-    # are ported to hooks), so a stale staged patch must not be picked up.
-    sibling_patch = xex_path + "p"
-    if os.path.exists(sibling_patch):
-        print(f"+ rm {sibling_patch} (stale title update)")
-        os.remove(sibling_patch)
-
     check_deps()
 
     build_type = "release" if args.release else "relwithdebinfo"
@@ -272,28 +276,23 @@ def main():
         with open(stamp_path, "r") as f:
             old_hash = f.read().strip()
 
-    if not args.force_codegen and new_hash == old_hash and generated_present:
-        print("+ codegen inputs unchanged — skipping codegen (incremental build)")
-    else:
-        run([rexglue, "codegen", manifest_path], check=args.strict_codegen)
+    # codegen re-stamps sdk_version into the manifest it was given, and the
+    # CMake build can run codegen again on its own; blank it back out in the
+    # working tree once building is over, even when it failed.
+    try:
+        if not args.force_codegen and new_hash == old_hash and generated_present:
+            print("+ codegen inputs unchanged — skipping codegen (incremental build)")
+        else:
+            run([rexglue, "codegen", manifest_path], check=args.strict_codegen)
 
-        # codegen re-stamps sdk_version into the manifest it was given; blank it
-        # back out in the working tree.
-        with open(manifest_path, "r") as f:
-            lines = f.readlines()
-        with open(manifest_path, "w") as f:
-            for line in lines:
-                if line.startswith("sdk_version"):
-                    f.write('sdk_version = ""\n')
-                else:
-                    f.write(line)
+            os.makedirs("out", exist_ok=True)
+            with open(stamp_path, "w") as f:
+                f.write(new_hash)
 
-        os.makedirs("out", exist_ok=True)
-        with open(stamp_path, "w") as f:
-            f.write(new_hash)
-
-    run(["cmake", "--preset", preset] + cmake_configure_args)
-    run(["cmake", "--build", "--preset", preset, "--parallel", str(os.cpu_count() or 1)])
+        run(["cmake", "--preset", preset] + cmake_configure_args)
+        run(["cmake", "--build", "--preset", preset, "--parallel", str(os.cpu_count() or 1)])
+    finally:
+        blank_manifest_sdk_version(manifest_path)
 
     print(f"+ cp {build_output} {exe_name}")
     shutil.copy2(build_output, exe_name)
