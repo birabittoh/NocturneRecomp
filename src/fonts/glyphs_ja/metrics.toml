@@ -55,3 +55,5 @@ U+9054 = { left = 0, top = 5, advance = 21 }  # 達 box 21x21 -- kanji, stock me
 U+91D1 = { left = 0, top = 4, advance = 21 }  # 金 box 21x21 -- kanji, stock median advance 21
 U+9727 = { left = 0, top = 6, advance = 21 }  # 霧 box 20x20 -- kanji, stock median advance 21
 U+985E = { left = 0, top = 5, advance = 21 }  # 類 box 21x20 -- kanji, stock median advance 21
+U+540C = { left = 2, top = 6, advance = 21 }  # 同 box 18x19 -- kanji, stock median advance 21
+U+5782 = { left = 1, top = 5, advance = 21 }  # 垂 box 20x20 -- kanji, stock median advance 21
