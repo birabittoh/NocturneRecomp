@@ -32,6 +32,7 @@
 #include <rex/system/mod_storage.h>
 
 #include "function_hooks.h"
+#include "language_switch.h"
 #include "player_status.h"
 
 namespace nocturne {
@@ -1120,6 +1121,7 @@ extern "C" void GraphicsSettings_PerFrame(PPCContext& ctx, uint8_t* base) {
 
   // Not graphics, but this is the one per-frame hook with a live context.
   nocturne::player::ApplyRequestedLevelUp(ctx, base);
+  ApplyPendingLanguageSwitch(ctx, base);
 
   ApplyRequestedPreset(ctx, base);
   ApplyPendingCustomRatioRequest(base);
@@ -1159,6 +1161,8 @@ extern "C" void GraphicsSettings_SetWidgetText(PPCContext& ctx, uint8_t* base) {
   if (g_original_set_widget_text_fn) {
     g_original_set_widget_text_fn(ctx, base);
   }
+  // So a language switch can re-text this widget (see language_switch.h).
+  NoteTextSetById(a1, a2);
 
   if (a1 != 0 && a2 == kDefaultStringId && lr == kStretchScreenPromptCallSite) {
     uint32_t text_addr = a1 + kWidgetTextBufferOffset;

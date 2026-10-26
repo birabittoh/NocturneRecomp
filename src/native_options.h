@@ -9,6 +9,8 @@
 
 #include <cstdint>
 
+struct PPCContext;
+
 namespace rex {
 class Runtime;
 }  // namespace rex
@@ -29,6 +31,12 @@ namespace nocturne {
 // Call from a guest thread just before posting the switch to `page`, and only
 // when no save is loaded; the suppression disarms itself on the way back out.
 void EnterPregameScreen(uint32_t page);
+
+// Repaints the text this file sets itself (row labels and values, the Y
+// prompt) and re-spaces the prompt bar, after a language switch has changed
+// the game's own strings underneath it. Does nothing if the settings screen
+// hasn't been built yet. Guest thread only.
+void RefreshNativeOptionsText(PPCContext& ctx, uint8_t* base);
 
 class NativeOptions {
  public:

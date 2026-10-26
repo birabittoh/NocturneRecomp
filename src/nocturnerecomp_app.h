@@ -36,6 +36,7 @@
 #include "font_overlay.h"
 #include "fonts.generated.h"
 #include "graphics_settings.h"
+#include "language_switch.h"
 #include "native_options.h"
 #include "host_timer_resolution.h"
 #include "icon.generated.h"
@@ -207,6 +208,10 @@ class NocturnerecompApp : public rex::ReXApp {
     // Adds VSync, Fullscreen and Language rows to the game's own settings screen, alongside its
     // stock Graphics/Volume/Change Screen Size rows (see native_options.h).
     nocturne::GetNativeOptions().Bind(runtime());
+
+    // Lets a user_language change apply on the next frame instead of on the
+    // next launch (see language_switch.h).
+    nocturne::BindLanguageSwitch(runtime());
 
     // Points the Achievements menu entries at the game's own unused
     // CScreenAchievement front-end page instead of the SDK overlay (see

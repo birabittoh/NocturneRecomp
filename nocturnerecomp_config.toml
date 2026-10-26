@@ -186,6 +186,33 @@ name = "NativeOptions_SettingsUpdateHook"
 registers = ["r3"]
 return_on_true = true
 
+# Live language switch (src/language_switch.cpp): the option-list item text
+# setters, (list, index, string_id[, x, y]), recorded so a switch can replay
+# them and have the list re-measure and re-centre each item itself.
+[[midasm_hook]]
+address = 0x825D28B0
+name = "LanguageSwitch_ListItemTextHook"
+registers = ["r3"]
+return_on_true = true
+
+[[midasm_hook]]
+address = 0x825D29A8
+name = "LanguageSwitch_ListItemTextCenteredHook"
+registers = ["r3"]
+return_on_true = true
+
+[[midasm_hook]]
+address = 0x825D3D30
+name = "LanguageSwitch_ListItemTextFixedHook"
+registers = ["r3"]
+return_on_true = true
+
+[[midasm_hook]]
+address = 0x825D3DB8
+name = "LanguageSwitch_ListItemTextCentered2Hook"
+registers = ["r3"]
+return_on_true = true
+
 # Stretch / timestep presets (src/graphics_settings.cpp)
 [[midasm_hook]]
 address = 0x825BB2B0

@@ -94,6 +94,9 @@
 #include "graphics_settings.h"
 #include "settings.h"
 
+#include <fmt/format.h>
+#include <fmt/ranges.h>
+
 #include <rex/cvar.h>
 #include <rex/logging.h>
 #include <rex/memory/utils.h>
@@ -129,6 +132,10 @@ constexpr uint32_t kSettingsEventFnAddr = 0x825B3F58u;     // (screen, message)
 constexpr uint32_t kSettingsActivateFnAddr = 0x825B43E0u;  // (screen, user_index)
 constexpr uint32_t kSettingsUpdateFnAddr = 0x825B4CC0u;    // (screen, delta)
 constexpr uint32_t kSetWidgetTextByIdFnAddr = 0x825D1EE8u;  // (widget, string_id)
+// Formats a setting entry's current value as display text: the number, or
+// the localized string an enumerated stock row (Graphics) shows for it.
+constexpr uint32_t kFormatEntryValueFnAddr = 0x82580060u;  // (entry, utf16_out, out_chars)
+constexpr uint32_t kEntryValueChars = 0x400;
 constexpr uint32_t kAllocFnAddr = 0x82576950u;             // (size) -> pointer
 
 // The screen's own widget builder, and the prompt-bar pieces it uses. See
@@ -228,6 +235,22 @@ constexpr uint32_t kVanillaRowCount = 3;
 // The screen's own option list, off the screen instance.
 constexpr uint32_t kScreenListOffset = 560;
 
+// The screen's title, and how its Activate sets it: with a profile signed in
+// (the app object's vtable slot 0x6C, asked about the opening user), string
+// 0xBA formatted with the gamertag and set as literal text; otherwise plain
+// string 0xB9. Then it centres the title on x=320 by its measured width.
+constexpr uint32_t kScreenTitleOffset = 564;
+constexpr uint32_t kAppSignedInVtableSlot = 0x6C;
+constexpr uint32_t kGetUserNameFnAddr = 0x825D75A0u;   // (user, buffer, size)
+constexpr uint32_t kFormatStringFnAddr = 0x82587290u;  // (out, out_chars, id, arg, 0)
+constexpr uint32_t kSetTextFnAddr = 0x825CEE40u;       // (text_widget, utf16_text)
+constexpr uint32_t kSetTextByIdFnAddr = 0x825CFC68u;   // (text_widget, string_id)
+constexpr uint32_t kTitleStringId = 0xB9;
+constexpr uint32_t kTitleWithNameStringId = 0xBA;
+constexpr uint32_t kTitleChars = 0x400;
+constexpr uint32_t kUserNameBytes = 0x20;
+constexpr uint32_t kTitleCenterX = 0x140;
+
 // Rows the stock Activate greys out until a save is loaded: Volume and the
 // row that was "Change Screen Size...". See NativeOptions_SettingsActivate.
 constexpr uint32_t kGatedFirstRow = 1;
@@ -321,17 +344,6 @@ const char16_t* TranslatedOr(const char* key, const char16_t* fallback) {
   return fallback;
 }
 
-// True once `name`'s cvar has actually been changed at runtime this session
-// and needs a relaunch to take effect -- the same source the ImGui settings
-// overlay's own "Some changes require a restart to take effect." banner
-// reads (see settings.cpp's AnyPendingRestart/IsPendingRestart). Committing a
-// restart-scoped row here goes through the same rex::cvar::SetFlagByName path
-// the overlay uses, so it is tracked automatically; this just reads it back.
-bool CvarPendingRestart(const char* name) {
-  const auto pending = rex::cvar::GetPendingRestartFlags();
-  return std::find(pending.begin(), pending.end(), name) != pending.end();
-}
-
 // True if ANY cvar changed this session (through this screen or otherwise --
 // GetPendingRestartFlags() doesn't distinguish the source) still needs a
 // restart to take effect. Mirrors settings.cpp's own AnyPendingRestart, which
@@ -364,33 +376,6 @@ void SaveToUserSettings(const char* cvar_name) {
     return;
   }
   rex::cvar::SaveConfigSubset(g_user_settings_path, {cvar_name});
-}
-
-// Appends a "(Restart)" marker to a row label when its cvar is pending
-// restart -- the only way to surface that state on this screen, since it has
-// no free area of its own to put a banner in and a player without the ImGui
-// overlay open (F4) would otherwise have no way to see it at all.
-//
-// Returns a pointer into a single shared static buffer rather than a fresh
-// string per call: every label() a row supplies is consumed immediately by
-// SetWidgetText (which copies it into the widget's own buffer) and never
-// held onto past that one call, so nothing else needs the previous row's text
-// by the time this is asked for the next one.
-const char16_t* AppendRestartMarker(const char16_t* text, bool pending_restart) {
-  static char16_t buffer[64];
-  if (!pending_restart || !text) {
-    return text;
-  }
-  constexpr char16_t kMarker[] = u" (Restart)";
-  size_t i = 0;
-  while (text[i] != u'\0' && i < std::size(buffer) - std::size(kMarker)) {
-    buffer[i] = text[i];
-    ++i;
-  }
-  for (size_t j = 0; j < std::size(kMarker); ++j) {
-    buffer[i + j] = kMarker[j];
-  }
-  return buffer;
 }
 
 // ---------------------------------------------------------------------------
@@ -526,11 +511,9 @@ void CommitFullscreenIndex(int32_t index) {
 
 // --- Language -------------------------------------------------------------
 
-// `user_language` is kRequiresRestart (see xam_user.cpp), same restart-scoped
-// behaviour as any restart-scoped cvar -- and it is also the very cvar CurrentLanguage()
-// reads to localize every row's label, so changing it here is only reflected
-// the next time this screen (or any other native_options row) is painted
-// after a relaunch.
+// `user_language` applies live (see language_switch.h): the next guest frame
+// after a change swaps the game's strings and font over and re-texts every
+// screen, this one included -- see RefreshNativeOptionsText.
 constexpr const char* kLanguageCvar = "user_language";
 
 // The row's `values` array must be a fixed, compile-time-addressable buffer
@@ -617,8 +600,7 @@ const char16_t* LanguageRowLabel() {
         return u"Language";
     }
   }();
-  return AppendRestartMarker(TranslatedOr(kNativeStringKeyLanguageLabel, base),
-                              CvarPendingRestart(kLanguageCvar));
+  return TranslatedOr(kNativeStringKeyLanguageLabel, base);
 }
 
 int32_t GetLanguageIndex() {
@@ -647,7 +629,7 @@ void CommitLanguageIndex(int32_t index) {
   }
   rex::cvar::SetFlagByName(kLanguageCvar, value, /*persist=*/true);
   SaveToUserSettings(kLanguageCvar);
-  REXLOG_INFO("[native_options] language set to {} (applies on next launch)", value);
+  REXLOG_INFO("[native_options] language set to {}", value);
 }
 
 // --- VSync --------------------------------------------------------------
@@ -778,9 +760,8 @@ const char16_t* PresetLabel() {
 // silently leaves the stock layout alone if the four don't fit, so a long
 // translation would cost the prompt entirely rather than overflow.
 //
-// Read once, when the screen object is built, unlike the row labels which are
-// re-read on every paint. That's fine here: `user_language` is restart-scoped,
-// so it cannot change between the build and the screen being shown.
+// Read when the screen object is built, and again by RefreshNativeOptionsText
+// after a language switch.
 const char16_t* CustomPromptLabel() {
   const char16_t* base = [] {
     switch (CurrentLanguage()) {
@@ -872,9 +853,8 @@ constexpr CustomRow kCustomRows[] = {
         .live = true,
     },
     {
-        // `live` means the cvar is written on every left/right, so the label's
-        // "(Restart)" marker (see AppendRestartMarker) tracks the real cvar
-        // state live, even though the language itself is restart-scoped.
+        // `live`: each left/right switches the whole game's language on the
+        // next frame, and B puts the original back the same way.
         .list_row = kLanguageRow,
         .label = &LanguageRowLabel,
         .values = g_language_values.data(),
@@ -1016,6 +996,15 @@ PPCFunc* g_find_image_fn = nullptr;
 std::array<uint32_t, 3> g_stock_prompts = {};
 uint32_t g_custom_prompt = 0;
 uint32_t g_custom_prompt_screen = 0;
+
+// The settings screen and the user who last opened it, captured by
+// NativeOptions_SettingsActivate so a language switch can redo its title.
+uint32_t g_settings_screen = 0;
+uint32_t g_settings_user = 0;
+// Guest buffer for the formatted title and the gamertag, allocated on first use.
+uint32_t g_title_scratch = 0;
+// Guest buffer for RefreshStockRowValues, allocated on first use.
+uint32_t g_value_scratch = 0;
 
 // The page we opened with no save loaded, from the moment we open it until we
 // leave it again, or 0 when we are not inside one. Scopes both the watchdog
@@ -1424,9 +1413,8 @@ extern "C" void NativeOptions_CycleRow(PPCContext& ctx, uint8_t* base) {
   }
 
   const CustomRow& custom = kCustomRows[custom_index];
-  // Commit before painting: a live row's label may depend on the committed
-  // cvar state (see Language's "(Restart)" marker),
-  // so the paint has to see this keypress's change, not the previous one.
+  // Commit before painting, so the paint sees this keypress's change rather
+  // than the previous one.
   if (custom.live && custom.commit) {
     custom.commit(CustomEntryValue(base, static_cast<uint32_t>(custom_index)));
   }
@@ -1512,6 +1500,8 @@ extern "C" void NativeOptions_ListUpdate(PPCContext& ctx, uint8_t* base) {
 // original has returned is enough.
 extern "C" void NativeOptions_SettingsActivate(PPCContext& ctx, uint8_t* base) {
   const uint32_t screen = ctx.r3.u32;
+  g_settings_screen = screen;
+  g_settings_user = ctx.r5.u32;
 
   if (g_original_settings_activate_fn) {
     g_original_settings_activate_fn(ctx, base);
@@ -1628,35 +1618,13 @@ uint32_t CreateCustomPrompt(PPCContext& ctx, uint8_t* base, uint32_t screen) {
   return prompt;
 }
 
-// Adds the "Custom" prompt for Y and re-spaces the bar to fit four.
-//
-// Runs after the builder rather than inside it because the builder is where
-// the screen pointer (the prompt's parent, which is what puts it in the draw
-// list) and the finished stock prompts both exist. The spacing mirrors the
-// stock layout's own formula with one more item: n+1 equal gaps around n
-// prompts.
-extern "C" void NativeOptions_SettingsBuild(PPCContext& ctx, uint8_t* base) {
-  const uint32_t screen = ctx.r3.u32;
-
-  g_stock_prompts = {};
-  if (g_original_settings_build_fn) {
-    g_original_settings_build_fn(ctx, base);
-  }
-
-  if (!screen || g_stock_prompts[0] == 0 || g_stock_prompts[1] == 0 || g_stock_prompts[2] == 0) {
-    return;
-  }
-  if (!EnsureArena(ctx, base)) {
-    return;
-  }
-
-  // The builder runs once per screen object, but guard anyway: a second prompt
-  // on the same screen would be invisible extra work at best.
-  if (g_custom_prompt_screen != screen) {
-    g_custom_prompt = CreateCustomPrompt(ctx, base, screen);
-    g_custom_prompt_screen = g_custom_prompt ? screen : 0;
-  }
-  if (!g_custom_prompt || !g_prompt_set_pos_fn) {
+// Spreads the three stock prompts and "Custom" evenly across the bar. The
+// spacing mirrors the stock layout's own formula with one more item: n+1
+// equal gaps around n prompts. Runs again after a language switch, which
+// changes every prompt's width.
+void LayoutPromptBar(PPCContext& ctx, uint8_t* base) {
+  if (!g_custom_prompt || !g_prompt_set_pos_fn || g_stock_prompts[0] == 0 ||
+      g_stock_prompts[1] == 0 || g_stock_prompts[2] == 0) {
     return;
   }
 
@@ -1683,6 +1651,35 @@ extern "C" void NativeOptions_SettingsBuild(PPCContext& ctx, uint8_t* base) {
     ctx = saved;
     x += widths[i] + gap;
   }
+}
+
+// Adds the "Custom" prompt for Y and re-spaces the bar to fit four.
+//
+// Runs after the builder rather than inside it because the builder is where
+// the screen pointer (the prompt's parent, which is what puts it in the draw
+// list) and the finished stock prompts both exist.
+extern "C" void NativeOptions_SettingsBuild(PPCContext& ctx, uint8_t* base) {
+  const uint32_t screen = ctx.r3.u32;
+
+  g_stock_prompts = {};
+  if (g_original_settings_build_fn) {
+    g_original_settings_build_fn(ctx, base);
+  }
+
+  if (!screen || g_stock_prompts[0] == 0 || g_stock_prompts[1] == 0 || g_stock_prompts[2] == 0) {
+    return;
+  }
+  if (!EnsureArena(ctx, base)) {
+    return;
+  }
+
+  // The builder runs once per screen object, but guard anyway: a second prompt
+  // on the same screen would be invisible extra work at best.
+  if (g_custom_prompt_screen != screen) {
+    g_custom_prompt = CreateCustomPrompt(ctx, base, screen);
+    g_custom_prompt_screen = g_custom_prompt ? screen : 0;
+  }
+  LayoutPromptBar(ctx, base);
 }
 
 // Keeps the pre-game stretch screen from being yanked away the frame after it
@@ -1881,8 +1878,9 @@ extern "C" void NativeOptions_SettingsEvent(PPCContext& ctx, uint8_t* base) {
           // thread... are also allowed to destroy windows" for.
           rex::ui::WindowedAppContext* app_context = g_runtime->app_context();
           if (rex::platform::process::Relaunch()) {
-            REXLOG_INFO("[native_options] restart-pending change accepted from the main menu; "
-                        "relaunching");
+            REXLOG_INFO("[native_options] restart-pending change(s) accepted from the main "
+                        "menu ({}); relaunching",
+                        fmt::join(rex::cvar::GetPendingRestartFlags(), ", "));
             app_context->CallInUIThread([] {
               if (g_runtime && g_runtime->display_window()) {
                 g_runtime->display_window()->RequestClose();
@@ -1942,6 +1940,142 @@ extern "C" void NativeOptions_SettingsEvent(PPCContext& ctx, uint8_t* base) {
 }  // namespace
 
 void EnterPregameScreen(uint32_t page) { g_pregame_screen_page = page; }
+
+namespace {
+
+// Calls a guest function with up to five arguments and returns r3.
+uint32_t CallGuest5(PPCContext& ctx, uint8_t* base, PPCFunc* fn, uint32_t r3, uint32_t r4,
+                    uint32_t r5, uint32_t r6, uint32_t r7) {
+  if (!fn) {
+    return 0;
+  }
+  PPCContext saved = ctx;
+  ctx.r3.u32 = r3;
+  ctx.r4.u32 = r4;
+  ctx.r5.u32 = r5;
+  ctx.r6.u32 = r6;
+  ctx.r7.u32 = r7;
+  fn(ctx, base);
+  const uint32_t result = ctx.r3.u32;
+  ctx = saved;
+  return result;
+}
+
+// Redoes the tail of the screen's Activate (sub_825B43E0) that sets and
+// centres the title. Needed because the signed-in title is formatted text, so
+// the by-id re-texting in language_switch.cpp never sees it.
+void RefreshSettingsTitle(PPCContext& ctx, uint8_t* base) {
+  if (!g_settings_screen || !g_dispatcher || !g_alloc_fn) {
+    return;
+  }
+  const uint32_t title = Read32BE(base, g_settings_screen + kScreenTitleOffset);
+  const uint32_t app = Read32BE(base, kAppObjectPtrAddr);
+  if (!title || !app) {
+    return;
+  }
+  if (!g_title_scratch) {
+    g_title_scratch = CallGuest(ctx, base, g_alloc_fn, kTitleChars * 2 + kUserNameBytes, 0);
+    if (!g_title_scratch) {
+      return;
+    }
+  }
+
+  const uint32_t signed_in_fn = Read32BE(base, Read32BE(base, app) + kAppSignedInVtableSlot);
+  const bool signed_in =
+      (CallGuest(ctx, base, g_dispatcher->GetFunction(signed_in_fn), app, g_settings_user) &
+       0xFF) != 0;
+  if (signed_in) {
+    const uint32_t text = g_title_scratch;
+    const uint32_t name = g_title_scratch + kTitleChars * 2;
+    CallGuest5(ctx, base, g_dispatcher->GetFunction(kGetUserNameFnAddr), g_settings_user, name,
+               kUserNameBytes, 0, 0);
+    CallGuest5(ctx, base, g_dispatcher->GetFunction(kFormatStringFnAddr), text, kTitleChars,
+               kTitleWithNameStringId, name, 0);
+    CallGuest(ctx, base, g_dispatcher->GetFunction(kSetTextFnAddr), title, text);
+  } else {
+    CallGuest(ctx, base, g_dispatcher->GetFunction(kSetTextByIdFnAddr), title, kTitleStringId);
+  }
+
+  const auto width = static_cast<int32_t>(CallGuest(ctx, base, g_text_width_fn, title, 0));
+  Write32BE(base, title + kWidgetXOffset, static_cast<uint32_t>(kTitleCenterX - width / 2));
+}
+
+// Repaints the value of every row the game renders itself (stock Graphics,
+// and any numeric row). The list's bind and cycle both format the entry into a
+// buffer and set that as literal text, so the by-id re-texting in
+// language_switch.cpp never sees it: after a switch Graphics kept its value
+// in the old language, drawn with the new font. Enumerated custom
+// rows are left out, since RenderCustomRow paints those.
+//
+// The literal setter leaves the widget's scale alone, so the selected row
+// keeps its larger one.
+void RefreshStockRowValues(PPCContext& ctx, uint8_t* base) {
+  if (!g_dispatcher || !g_alloc_fn || !g_set_widget_text_fn) {
+    return;
+  }
+  if (!g_value_scratch) {
+    g_value_scratch = CallGuest(ctx, base, g_alloc_fn, kEntryValueChars * 2, 0);
+    if (!g_value_scratch) {
+      return;
+    }
+  }
+  PPCFunc* format_fn = g_dispatcher->GetFunction(kFormatEntryValueFnAddr);
+  for (uint32_t row = 0; row < g_active_row_count; ++row) {
+    const int32_t custom_index = FindActiveValueRow(row);
+    if (custom_index >= 0 && IsEnumRow(kCustomRows[custom_index])) {
+      continue;
+    }
+    const uint32_t widget = Read32BE(base, g_list + kListRowValues + 4 * row);
+    if (!widget) {
+      continue;
+    }
+    CallGuest5(ctx, base, format_fn, g_entries + row * kEntryStride, g_value_scratch,
+               kEntryValueChars, 0, 0);
+    CallGuest(ctx, base, g_set_widget_text_fn, widget, g_value_scratch);
+  }
+}
+
+}  // namespace
+
+void RefreshNativeOptionsText(PPCContext& ctx, uint8_t* base) {
+  RefreshSettingsTitle(ctx, base);
+  if (!g_list || !g_entries) {
+    return;
+  }
+  RefreshStockRowValues(ctx, base);
+  for (uint32_t i = 0; i < kCustomRowCount; ++i) {
+    const CustomRow& row = kCustomRows[i];
+    if (!IsRowActive(row)) {
+      continue;
+    }
+    // A label-only row with nothing to say in this language (Graphics outside
+    // Italian) goes back to the game's own label, keeping the widget's scale,
+    // which is larger on the selected row.
+    if (IsLabelOnly(row) && row.label && !row.label() && g_set_widget_text_by_id_fn) {
+      const uint32_t widget = Read32BE(base, g_list + kListRowLabels + 4 * row.list_row);
+      const uint32_t inner = widget ? Read32BE(base, widget + kWidgetInnerTextOffset) : 0;
+      if (inner) {
+        const uint32_t scale = Read32BE(base, inner + kWidgetTextScaleOffset);
+        CallGuest(ctx, base, g_set_widget_text_by_id_fn, widget,
+                  Read32BE(base, g_entries + row.list_row * kEntryStride + kEntryLabelId));
+        if (g_set_text_scale_fn) {
+          PPCContext saved = ctx;
+          ctx.r3.u32 = widget;
+          ctx.f1.f64 = static_cast<double>(std::bit_cast<float>(scale));
+          g_set_text_scale_fn(ctx, base);
+          ctx = saved;
+        }
+      }
+    }
+    RenderCustomRow(ctx, base, i);
+  }
+
+  if (g_custom_prompt) {
+    CallGuest(ctx, base, g_set_widget_text_fn, g_custom_prompt,
+              StageText(base, CustomPromptLabel()));
+    LayoutPromptBar(ctx, base);
+  }
+}
 
 void NativeOptions::Bind(rex::Runtime* runtime) {
   runtime_ = runtime;

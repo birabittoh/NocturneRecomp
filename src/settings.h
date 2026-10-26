@@ -126,6 +126,12 @@ const char16_t* FindNativeStringTranslation(uint32_t language_id, std::string_vi
 // first F4 press.
 void PrewarmSettingsDialogCaches();
 
+// Re-registers an SDK cvar as kHotReload, so changing it at runtime no longer
+// counts as a pending restart (the overlay's banner, and the settings screen's
+// relaunch on accept). For cvars the SDK marks restart-scoped that this game
+// applies live, or only saves for the next launch.
+void MarkCvarLive(std::string_view name);
+
 // The window and settings file PersistWindowSize acts on. Call at startup.
 void BindWindowTarget(rex::ui::Window* window, std::filesystem::path user_settings_path);
 

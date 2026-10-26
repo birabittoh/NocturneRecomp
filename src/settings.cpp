@@ -327,8 +327,8 @@ class CuratedSettingsDialog : public rex::ui::ImGuiDialog {
   // GetPendingRestartFlags() only tracks cvars that were actually changed at
   // runtime (settings UI, console, mods) this session -- values applied
   // while loading a config file at boot don't count, so a saved preference
-  // that simply differs from the SDK's factory default (e.g. Language set
-  // to Italian) doesn't trip this on a fresh launch. See SetFlagByNameImpl's
+  // that simply differs from the SDK's factory default (e.g. GPU Backend
+  // set to Vulkan) doesn't trip this on a fresh launch. See SetFlagByNameImpl's
   // mark_restart parameter in the SDK's cvar.cpp.
   bool IsPendingRestart(const char* name) {
     auto pending = rex::cvar::GetPendingRestartFlags();
@@ -939,9 +939,21 @@ rex::ui::Window* g_window = nullptr;
 std::filesystem::path g_user_settings_path;
 }  // namespace
 
+void MarkCvarLive(std::string_view name) {
+  for (auto& entry : rex::cvar::GetRegistry()) {
+    if (entry.name == name) {
+      entry.lifecycle = rex::cvar::Lifecycle::kHotReload;
+    }
+  }
+}
+
 void BindWindowTarget(rex::ui::Window* window, std::filesystem::path user_settings_path) {
   g_window = window;
   g_user_settings_path = std::move(user_settings_path);
+  // PersistWindowSize only records the size for the next launch; the window
+  // already is that size, so saving it is no reason to restart.
+  MarkCvarLive("window_width");
+  MarkCvarLive("window_height");
 }
 
 void PersistWindowSize() {
