@@ -78,6 +78,28 @@ address = 0x825C2CD0
 name = "LeaderboardEventSigninBypass"
 jump_address_on_true = 0x825C2D0C
 
+# skip_intros / skip_richter (src/intro_skips.cpp).
+# Boot logos page update (sub_825C64D0): zero its fade timers on entry.
+[[midasm_hook]]
+address = 0x825C64D0
+name = "SkipIntrosLogoUpdate"
+registers = ["r3"]
+
+# Name entry (sub_82397068): the first-stage store, r10 = ST0 or NO3.
+[[midasm_hook]]
+address = 0x823975B4
+name = "SkipRichterStageSelect"
+registers = ["r10"]
+
+# Stage loader (sub_82250D10): around its InitStatsAndGear call (0x822514E8).
+[[midasm_hook]]
+address = 0x822514E8
+name = "SkipRichterBeforeInit"
+
+[[midasm_hook]]
+address = 0x822514EC
+name = "SkipRichterAfterInit"
+
 # ---------------------------------------------------------------------------
 # Function wraps. Each hook sits on a function's first instruction and runs the
 # replacement in src/*.cpp through nocturne::fnhook::Enter (src/function_hooks.h);

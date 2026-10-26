@@ -234,6 +234,7 @@ set(NOCTURNERECOMP_SOURCES
     src/font_patch.cpp
     src/graphics_settings.cpp
     src/host_timer_resolution.cpp
+    src/intro_skips.cpp
     src/native_options.cpp
     src/player_inspector.cpp
     src/player_status.cpp
