@@ -2,13 +2,17 @@
 """Extract the local SOTN XBLA STFS package.
 
 This is intentionally narrow: it extracts the known LIVE/STFS package layout
-used by the XBLA release and writes the files needed by this repository.
+used by the XBLA releases into the game library (assets/xbla-world or
+assets/xbla-jp), the same layout the start screen writes.
 """
 
 from __future__ import annotations
 
 import argparse
+import hashlib
 import math
+import os
+import shutil
 from pathlib import Path
 
 
@@ -161,6 +165,46 @@ def find_default_package(repo_root: Path) -> Path:
     return candidates[0]
 
 
+RELEASES = {
+    "26a58b074c5dd6185b77a8111a0012866d11cba674b4b0810d79dbf07ad68aa6": (
+        "xbla-world",
+        "Castlevania: Symphony of the Night (Xbox Live Arcade, World)",
+    ),
+    "a524d039ee167c89bfd710033ac6fb43bbc874ae4dec1473c51d08f7974ea61b": (
+        "xbla-jp",
+        "Dracula X: Nocturne in the Moonlight (Xbox Live Arcade, Japan)",
+    ),
+}
+TEXT_ALL = 63
+INFO_FILE = "nocturne-version.toml"
+ROOT_XEX_SOURCE = "default.xex.source"
+
+
+def identify(package: Path, entries: list[Entry], scratch: Path) -> tuple[str, str]:
+    xex = next(e for e in entries if e.name == "default.xex" and e.parent == ROOT_PARENT)
+    extract_file(package, xex, scratch)
+    digest = hashlib.sha256(scratch.read_bytes()).hexdigest()
+    scratch.unlink()
+    if digest not in RELEASES:
+        raise RuntimeError(f"unknown default.xex (sha256 {digest}); this is not a supported release")
+    return RELEASES[digest]
+
+
+def refresh_root_xex(assets: Path, version_dir: Path) -> None:
+    """Keep assets/default.xex a copy of World's, as the game's library does."""
+    xex = assets / "default.xex"
+    marker = assets / ROOT_XEX_SOURCE
+    if xex.exists() and not marker.is_file():
+        print(f"Leaving {xex} alone: it is not managed by the library")
+        return
+    xex.unlink(missing_ok=True)
+    try:
+        os.link(version_dir / "default.xex", xex)
+    except OSError:
+        shutil.copyfile(version_dir / "default.xex", xex)
+    marker.write_text(version_dir.name, encoding="utf-8")
+
+
 def main() -> int:
     repo_root = Path(__file__).resolve().parents[1]
     parser = argparse.ArgumentParser(description=__doc__)
@@ -174,7 +218,12 @@ def main() -> int:
         "--assets",
         type=Path,
         default=repo_root / "assets",
-        help="Directory that receives the package contents, including default.xex, for ReXGlue.",
+        help="Game library root. The package goes into <assets>/xbla-world or <assets>/xbla-jp.",
+    )
+    parser.add_argument(
+        "--force",
+        action="store_true",
+        help="Replace the version folder if it already exists.",
     )
     args = parser.parse_args()
 
@@ -184,24 +233,37 @@ def main() -> int:
             raise RuntimeError(f"{package} is not an Xbox 360 LIVE/STFS package")
 
     entries = parse_entries(package)
-    extracted = 0
-    default_xex: Path | None = None
+    args.assets.mkdir(parents=True, exist_ok=True)
+    version_id, release = identify(package, entries, args.assets / "default.xex.partial")
 
+    version_dir = args.assets / version_id
+    if version_dir.exists():
+        if not args.force:
+            raise RuntimeError(f"{version_dir} already exists; pass --force to replace it")
+        shutil.rmtree(version_dir)
+    partial = args.assets / f"{version_id}.partial"
+    if partial.exists():
+        shutil.rmtree(partial)
+
+    extracted = 0
     for entry in entries:
-        relative = entry_path(entry, entries)
-        destination = args.assets / relative
+        destination = partial / entry_path(entry, entries)
         if entry.is_directory:
             destination.mkdir(parents=True, exist_ok=True)
             continue
         extract_file(package, entry, destination)
         extracted += 1
-        if entry.name == "default.xex" and entry.parent == ROOT_PARENT:
-            default_xex = destination
 
-    if default_xex is None:
-        raise RuntimeError("extracted package did not contain root default.xex")
+    (partial / INFO_FILE).write_text(
+        f'id = "{version_id}"\nrelease = "{release}"\nlanguages = {TEXT_ALL}\n',
+        encoding="utf-8",
+    )
+    partial.rename(version_dir)
+    print(f"Extracted {extracted} files ({release}) to {version_dir}")
 
-    print(f"Extracted {extracted} files to {args.assets}")
+    if version_id == "xbla-world":
+        refresh_root_xex(args.assets, version_dir)
+        print(f"Updated {args.assets / 'default.xex'} for the build")
     return 0
 
 
