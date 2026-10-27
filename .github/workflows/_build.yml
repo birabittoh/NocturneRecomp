@@ -50,6 +50,7 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
         with:
+          submodules: recursive
           # Full history + tags: CMakeLists.txt derives NOCTURNE_VERSION from
           # `git describe --tags`, and a shallow checkout has no tags, so the
           # build would stamp 0.0.0 and reject mods that declare a
