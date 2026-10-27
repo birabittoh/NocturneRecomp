@@ -1,0 +1,25 @@
+# XACT bank compatibility, included by nocturnerecomp_manifest.toml.
+#
+# The game links the XACT runtime that reads content version 41 banks
+# (World's DATA/sound). The JP release ships version 42 banks, which add one
+# header field; these hooks rewrite such a header to version 41 in place
+# before the runtime parses it. See src/xact_compat.cpp.
+
+# sub_82561C38(bank, buffer, size, ...): sound bank (.xsb) init.
+[[midasm_hook]]
+address = 0x82561C38
+name = "XactSoundBankCompat"
+registers = ["r4"]
+
+# sub_825623A8(bank, buffer, size, ...): in-memory wave bank (.xwb) init.
+[[midasm_hook]]
+address = 0x825623A8
+name = "XactWaveBankCompat"
+registers = ["r4"]
+
+# sub_82562980: streaming wave bank header check; the header buffer is at
+# this+0x140 (r31 = this).
+[[midasm_hook]]
+address = 0x82562998
+name = "XactStreamingWaveBankCompat"
+registers = ["r31"]

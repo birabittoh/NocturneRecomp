@@ -357,6 +357,7 @@ set(NOCTURNERECOMP_SOURCES
     src/main.cpp
     src/nocturnerecomp_hooks.cpp
     src/tu_hooks.cpp
+    src/xact_compat.cpp
     src/accent_color.cpp
     src/achievement_icons.cpp
     src/achievements_menu.cpp
