@@ -15,6 +15,7 @@
 #include <string>
 #include <vector>
 
+#include "settings.h"
 #include "ui_text.h"
 #endif
 
@@ -35,11 +36,13 @@ namespace {
 // are what nativeHostMenuSelect switches on, so keep the two in step.
 enum MenuItem : int {
   kGpuDriver = 0,
+  kRestartLauncher,
   kExit,
 };
 
 std::vector<std::string> MenuItems() {
-  return {Tr("host_menu", "menu_gpu_driver"), Tr("host_menu", "menu_exit")};
+  return {Tr("host_menu", "menu_gpu_driver"), Tr("host_menu", "menu_restart_launcher"),
+          Tr("host_menu", "menu_exit")};
 }
 
 // The strings NocturneRecompActivity draws itself, in the order of its T_*
@@ -137,6 +140,9 @@ Java_com_birabittoh_nocturnerecomp_NocturneRecompActivity_nativeHostMenuSelect(J
     case kGpuDriver:
       CallActivityVoid("showGpuDriverDialog", "(Z)V", static_cast<jboolean>(JNI_FALSE));
       break;
+    case kRestartLauncher:
+      RestartToStartScreen();
+      break;
     case kExit:
       RunOnUiThread([window] { window->RequestClose(); });
       break;
@@ -160,6 +166,26 @@ Java_com_birabittoh_nocturnerecomp_NocturneRecompActivity_nativeCloseGame(JNIEnv
 }
 
 #endif  // REX_PLATFORM_ANDROID
+
+bool RestartAndroidApp() {
+#if REX_PLATFORM_ANDROID
+  JNIEnv* env = JniEnv();
+  jobject activity = static_cast<jobject>(SDL_GetAndroidActivity());
+  if (!env || !activity) {
+    return false;
+  }
+  jclass cls = env->GetObjectClass(activity);
+  jmethodID mid = env->GetMethodID(cls, "restartApp", "()V");
+  if (mid) {
+    env->CallVoidMethod(activity, mid);
+  }
+  env->DeleteLocalRef(cls);
+  env->DeleteLocalRef(activity);
+  return mid != nullptr;
+#else
+  return false;
+#endif
+}
 
 HostMenu::HostMenu(rex::ui::Window* window) : window_(window) {
   g_instance = this;

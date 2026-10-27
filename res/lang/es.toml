@@ -351,6 +351,7 @@ installed = "Mod instalado: {}. Reinicia el juego para aplicarlo."
 
 [host_menu]
 menu_gpu_driver = "Controlador de GPU..."
+menu_restart_launcher = "Reiniciar al lanzador"
 menu_exit = "Salir"
 driver_invalid = "Ese archivo no es un paquete de controlador Vulkan."
 driver_installed = "{} instalado."

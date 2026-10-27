@@ -6,6 +6,7 @@
 #include "enhancements.h"
 #include "game_data.h"
 #include "graphics_settings.h"
+#include "host_menu.h"
 #include "rando_runtime.h"
 #include "touch_input_driver.h"
 #include "ui_font.h"
@@ -436,10 +437,7 @@ class CuratedSettingsDialog : public rex::ui::ImGuiDialog {
     if (ImGui::IsItemHovered())
       ImGui::SetTooltip("%s", Tr("settings", "start_screen_tip"));
     if (ConfirmRestart("confirm_start_screen", open_restart)) {
-      const auto flag = StartScreenFlagPath(user_settings_path_);
-      RequestStartScreenOnNextLaunch(flag, true);
-      if (!RestartNow())
-        RequestStartScreenOnNextLaunch(flag, false);
+      RestartToStartScreen();
     }
     ImGui::SameLine();
     const bool open_quit =
@@ -1061,6 +1059,10 @@ void PersistWindowSize() {
 }
 
 bool RestartNow() {
+#if REX_PLATFORM_ANDROID
+  // Replaces the process itself, so there is no window left to close here.
+  return g_window && RestartAndroidApp();
+#else
   if (!g_window || !rex::platform::process::Relaunch())
     return false;
   // RequestClose ends up in WindowSDL::RequestCloseImpl, which destroys the
@@ -1069,6 +1071,18 @@ bool RestartNow() {
   // and the F4 overlay on the guest's render thread. Closing from there hangs,
   // leaving the old window up next to the relaunched one.
   return QuitNow();
+#endif
+}
+
+bool RestartToStartScreen() {
+  if (g_user_settings_path.empty())
+    return false;
+  const auto flag = StartScreenFlagPath(g_user_settings_path);
+  RequestStartScreenOnNextLaunch(flag, true);
+  if (RestartNow())
+    return true;
+  RequestStartScreenOnNextLaunch(flag, false);
+  return false;
 }
 
 bool QuitNow() {

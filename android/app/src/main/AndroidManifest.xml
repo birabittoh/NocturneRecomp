@@ -63,6 +63,15 @@
             <meta-data android:name="SDL_MAIN_ENTRY_FUNCTION" android:value="SDL_main" />
         </activity>
 
+        <!-- Relaunches the game from outside its own process; see
+             NocturneRecompActivity.restartApp(). -->
+        <activity
+            android:name="com.birabittoh.nocturnerecomp.RestartTrampolineActivity"
+            android:process=":restart"
+            android:exported="false"
+            android:excludeFromRecents="true"
+            android:theme="@android:style/Theme.Translucent.NoTitleBar" />
+
         <!-- Serves the staged update APK to the package installer (the SDK's
              AutoUpdater looks this authority up by name). -->
         <provider

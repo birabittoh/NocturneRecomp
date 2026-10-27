@@ -145,6 +145,10 @@ void BindWindowTarget(rex::ui::Window* window, std::filesystem::path user_settin
 // not be started or BindWindowTarget has not run yet.
 bool RestartNow();
 
+// RestartNow into the start screen, where the game files can be deleted or
+// another source picked. Withdraws the request if the restart cannot start.
+bool RestartToStartScreen();
+
 // Closes the game, marshalled like RestartNow. False before BindWindowTarget.
 bool QuitNow();
 

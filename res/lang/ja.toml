@@ -354,6 +354,7 @@ installed = "Modをインストールしました: {}。反映するにはゲー
 
 [host_menu]
 menu_gpu_driver = "GPUドライバー..."
+menu_restart_launcher = "ランチャーに戻って再起動"
 menu_exit = "終了"
 driver_invalid = "そのファイルはVulkanドライバーパッケージではありません。"
 driver_installed = "{} をインストールしました。"

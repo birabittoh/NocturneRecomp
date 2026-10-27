@@ -2,7 +2,9 @@ package com.birabittoh.nocturnerecomp;
 
 import android.app.AlertDialog;
 import android.content.DialogInterface;
+import android.content.Intent;
 import android.os.Bundle;
+import android.os.Process;
 import android.util.Log;
 
 import java.io.File;
@@ -56,6 +58,27 @@ public class NocturneRecompActivity extends SDLActivity {
                 .setOnCancelListener((DialogInterface dialog) -> nativeHostMenuSelect(-1))
                 .show();
         });
+    }
+
+    /**
+     * Called from native code to start the game over. The runtime keeps its
+     * state in process-wide statics and in mappings that cannot be torn down
+     * and rebuilt, so a fresh process is the only clean restart. The
+     * trampoline relaunches the game from its own process, which keeps the app
+     * in the foreground and in the same task instead of dropping to the
+     * launcher.
+     */
+    public void restartApp() {
+        Intent launch = getPackageManager().getLaunchIntentForPackage(getPackageName());
+        if (launch == null) {
+            return;
+        }
+        Intent next = Intent.makeRestartActivityTask(launch.getComponent());
+        Intent trampoline = new Intent(this, RestartTrampolineActivity.class);
+        trampoline.putExtra(RestartTrampolineActivity.EXTRA_NEXT, next);
+        trampoline.putExtra(RestartTrampolineActivity.EXTRA_PID, Process.myPid());
+        startActivity(trampoline);
+        Process.killProcess(Process.myPid());
     }
 
     /** Called from native code to report the outcome of a menu action. */
