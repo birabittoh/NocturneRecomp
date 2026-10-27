@@ -47,6 +47,7 @@
 #endif
 #include "host_menu.h"
 #include "language_switch.h"
+#include "movie_player.h"
 #include "native_options.h"
 #include "host_timer_resolution.h"
 #include "icon.generated.h"
@@ -323,6 +324,10 @@ class NocturnerecompApp : public rex::ReXApp {
       input_sys->AddDriver(std::move(touch));
     }
 
+    // The JP release's story movies, drawn over the game (see movie_player.h).
+    nocturne::BindMovies(runtime());
+    movie_overlay_ = nocturne::CreateMovieOverlay(imgui_drawer());
+
     // The renderer loads no GPU plugin, so the SDK's per guest frame callback
     // (which drives the mod registry's tick) never fires; the swap hook does it.
     nocturne::SetGuestFrameCallback([this] { runtime()->mod_registry()->DispatchTick(); });
@@ -497,6 +502,7 @@ class NocturnerecompApp : public rex::ReXApp {
   std::unique_ptr<nocturne::HostMenu> host_menu_;
   // Draws the on-screen pad; the driver it reads is owned by the input system.
   std::unique_ptr<rex::ui::ImGuiDialog> touch_controls_overlay_;
+  std::unique_ptr<rex::ui::ImGuiDialog> movie_overlay_;
 
   std::filesystem::path user_settings_path() const { return user_data_root() / "settings.toml"; }
 };

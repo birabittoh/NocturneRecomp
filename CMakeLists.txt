@@ -369,6 +369,7 @@ set(NOCTURNERECOMP_SOURCES
     src/host_timer_resolution.cpp
     src/intro_skips.cpp
     src/language_switch.cpp
+    src/movie_player.cpp
     src/help_options_menu.cpp
     src/native_enhancements.cpp
     src/native_options.cpp
