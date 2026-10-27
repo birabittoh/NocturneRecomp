@@ -21,7 +21,7 @@ on:
 env:
   ASSETS_REPO: ${{ vars.ASSETS_REPO }}
   ASSET_PATH: default.xex
-  ASSET_CACHE_KEY: codegen-assets-v1
+  ASSET_CACHE_KEY: codegen-assets-v2
 
 jobs:
   build:
@@ -82,7 +82,9 @@ jobs:
         id: asset-cache
         uses: actions/cache@v5
         with:
-          path: assets/${{ env.ASSET_PATH }}
+          path: |
+            assets/${{ env.ASSET_PATH }}
+            assets/MEDIA
           key: ${{ env.ASSET_CACHE_KEY }}
 
       - name: Fetch XEX asset
@@ -98,6 +100,14 @@ jobs:
           size=$(wc -c < "assets/${{ env.ASSET_PATH }}")
           echo "Fetched ${{ env.ASSET_PATH }} ($size bytes)"
           [ "$size" -ge 1048576 ] || { echo "Asset too small — fetch likely failed"; exit 1; }
+
+          # Shader containers that gen-guest-shaders.py translates.
+          mkdir -p assets/MEDIA
+          for f in $(gh api "repos/${{ env.ASSETS_REPO }}/contents/MEDIA" --jq '.[].name'); do
+            gh api -H "Accept: application/vnd.github.raw" \
+              "repos/${{ env.ASSETS_REPO }}/contents/MEDIA/$f" > "assets/MEDIA/$f"
+          done
+          ls assets/MEDIA/*.xvu assets/MEDIA/*.xpu
 
       - name: Download SDK
         shell: bash
