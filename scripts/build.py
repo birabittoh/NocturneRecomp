@@ -21,6 +21,8 @@ def detect_preset(build_type="release"):
         os_id = "linux"
     elif os_name == "Windows":
         os_id = "win"
+    elif os_name == "Darwin":
+        os_id = "mac"
     else:
         raise RuntimeError(f"Unsupported OS: {os_name}")
 
@@ -108,6 +110,20 @@ def compute_codegen_hash(manifest, manifest_path):
     return h.hexdigest()
 
 
+# macOS has no Vulkan of its own, so the SDK's CMake stages a loader, MoltenVK
+# and the driver manifest into <build dir>/vulkan (rexglue_helpers.cmake). The
+# manifest is the only way the loader finds a driver.
+VULKAN_RUNTIME_DIR = "vulkan"
+
+
+def lib_extension():
+    if platform.system() == "Windows":
+        return ".dll"
+    if platform.system() == "Darwin":
+        return ".dylib"
+    return ".so"
+
+
 def copy_runtime_libs(is_windows, sdk_dir, build_type):
     # The SDK ships all build variants of each shared lib side by side
     # (e.g. rexruntime.dll, rexruntimed.dll, rexruntimerd.dll for release,
@@ -116,7 +132,7 @@ def copy_runtime_libs(is_windows, sdk_dir, build_type):
     variant_suffix = {"release": "", "debug": "d", "relwithdebinfo": "rd"}[build_type]
 
     src_dir = os.path.join(sdk_dir, "bin" if is_windows else "lib")
-    ext = ".dll" if is_windows else ".so"
+    ext = lib_extension()
 
     if not os.path.isdir(src_dir):
         return
@@ -152,12 +168,17 @@ def do_package(name, project_name, is_windows):
     os.makedirs(pkg_dir, exist_ok=True)
 
     exe = f"{project_name}.exe" if is_windows else project_name
-    lib_suffix = ".dll" if is_windows else ".so"
+    lib_suffix = lib_extension()
     candidates = [exe] + sorted(f for f in os.listdir(".") if f.endswith(lib_suffix))
     for src in candidates:
         if os.path.isfile(src):
             print(f"+ cp {src} {pkg_dir}/")
             shutil.copy2(src, pkg_dir)
+
+    if os.path.isdir(VULKAN_RUNTIME_DIR):
+        print(f"+ cp -r {VULKAN_RUNTIME_DIR} {pkg_dir}/")
+        shutil.copytree(VULKAN_RUNTIME_DIR, os.path.join(pkg_dir, VULKAN_RUNTIME_DIR),
+                        dirs_exist_ok=True)
 
     copy_post_process_shader(pkg_dir)
 
@@ -255,13 +276,14 @@ def main():
     cmake_configure_args = [
         f"-DCMAKE_PREFIX_PATH={sdk_dir}",
         f"-DCMAKE_CXX_COMPILER={cxx_compiler}",
+        f"-DPython3_EXECUTABLE={sys.executable}",
     ]
     if shutil.which("sccache"):
         cmake_configure_args += [
             "-DCMAKE_CXX_COMPILER_LAUNCHER=sccache",
         ]
 
-    lib_suffix = ".dll" if is_windows else ".so"
+    lib_suffix = lib_extension()
     to_remove = [exe_name] + [f for f in os.listdir(".") if f.endswith(lib_suffix)]
     for name in to_remove:
         if os.path.isfile(name):
@@ -296,6 +318,11 @@ def main():
 
     print(f"+ cp {build_output} {exe_name}")
     shutil.copy2(build_output, exe_name)
+
+    staged_vulkan = os.path.join("out", "build", preset, VULKAN_RUNTIME_DIR)
+    if os.path.isdir(staged_vulkan):
+        print(f"+ cp -r {staged_vulkan} {VULKAN_RUNTIME_DIR}")
+        shutil.copytree(staged_vulkan, VULKAN_RUNTIME_DIR, dirs_exist_ok=True)
 
     copy_runtime_libs(is_windows, sdk_dir, build_type)
 

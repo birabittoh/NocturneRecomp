@@ -7,3 +7,6 @@
 [submodule "ext/SOTN_XB_RANDO"]
 	path = ext/SOTN_XB_RANDO
 	url = https://github.com/MottZilla/SOTN_XB_RANDO
+[submodule "ext/libadrenotools"]
+	path = ext/libadrenotools
+	url = https://github.com/bylaws/libadrenotools.git

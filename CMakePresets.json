@@ -32,6 +32,22 @@
             }
         },
         {
+            "name": "mac-base",
+            "hidden": true,
+            "generator": "Ninja",
+            "binaryDir": "${sourceDir}/out/build/${presetName}",
+            "cacheVariables": {
+                "CMAKE_CXX_COMPILER": "clang++",
+                "CMAKE_OSX_DEPLOYMENT_TARGET": "13.3",
+                "CMAKE_OSX_ARCHITECTURES": "x86_64"
+            },
+            "condition": {
+                "type": "equals",
+                "lhs": "${hostSystemName}",
+                "rhs": "Darwin"
+            }
+        },
+        {
             "name": "windows-arm64-base",
             "hidden": true,
             "inherits": "windows-base",
@@ -47,6 +63,28 @@
             "cacheVariables": {
                 "CMAKE_C_FLAGS": "-march=armv8-a",
                 "CMAKE_CXX_FLAGS": "-march=armv8-a"
+            }
+        },
+        {
+            "name": "mac-arm64-base",
+            "hidden": true,
+            "inherits": "mac-base",
+            "cacheVariables": {
+                "CMAKE_C_FLAGS": "-march=armv8-a",
+                "CMAKE_CXX_FLAGS": "-march=armv8-a",
+                "CMAKE_OSX_ARCHITECTURES": "arm64"
+            }
+        },
+        {
+            "name": "android-arm64-base",
+            "hidden": true,
+            "generator": "Ninja",
+            "binaryDir": "${sourceDir}/out/build/${presetName}",
+            "cacheVariables": {
+                "CMAKE_SYSTEM_NAME": "Android",
+                "CMAKE_ANDROID_ARCH_ABI": "arm64-v8a",
+                "CMAKE_ANDROID_API": "28",
+                "CMAKE_CXX_STANDARD": "23"
             }
         },
         {
@@ -120,6 +158,60 @@
             "displayName": "Linux ARM64 RelWithDebInfo",
             "inherits": "linux-arm64-base",
             "cacheVariables": { "CMAKE_BUILD_TYPE": "RelWithDebInfo" }
+        },
+        {
+            "name": "mac-amd64-debug",
+            "displayName": "macOS AMD64 Debug",
+            "inherits": "mac-base",
+            "cacheVariables": { "CMAKE_BUILD_TYPE": "Debug" }
+        },
+        {
+            "name": "mac-amd64-release",
+            "displayName": "macOS AMD64 Release",
+            "inherits": "mac-base",
+            "cacheVariables": { "CMAKE_BUILD_TYPE": "Release" }
+        },
+        {
+            "name": "mac-amd64-relwithdebinfo",
+            "displayName": "macOS AMD64 RelWithDebInfo",
+            "inherits": "mac-base",
+            "cacheVariables": { "CMAKE_BUILD_TYPE": "RelWithDebInfo" }
+        },
+        {
+            "name": "mac-arm64-debug",
+            "displayName": "macOS ARM64 Debug",
+            "inherits": "mac-arm64-base",
+            "cacheVariables": { "CMAKE_BUILD_TYPE": "Debug" }
+        },
+        {
+            "name": "mac-arm64-release",
+            "displayName": "macOS ARM64 Release",
+            "inherits": "mac-arm64-base",
+            "cacheVariables": { "CMAKE_BUILD_TYPE": "Release" }
+        },
+        {
+            "name": "mac-arm64-relwithdebinfo",
+            "displayName": "macOS ARM64 RelWithDebInfo",
+            "inherits": "mac-arm64-base",
+            "cacheVariables": { "CMAKE_BUILD_TYPE": "RelWithDebInfo" }
+        },
+        {
+            "name": "android-arm64-debug",
+            "displayName": "Android ARM64 Debug",
+            "inherits": "android-arm64-base",
+            "cacheVariables": { "CMAKE_BUILD_TYPE": "Debug" }
+        },
+        {
+            "name": "android-arm64-release",
+            "displayName": "Android ARM64 Release",
+            "inherits": "android-arm64-base",
+            "cacheVariables": { "CMAKE_BUILD_TYPE": "Release" }
+        },
+        {
+            "name": "android-arm64-relwithdebinfo",
+            "displayName": "Android ARM64 RelWithDebInfo",
+            "inherits": "android-arm64-base",
+            "cacheVariables": { "CMAKE_BUILD_TYPE": "RelWithDebInfo" }
         }
     ],
     "buildPresets": [
@@ -134,6 +226,15 @@
         { "name": "win-arm64-relwithdebinfo", "configurePreset": "win-arm64-relwithdebinfo" },
         { "name": "linux-arm64-debug", "configurePreset": "linux-arm64-debug" },
         { "name": "linux-arm64-release", "configurePreset": "linux-arm64-release" },
-        { "name": "linux-arm64-relwithdebinfo", "configurePreset": "linux-arm64-relwithdebinfo" }
+        { "name": "linux-arm64-relwithdebinfo", "configurePreset": "linux-arm64-relwithdebinfo" },
+        { "name": "mac-amd64-debug", "configurePreset": "mac-amd64-debug" },
+        { "name": "mac-amd64-release", "configurePreset": "mac-amd64-release" },
+        { "name": "mac-amd64-relwithdebinfo", "configurePreset": "mac-amd64-relwithdebinfo" },
+        { "name": "mac-arm64-debug", "configurePreset": "mac-arm64-debug" },
+        { "name": "mac-arm64-release", "configurePreset": "mac-arm64-release" },
+        { "name": "mac-arm64-relwithdebinfo", "configurePreset": "mac-arm64-relwithdebinfo" },
+        { "name": "android-arm64-debug", "configurePreset": "android-arm64-debug" },
+        { "name": "android-arm64-release", "configurePreset": "android-arm64-release" },
+        { "name": "android-arm64-relwithdebinfo", "configurePreset": "android-arm64-relwithdebinfo" }
     ]
 }

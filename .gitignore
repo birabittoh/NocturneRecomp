@@ -48,6 +48,11 @@ nocturnerecomp.pdb
 nocturnerecomp.toml
 /*.so
 /*.dll
+/*.dylib
+/vulkan/
+/NocturneRecomp.app/
+/pkg/
+/pkg-dmg/
 
 # Game package and assets extracted from it
 # (the package itself and anything derived from it must NEVER be committed)

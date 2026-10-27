@@ -26,7 +26,9 @@ if(NOT EXISTS "${NOCTURNE_PLUME_DIR}/plume_render_interface.h")
 endif()
 # ReXGlue owns this project's SDL window. Have Plume create its Vulkan surface
 # from that SDL_Window directly instead of asking the host to expose raw X11
-# handles, which Window::GetNativeWindowHandle() does not represent.
+# handles, which Window::GetNativeWindowHandle() does not represent. Android has
+# native VK_KHR_android_surface support, and Apple must keep Plume's own
+# {window, view} RenderWindow (fed to vkCreateMetalSurfaceEXT), so neither gets it.
 if(UNIX AND NOT APPLE AND NOT ANDROID)
     set(PLUME_SDL3_VULKAN_ENABLED ON CACHE BOOL "Enable SDL3 Vulkan integration" FORCE)
 endif()
@@ -79,8 +81,9 @@ else()
     set(NOCTURNE_SHADER_FORMATS "spirv")
 endif()
 
-# Project version: the nearest reachable `vX.Y.Z` git tag, not an exact
-# match -- a dev build sitting on commits after v1.2.2 already contains
+# Project version: an explicit NOCTURNE_VERSION_OVERRIDE, else the CI tag
+# (NOCTURNE_VERSION_NAME, also what the Android Gradle build stamps), else the
+# nearest reachable `vX.Y.Z` git tag, not an exact match -- a dev build sitting on commits after v1.2.2 already contains
 # everything v1.2.2 did, so it should still satisfy a mod's
 # `game_version >= 1.2.0` (see nocturnerecomp_app.h's OnPreSetup and
 # docs/making-mods.md). Falls back to "0.0.0" if git or a reachable tag is
@@ -88,8 +91,17 @@ endif()
 # SDK already treats an unparsable/absent game_version as "can't verify,
 # don't block" for any mod that declares the constraint.
 find_package(Git QUIET)
+set(NOCTURNE_VERSION_OVERRIDE "" CACHE STRING "Version to embed (vX.Y.Z or X.Y.Z); empty to derive it")
 set(NOCTURNE_VERSION "0.0.0")
-if(GIT_EXECUTABLE)
+set(NOCTURNE_GIT_TAG "${NOCTURNE_VERSION_OVERRIDE}")
+if(NOCTURNE_GIT_TAG STREQUAL "")
+    set(NOCTURNE_GIT_TAG "$ENV{NOCTURNE_VERSION_NAME}")
+endif()
+if(NOT NOCTURNE_GIT_TAG STREQUAL "")
+    if(NOCTURNE_GIT_TAG MATCHES "^v?([0-9]+\\.[0-9]+\\.[0-9]+)$")
+        set(NOCTURNE_VERSION "${CMAKE_MATCH_1}")
+    endif()
+elseif(GIT_EXECUTABLE)
     execute_process(
         COMMAND ${GIT_EXECUTABLE} describe --tags --abbrev=0 --match "v[0-9]*.[0-9]*.[0-9]*"
         WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
@@ -292,17 +304,46 @@ set(NOCTURNERECOMP_SOURCES
 
 if(WIN32)
     add_executable(nocturnerecomp WIN32 ${NOCTURNERECOMP_SOURCES} ${NOCTURNE_ICON_RC})
+elseif(ANDROID)
+    # A shared library SDLActivity loads. Everything linked into it has to be
+    # position independent, including the OBJECT library rexglue_setup_target()
+    # creates for the recompiled code, so this must be set before that call.
+    add_library(nocturnerecomp SHARED ${NOCTURNERECOMP_SOURCES})
+    set(CMAKE_POSITION_INDEPENDENT_CODE ON)
+    # Plume hides symbols by default; SDLActivity needs to dlsym SDL_main.
+    set_target_properties(nocturnerecomp PROPERTIES
+        CXX_VISIBILITY_PRESET default
+        C_VISIBILITY_PRESET default
+    )
+    # System.loadLibrary opens the library RTLD_LOCAL, and bionic's
+    # dlsym(RTLD_DEFAULT) skips local libraries, hiding the mod API from mods.
+    # DF_1_GLOBAL makes the linker treat it as RTLD_GLOBAL.
+    target_link_options(nocturnerecomp PRIVATE "LINKER:-z,global")
 else()
     add_executable(nocturnerecomp ${NOCTURNERECOMP_SOURCES})
+    # ELF executables do not export their own symbols, so without ENABLE_EXPORTS
+    # the mod API is invisible to native mods' dlsym(RTLD_DEFAULT).
     set_target_properties(nocturnerecomp PROPERTIES
         BUILD_RPATH "$ORIGIN"
         INSTALL_RPATH "$ORIGIN"
+        ENABLE_EXPORTS ON
     )
 endif()
 
 rexglue_setup_target(nocturnerecomp)
 
 target_link_libraries(nocturnerecomp PRIVATE plume)
+
+# libadrenotools loads a user supplied Vulkan driver (Turnip) in place of the
+# stock one. Its hook libraries are dlopen'd by name from nativeLibraryDir, so
+# they are built next to libnocturnerecomp.so for staging into jniLibs.
+if(ANDROID)
+    add_subdirectory(ext/libadrenotools EXCLUDE_FROM_ALL)
+    set_target_properties(main_hook file_redirect_hook gsl_alloc_hook hook_impl PROPERTIES
+        LIBRARY_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR})
+    target_link_libraries(nocturnerecomp PRIVATE adrenotools)
+    add_dependencies(nocturnerecomp main_hook file_redirect_hook gsl_alloc_hook hook_impl)
+endif()
 target_include_directories(nocturnerecomp PRIVATE src/gpu ext/KryptonRecomp)
 
 # MottZilla's SOTN_XB_RANDO core (see src/rando/rando_core.cpp). It is a Win32
