@@ -7,6 +7,7 @@
 #include "game_data.h"
 #include "graphics_settings.h"
 #include "rando_runtime.h"
+#include "touch_input_driver.h"
 #include "ui_font.h"
 #include "ui_text.h"
 
@@ -14,6 +15,7 @@
 #include <array>
 #include <cmath>
 #include <random>
+#include <cstdio>
 #include <cstdlib>
 #include <string>
 #include <string_view>
@@ -139,9 +141,11 @@ constexpr std::array kGameDefaults = {
 // host_timer_resolution_ms is absent here on purpose: 5ms is right for
 // everyone, so it gets no curated row. It is listed in kAdvancedCvarNames
 // instead, where the generic widget exposes it as the raw millisecond value.
-constexpr std::array<const char*, 9> kBasicCvarNames = {
-    "fullscreen",  "vsync", "user_name",  "user_language", "gpu_backend",
-    "vulkan_device", "audio_mute", "audio_volume", "graphics_style_enhanced"};
+constexpr std::array<const char*, 13> kBasicCvarNames = {
+    "fullscreen",       "vsync",         "user_name",       "user_language",
+    "gpu_backend",      "vulkan_device", "audio_mute",      "audio_volume",
+    "graphics_style_enhanced", "touch_controls", "touch_scale", "touch_opacity",
+    "touch_hide_delay"};
 
 // audio_volume is stored (and applied to samples by the SDL audio driver) as
 // linear amplitude, but human loudness perception is roughly logarithmic --
@@ -363,6 +367,9 @@ class CuratedSettingsDialog : public rex::ui::ImGuiDialog {
 #endif
 
     ImGui::Separator();
+    DrawTouchRows();
+
+    ImGui::Separator();
     DrawStartScreenRow();
 
     ImGui::Separator();
@@ -371,6 +378,54 @@ class CuratedSettingsDialog : public rex::ui::ImGuiDialog {
         DrawAdvancedRow(name);
       }
     }
+  }
+
+  // The on-screen pad (see touch_layout.h). Its sliders only show while it is on.
+  void DrawTouchRows() {
+    const auto* entry = rex::cvar::GetFlagInfo("touch_controls");
+    if (!entry)
+      return;
+    ImGui::TextUnformatted(Tr("settings", "touch_controls"));
+    ImGui::SameLine(180.0f);
+    ImGui::PushID("touch_controls");
+    if (rex::ui::DrawCvarWidget(*entry, 160.0f, /*persist=*/true))
+      SaveBasic();
+    ImGui::PopID();
+    if (entry->getter() != "true")
+      return;
+    DrawTouchSliderRow("touch_scale", Tr("settings", "touch_scale"), 0.5f, 2.0f, "%.2f");
+    DrawTouchSliderRow("touch_opacity", Tr("settings", "touch_opacity"), 0.1f, 1.0f, "%.2f");
+    // Whole seconds; the top step means the pad never hides.
+    DrawTouchSliderRow("touch_hide_delay", Tr("settings", "touch_hide_delay"), 1.0f, 11.0f, "%.0f", /*never_at_max=*/true);
+  }
+
+  void DrawTouchSliderRow(const char* name, const char* label, float min, float max,
+                          const char* format, bool never_at_max = false) {
+    const auto* entry = rex::cvar::GetFlagInfo(name);
+    if (!entry)
+      return;
+    float value = std::clamp(float(std::atof(entry->getter().c_str())), min, max);
+    if (never_at_max)
+      value = std::round(value);
+    ImGui::TextUnformatted(label);
+    ImGui::SameLine(180.0f);
+    ImGui::SetNextItemWidth(160.0f);
+    ImGui::PushID(name);
+    const bool never = never_at_max && value >= max;
+    if (ImGui::SliderFloat("##v", &value, min, max, never ? Tr("settings", "touch_never") : format,
+                           ImGuiSliderFlags_AlwaysClamp)) {
+      if (never_at_max)
+        value = std::round(value);
+      char text[16];
+      std::snprintf(text, sizeof(text), "%.2f", value);
+      rex::cvar::SetFlagByName(name, text, /*persist=*/true);
+    }
+    // Keeps the pad drawn while it is being resized or faded, so the change shows.
+    if (ImGui::IsItemActive())
+      touch::TouchKeepVisible();
+    if (ImGui::IsItemDeactivatedAfterEdit())
+      SaveBasic();
+    ImGui::PopID();
   }
 
   // Restarts into the start screen, where the game files can be deleted or
