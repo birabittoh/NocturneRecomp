@@ -33,14 +33,24 @@ The game opens on a start screen. Pick your legally dumped XBLA package (the
 **Extract**.
 
 Two releases are recognized, and each is installed into its own folder of
-the game library. Either one is enough to play, and with both installed the
-game uses them together: World's files, plus what only the Japanese release
-has.
+the game library. Either one is enough to play, and there is nothing to pick:
+with both installed the game uses them together, World's files plus what the
+Japanese release has.
 
 | Release | Folder | Adds |
 |---|---|---|
 | Castlevania: Symphony of the Night (Xbox Live Arcade, World) | `assets/xbla-world` | the base game |
-| Dracula X: Nocturne in the Moonlight (Xbox Live Arcade, Japan) | `assets/xbla-jp` | the story movies (opening, castle collapse, ending) |
+| Dracula X: Nocturne in the Moonlight (Xbox Live Arcade, Japan) | `assets/xbla-jp` | the story movies (opening, castle collapse, ending), the Japanese voices, its own artwork (the Dracula X logo and the PS1 side's text graphics), and its Japanese text when the game language is Japanese |
+
+With both installed, the settings overlay (F4) has two more rows on the
+General tab, and both apply without a restart:
+
+- **Force English Voices**: World's voices instead of JP's (off by default).
+- **Artwork**: **Auto** (JP's while the language is Japanese, World's
+  otherwise), **JP** or **World**.
+
+A JP-only install plays too, with everything coming from the Japanese
+release.
 
 The start screen also has a **Mods** page and a **Saves** page (export a
 save as a zip, import one into an empty slot, delete). It is skipped once a
@@ -126,11 +136,13 @@ Place your legally dumped World XBLA package (the `LIVE`/STFS file) into `game/`
 python scripts/extract_game.py
 ```
 
-This writes the same layout the start screen does: the package goes into
-`assets/xbla-world/`, and `assets/default.xex` becomes a copy of that
-version's executable, which codegen and the build read (the guest shaders
-come from `assets/xbla-world/MEDIA`). Pass a package path to pick one when
-`game/` holds several, and `--force` to replace an existing version folder.
+This writes the same layout the start screen does: a World package goes into
+`assets/xbla-world/`, a JP one into `assets/xbla-jp/` (run it once per
+package to install both). World's also makes `assets/default.xex` a copy of
+its executable, which codegen and the build read (the guest shaders come from
+`assets/xbla-world/MEDIA`), so building needs World even though the game plays
+with JP alone. Pass a package path to pick one when `game/` holds several, and
+`--force` to replace an existing version folder.
 
 An older flat `assets/` tree still works: the game moves it into
 `assets/xbla-world/` the first time it runs.
