@@ -307,6 +307,11 @@ constexpr uint32_t kButtonDefaults = 6;
 // its bar. Repurposed as the way back into the stretch screen the Preset row
 // displaced; see NativeOptions_SettingsEvent.
 constexpr uint32_t kButtonStretchScreen = 7;
+// The shoulder buttons, which switch between the enhancements pages. By the
+// same ordering after Y; static RE could not confirm it, so an id the screen
+// doesn't handle is logged (see NativeOptions_SettingsEvent).
+constexpr uint32_t kButtonPreviousPage = 8;
+constexpr uint32_t kButtonNextPage = 9;
 
 // True if ANY cvar changed this session (through this screen or otherwise --
 // GetPendingRestartFlags() doesn't distinguish the source) still needs a
@@ -662,6 +667,8 @@ constexpr OptionsPage kSettingsPage = {
     .total_rows = kSettingsRowCount,
     .visible_rows = kSettingsRowCount,
     .stretch_prompt = true,
+    .prompt_text = kCustomPromptLabel,
+    .prompt_glyph = kYGlyphNameAddr,
 };
 
 // ---------------------------------------------------------------------------
@@ -1408,8 +1415,19 @@ void LayoutPromptBar(PPCContext& ctx, uint8_t* base) {
     return;
   }
 
-  const bool with_custom = Page().stretch_prompt;
+  const bool with_custom = Page().prompt_text.key != nullptr;
   SetWidgetVisible(ctx, base, g_custom_prompt, with_custom);
+  if (with_custom) {
+    // The page's own glyph and text on the shared prompt.
+    const uint32_t bank = Read32BE(base, kImageBankPtrAddr);
+    const uint32_t image = Page().prompt_glyph && g_find_image_fn
+                               ? CallGuest(ctx, base, g_find_image_fn, bank, Page().prompt_glyph)
+                               : 0;
+    if (image && g_prompt_set_glyph_fn) {
+      CallGuest(ctx, base, g_prompt_set_glyph_fn, g_custom_prompt, image);
+    }
+    SetWidgetText(ctx, base, g_custom_prompt, Page().prompt_text.Get());
+  }
   const std::array<uint32_t, 4> prompts = {g_stock_prompts[0], g_stock_prompts[1],
                                            g_stock_prompts[2], g_custom_prompt};
   const size_t count = with_custom ? prompts.size() : prompts.size() - 1;
@@ -1588,6 +1606,8 @@ void ResetPageToDefaults(PPCContext& ctx, uint8_t* base) {
 // ones need nothing, since the re-bind on the way out reloads them from their
 // own `get`. X ("defaults") does the same rollback and repaints, or on a page
 // that owns all its rows, resets them (ResetPageToDefaults).
+void SwitchPage(PPCContext& ctx, uint8_t* base, const OptionsPage& page);
+
 extern "C" void NativeOptions_SettingsEvent(PPCContext& ctx, uint8_t* base) {
   const uint32_t screen = ctx.r3.u32;
   const uint32_t message = ctx.r4.u32;
@@ -1633,8 +1653,18 @@ extern "C" void NativeOptions_SettingsEvent(PPCContext& ctx, uint8_t* base) {
     // turns pad bits into these ids couldn't be pinned down (the button tests
     // compile to rlwinm., not a searchable mask constant). If Y turns out to
     // arrive as something else, this logs the real id on the first press.
+    if (message_class == kMsgClassButton && g_entries &&
+        (button == kButtonPreviousPage || button == kButtonNextPage)) {
+      if (const OptionsPage* neighbour =
+              NeighbourEnhancementsPage(Page(), button == kButtonNextPage ? 1 : -1)) {
+        SwitchPage(ctx, base, *neighbour);
+        ctx.r3.u32 = 1;
+        return;
+      }
+    }
+
     if (message_class == kMsgClassButton && button > kButtonStretchScreen) {
-      REXLOG_DEBUG("[native_options] settings screen: unhandled button id {}", button);
+      REXLOG_INFO("[native_options] settings screen: unhandled button id {}", button);
     }
 
     if (message_class == kMsgClassButton && button == kButtonStretchScreen &&
@@ -1819,6 +1849,43 @@ void ApplyPageChrome(PPCContext& ctx, uint8_t* base) {
   LayoutPromptBar(ctx, base);
 }
 
+// Opens another page of a group on the open screen (the shoulder buttons).
+// What the player changed on the page being left is committed first, as A
+// would: the rows are re-seeded from their cvars on the new page, and the old
+// ones would otherwise be lost. Then the new page is bound the way
+// NativeOptions_BindRows binds a page that was just selected.
+void SwitchPage(PPCContext& ctx, uint8_t* base, const OptionsPage& page) {
+  for (uint32_t i = 0; i < Page().row_count; ++i) {
+    const OptionRow& row = Page().rows[i];
+    if (IsRowActive(row) && row.commit) {
+      row.commit(row, g_values[i]);
+    }
+  }
+
+  g_page = &page;
+  g_bound_page = &page;
+  g_scroll = 0;
+  Write32BE(base, g_list + kListSelectedRow, 0);
+  for (uint32_t row = 0; row < ListCapacity(); ++row) {
+    SetWidgetScale(ctx, base, RowValueWidget(base, row), ListTextScale(base));
+  }
+  for (uint32_t i = 0; i < Page().row_count; ++i) {
+    if (IsRowActive(Page().rows[i]) && !IsLabelOnly(Page().rows[i])) {
+      SeedRow(i);
+    }
+  }
+  BindVisibleRows(ctx, base);
+
+  if (g_settings_screen && Page().title.key) {
+    const uint32_t title = Read32BE(base, g_settings_screen + kScreenTitleOffset);
+    if (title) {
+      SetTextWidgetText(ctx, base, title, Page().title.Get());
+      CentreTitle(ctx, base, title);
+    }
+  }
+  LayoutPromptBar(ctx, base);
+}
+
 // Repaints the value of every row the game renders itself (stock Graphics,
 // and any numeric row). The list's bind and cycle both format the entry into a
 // buffer and set that as literal text, so the by-id re-texting in
@@ -1883,7 +1950,6 @@ void RefreshNativeOptionsText(PPCContext& ctx, uint8_t* base) {
   }
 
   if (g_custom_prompt) {
-    SetWidgetText(ctx, base, g_custom_prompt, kCustomPromptLabel.Get());
     LayoutPromptBar(ctx, base);
   }
 }

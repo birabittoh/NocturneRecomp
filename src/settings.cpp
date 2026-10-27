@@ -144,6 +144,11 @@ constexpr std::array kGameDefaults = {
 // host_timer_resolution_ms is absent here on purpose: 5ms is right for
 // everyone, so it gets no curated row. It is listed in kAdvancedCvarNames
 // instead, where the generic widget exposes it as the raw millisecond value.
+// The enhancement tabs, in order: res/lang's [enhancements] section keys.
+// "Other" also holds the cosmetic and game mode settings.
+constexpr std::array<const char*, 4> kEnhancementTabs = {
+    "section_quality_of_life", "section_fixes", "section_items_and_shop", "section_other"};
+
 constexpr std::array<const char*, 17> kBasicCvarNames = {
     "fullscreen",       "vsync",         "user_name",       "user_language",
     "gpu_backend",      "vulkan_device", "audio_mute",      "audio_volume",
@@ -267,9 +272,12 @@ class CuratedSettingsDialog : public rex::ui::ImGuiDialog {
         DrawGeneralTab();
         ImGui::EndTabItem();
       }
-      if (ImGui::BeginTabItem(Tr("settings", "tab_enhancements"))) {
-        DrawEnhancementsTab();
-        ImGui::EndTabItem();
+      // One tab per group of enhancements, labelled like its old section.
+      for (const char* section : kEnhancementTabs) {
+        if (ImGui::BeginTabItem(Tr("enhancements", section))) {
+          DrawEnhancementsTab(section);
+          ImGui::EndTabItem();
+        }
       }
       ImGui::EndTabBar();
     }
@@ -481,14 +489,16 @@ class CuratedSettingsDialog : public rex::ui::ImGuiDialog {
       QuitNow();
   }
 
-  // The randomizer core's standalone patches (see enhancements.h). The
-  // runtime picks a change up on the next guest frame, so this tab only edits
-  // the cvars.
-  void DrawEnhancementsTab() {
+  // The randomizer core's standalone patches (see enhancements.h), one tab per
+  // section. The runtime picks a change up on the next guest frame, so these
+  // tabs only edit the cvars.
+  void DrawEnhancementsTab(const std::string_view section) {
     const auto runtime = GetRandoRuntime().state();
     const float wrap_width = 400.0f;
     ImGui::PushTextWrapPos(ImGui::GetCursorPosX() + wrap_width);
-    ImGui::TextUnformatted(Tr("enhancements", "intro"));
+    if (section == kEnhancementTabs[0]) {
+      ImGui::TextUnformatted(Tr("enhancements", "intro"));
+    }
     if (!runtime.supported) {
       ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 0.85f, 0.2f, 1.0f));
       ImGui::TextUnformatted(runtime.unsupported_reason.c_str());
@@ -503,13 +513,30 @@ class CuratedSettingsDialog : public rex::ui::ImGuiDialog {
 
     ImGui::BeginDisabled(!runtime.supported);
     const rando::Options* seed = runtime.active ? &runtime.active->options : nullptr;
+    DrawEnhancementToggles(section, seed);
+    if (section == "section_other") {
+      ImGui::SeparatorText(Tr("enhancements", "section_cosmetic"));
+      DrawCosmeticSection(seed);
+      ImGui::SeparatorText(Tr("enhancements", "section_game_mode"));
+      DrawGameModeSection(seed);
+    }
+    ImGui::EndDisabled();
+  }
+
+  // The on/off rows of `section`: the list's entries from the one that opens
+  // it up to the next that opens another.
+  void DrawEnhancementToggles(const std::string_view section, const rando::Options* seed) {
+    bool in_section = false;
     for (const auto& e : EnhancementList()) {
+      if (e.section) {
+        in_section = section == e.section;
+      }
+      if (!in_section) {
+        continue;
+      }
       const auto* entry = rex::cvar::GetFlagInfo(e.cvar);
       if (!entry) {
         continue;
-      }
-      if (e.section) {
-        ImGui::SeparatorText(Tr("enhancements", e.section));
       }
       ImGui::PushID(e.cvar);
       const SeedUse use = seed ? e.seed_use(*seed) : SeedUse::kNone;
@@ -526,9 +553,10 @@ class CuratedSettingsDialog : public rex::ui::ImGuiDialog {
       EnhancementTooltip(Tr("enhancements", (std::string(e.cvar) + "_desc").c_str()), use);
       ImGui::PopID();
     }
+  }
 
+  void DrawCosmeticSection(const rando::Options* seed) {
     const rando::Enhancements current = CurrentEnhancements();
-    ImGui::SeparatorText(Tr("enhancements", "section_cosmetic"));
     ImGui::PushID(kAlchemyVatsCvar);
     const SeedUse vats_use = seed ? AlchemyVatsSeedUse(*seed) : SeedUse::kNone;
     bool shuffle_vats = current.alchemy_vats != 0;
@@ -563,9 +591,10 @@ class CuratedSettingsDialog : public rex::ui::ImGuiDialog {
       }
       ImGui::EndCombo();
     }
+  }
 
-    ImGui::SeparatorText(Tr("enhancements", "section_game_mode"));
-    const rando::GameMode mode = current.game_mode;
+  void DrawGameModeSection(const rando::Options* seed) {
+    const rando::GameMode mode = CurrentEnhancements().game_mode;
     const SeedUse mode_use = seed ? GameModeSeedUse(*seed, mode) : SeedUse::kNone;
     const char* kModeNote = Tr("enhancements", "mode_note");
     ImGui::BeginGroup();
@@ -592,7 +621,6 @@ class CuratedSettingsDialog : public rex::ui::ImGuiDialog {
       EnhancementTooltip(GameModeDescription(mode), mode_use,
                          mode != rando::GameMode::kNormal ? kModeNote : nullptr);
     }
-    ImGui::EndDisabled();
   }
 
   // A short note after a row's label on what the active seed does about it;

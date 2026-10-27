@@ -1,8 +1,10 @@
 // nocturnerecomp: the enhancements page of the game's own settings screen
 // (Help & Options -> Enhancements): every setting of the overlay's
-// Enhancements tab (settings.cpp), as native rows. Same cvars, same order, and
-// like there a change only reaches the game at the title screen (see
-// rando_runtime.h). The intro skips (intro_skips.cpp) follow at the end.
+// Enhancements tabs (settings.cpp), as native rows. Same cvars, same order, one
+// page per tab with Other holding the cosmetic and game mode rows, and like
+// there a change only reaches the game at the title screen (see
+// rando_runtime.h). The intro skips (intro_skips.cpp) follow at the end of
+// Other.
 //
 // Labels are short: a row's label has to fit between the list's left edge and
 // the value arrows, about 20 Latin characters at the list's scale.
@@ -28,7 +30,8 @@ constexpr NativeText kAlchemyVats{"enh_alchemy_vats"};
 constexpr NativeText kWingSmashColor{"enh_wing_smash_color"};
 constexpr NativeText kGameMode{"enh_game_mode"};
 
-// The screen's title, in the stock title's all caps.
+// The Help & Options entry's text, in the stock title's all caps. Each page's
+// own title is its category (enh_title_*).
 constexpr NativeText kTitle{"enhancements_title"};
 
 // enhancements.cpp's kWingSmashColorNames, in its order.
@@ -88,7 +91,8 @@ constexpr OptionRow BoolRow(uint32_t list_row, const char* cvar) {
   };
 }
 
-constexpr OptionRow kRows[] = {
+// One table per page, in the overlay's tab order (settings.cpp).
+constexpr OptionRow kQualityOfLifeRows[] = {
     BoolRow(0, "enh_fast_warps"),
     BoolRow(1, "enh_anti_freeze"),
     BoolRow(2, "enh_remove_clock_statue"),
@@ -96,21 +100,30 @@ constexpr OptionRow kRows[] = {
     BoolRow(4, "enh_death_on_vacation"),
     BoolRow(5, "enh_skip_maria_alchemy"),
     BoolRow(6, "enh_skip_maria_silver_ring"),
-    BoolRow(7, "enh_outer_wall_elevator"),
-    BoolRow(8, "enh_scylla_softlock"),
-    BoolRow(9, "enh_bridge_input"),
-    BoolRow(10, "enh_catacombs_escape"),
-    BoolRow(11, "enh_clock_room_door"),
-    BoolRow(12, "enh_key_items_stay"),
-    BoolRow(13, "enh_demon_card_door"),
-    BoolRow(14, "enh_reverse_library_card"),
-    BoolRow(15, "enh_infinite_items"),
-    BoolRow(16, "enh_free_jewel_of_open"),
-    BoolRow(17, "enh_cheap_duplicator"),
-    BoolRow(18, "enh_map_tracker"),
-    BoolRow(19, "enh_clear_file"),
+};
+
+constexpr OptionRow kFixesRows[] = {
+    BoolRow(0, "enh_outer_wall_elevator"),
+    BoolRow(1, "enh_scylla_softlock"),
+    BoolRow(2, "enh_bridge_input"),
+    BoolRow(3, "enh_catacombs_escape"),
+    BoolRow(4, "enh_clock_room_door"),
+    BoolRow(5, "enh_key_items_stay"),
+    BoolRow(6, "enh_demon_card_door"),
+};
+
+constexpr OptionRow kItemsRows[] = {
+    BoolRow(0, "enh_reverse_library_card"),
+    BoolRow(1, "enh_infinite_items"),
+    BoolRow(2, "enh_free_jewel_of_open"),
+    BoolRow(3, "enh_cheap_duplicator"),
+};
+
+constexpr OptionRow kOtherRows[] = {
+    BoolRow(0, "enh_map_tracker"),
+    BoolRow(1, "enh_clear_file"),
     {
-        .list_row = 20,
+        .list_row = 2,
         .label = kAlchemyVats,
         .value_count = 2,
         .values = kOffOnTexts,
@@ -120,7 +133,7 @@ constexpr OptionRow kRows[] = {
         .cvar = kAlchemyVatsCvar,
     },
     {
-        .list_row = 21,
+        .list_row = 3,
         .label = kWingSmashColor,
         .value_count = static_cast<uint32_t>(std::size(kWingSmashColors)),
         .values = kWingSmashColors,
@@ -130,7 +143,7 @@ constexpr OptionRow kRows[] = {
         .cvar = kWingSmashColorCvar,
     },
     {
-        .list_row = 22,
+        .list_row = 4,
         .label = kGameMode,
         .value_count = static_cast<uint32_t>(std::size(kGameModes)),
         .values = kGameModes,
@@ -139,37 +152,74 @@ constexpr OptionRow kRows[] = {
         .reset = &GetCvarDefault,
         .cvar = kGameModeCvar,
     },
-    // Not on the overlay's tab (intro_skips.cpp). skip_intros takes effect at
+    // Not on the overlay's tabs (intro_skips.cpp). skip_intros takes effect at
     // the next launch, skip_richter at the next new game.
-    BoolRow(23, "skip_intros"),
-    BoolRow(24, "skip_richter"),
+    BoolRow(5, "skip_intros"),
+    BoolRow(6, "skip_richter"),
 };
-
-constexpr uint32_t kRowCount = static_cast<uint32_t>(std::size(kRows));
-
-static_assert(RowsAreWellFormed(kRows, kRowCount, /*owns_all_rows=*/true),
-              "every enhancements row needs its own line, 0 up to the row count");
 
 // What fits on the screen's backdrop: the list starts at y=150, 30 apart, and
 // an eighth row would run into the stone border above the prompt bar.
 constexpr uint32_t kVisibleRows = 7;
 
-constexpr OptionsPage kPage = {
-    .rows = kRows,
-    .row_count = kRowCount,
-    .total_rows = kRowCount,
-    .visible_rows = kVisibleRows,
-    .title = kTitle,
-    .owns_all_rows = true,
+// The glyph name "BTN_LB" in the guest image, and the prompt that goes with it.
+constexpr uint32_t kLeftBumperGlyph = 0x82012F50u;
+constexpr NativeText kChangePagePrompt{"change_page_prompt"};
+
+template <size_t N>
+constexpr OptionsPage MakePage(const OptionRow (&rows)[N], NativeText title) {
+  return {
+      .rows = rows,
+      .row_count = static_cast<uint32_t>(N),
+      .total_rows = static_cast<uint32_t>(N),
+      .visible_rows = kVisibleRows,
+      .title = title,
+      .owns_all_rows = true,
+      .prompt_text = kChangePagePrompt,
+      .prompt_glyph = kLeftBumperGlyph,
+  };
+}
+
+static_assert(RowsAreWellFormed(kQualityOfLifeRows, std::size(kQualityOfLifeRows), true));
+static_assert(RowsAreWellFormed(kFixesRows, std::size(kFixesRows), true));
+static_assert(RowsAreWellFormed(kItemsRows, std::size(kItemsRows), true));
+static_assert(RowsAreWellFormed(kOtherRows, std::size(kOtherRows), true));
+static_assert(std::size(kQualityOfLifeRows) <= kVisibleRows &&
+                  std::size(kFixesRows) <= kVisibleRows && std::size(kItemsRows) <= kVisibleRows &&
+                  std::size(kOtherRows) <= kVisibleRows,
+              "each page fits the screen without scrolling");
+
+// The titles carry < > to hint at the shoulder buttons.
+constexpr OptionsPage kPages[] = {
+    MakePage(kQualityOfLifeRows, NativeText{"enh_title_qol"}),
+    MakePage(kFixesRows, NativeText{"enh_title_fixes"}),
+    MakePage(kItemsRows, NativeText{"enh_title_items"}),
+    MakePage(kOtherRows, NativeText{"enh_title_other"}),
 };
 
 }  // namespace
 
 const OptionsPage& EnhancementsOptionsPage() {
-  // Every bool cvar of the overlay's tab has a row here, then its three
+  // Every bool cvar of the overlay's tabs has a row here, then its three
   // others, then the two intro skips.
-  static_assert(kRowCount == static_cast<uint32_t>(rando::Enhancement::kCount) + 5);
-  return kPage;
+  static_assert(std::size(kQualityOfLifeRows) + std::size(kFixesRows) + std::size(kItemsRows) +
+                    std::size(kOtherRows) ==
+                static_cast<size_t>(rando::Enhancement::kCount) + 5);
+  return kPages[0];
+}
+
+const OptionsPage* NeighbourEnhancementsPage(const OptionsPage& current, int direction) {
+  const auto count = static_cast<int>(std::size(kPages));
+  for (int i = 0; i < count; ++i) {
+    if (&kPages[i] == &current) {
+      return &kPages[((i + (direction > 0 ? 1 : count - 1)) % count)];
+    }
+  }
+  return nullptr;
+}
+
+const char16_t* EnhancementsMenuText() {
+  return kTitle.Get();
 }
 
 }  // namespace nocturne

@@ -114,6 +114,11 @@ struct OptionsPage {
 
   // Y opens the stretch screen, with a prompt for it on the bar.
   bool stretch_prompt = false;
+
+  // A fourth prompt on the bar, after the stock three: its text and the guest
+  // address of its glyph's image name. A null key shows none.
+  NativeText prompt_text;
+  uint32_t prompt_glyph = 0;
 };
 
 // Every row on a unique, in-range line; label-only rows only on stock lines of
@@ -173,7 +178,13 @@ int32_t GetCvarDefault(const OptionRow& row);
 // Writes `cvar` to settings.toml, the same file the overlay saves to.
 void SaveCvar(const char* cvar);
 
-// The enhancements page (native_enhancements.cpp).
-const OptionsPage& EnhancementsOptionsPage();
+// The enhancements pages (native_enhancements.cpp): one per category, the
+// shoulder buttons switching between them on the open screen.
+const OptionsPage& EnhancementsOptionsPage();  // the first
+// The page after (direction > 0) or before `current`, wrapping; null when
+// `current` is not an enhancements page.
+const OptionsPage* NeighbourEnhancementsPage(const OptionsPage& current, int direction);
+// "ENHANCEMENTS", for the Help & Options entries.
+const char16_t* EnhancementsMenuText();
 
 }  // namespace nocturne

@@ -87,7 +87,7 @@ constexpr NativeText kItemDescription{"enhancements_description"};
 // The pause menu's items are in caps, like the screen's title, so they share
 // the enhancements page's.
 const char16_t* PauseItemText() {
-  return EnhancementsOptionsPage().title.Get();
+  return EnhancementsMenuText();
 }
 
 // The lists, once their screens have been built, for the language refresh.
