@@ -22,7 +22,6 @@ namespace nocturne {
 
 namespace {
 
-constexpr const char* kBaseXexName = "default.xex";
 // The title shown is translated; ImGui identifies the window by what follows ##.
 constexpr const char* kWindowTitle = "Randomizer##rando";
 
@@ -68,11 +67,8 @@ void OwnedLabel(std::string_view name, bool owned) {
 
 class RandoMenuDialog : public rex::ui::ImGuiDialog {
  public:
-  RandoMenuDialog(rex::ui::ImGuiDrawer* drawer, std::filesystem::path game_root,
-                  std::filesystem::path user_root)
-      : ImGuiDialog(drawer),
-        game_root_(std::move(game_root)),
-        user_root_(std::move(user_root)) {
+  RandoMenuDialog(rex::ui::ImGuiDrawer* drawer, std::filesystem::path user_root)
+      : ImGuiDialog(drawer), user_root_(std::move(user_root)) {
     LoadOptions();
     SetSeedIfEmpty();
     rex::ui::RegisterBind(
@@ -207,7 +203,7 @@ class RandoMenuDialog : public rex::ui::ImGuiDialog {
       if (ImGui::Button(Tr("randomizer", "randomize"))) {
         CopySeedToOptions();
         SaveOptions();
-        gen.Start(game_root_ / kBaseXexName, user_root_ / "spoilers.txt", options_);
+        gen.Start(GetRandoRuntime().base(), user_root_ / "spoilers.txt", options_);
         applied_ = false;
       }
       ImGui::EndDisabled();
@@ -394,7 +390,6 @@ class RandoMenuDialog : public rex::ui::ImGuiDialog {
 
   void SaveOptions() { rando::SaveOptionsFile(OptionsPath(), options_); }
 
-  std::filesystem::path game_root_;
   std::filesystem::path user_root_;
   rando::Options options_;
   char seed_buf_[256] = {};
@@ -406,10 +401,9 @@ class RandoMenuDialog : public rex::ui::ImGuiDialog {
 RandoMenu::RandoMenu() = default;
 RandoMenu::~RandoMenu() = default;
 
-void RandoMenu::Attach(rex::ui::ImGuiDrawer* drawer, const std::filesystem::path& game_data_root,
-                       const std::filesystem::path& user_data_root) {
+void RandoMenu::Attach(rex::ui::ImGuiDrawer* drawer, const std::filesystem::path& user_data_root) {
   if (drawer && !dialog_) {
-    dialog_ = std::make_unique<RandoMenuDialog>(drawer, game_data_root, user_data_root);
+    dialog_ = std::make_unique<RandoMenuDialog>(drawer, user_data_root);
   }
 }
 

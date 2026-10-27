@@ -909,22 +909,22 @@ def emit_hook(run, t, f, run_original, fwd, funcs, site_index, incoming):
 ACTIVATE_CPP = r"""
 void Init(uint8_t* base) { g_base = base; }
 
-void Activate(uint8_t* base, const std::function<bool(uint32_t)>& patched, Report* report) {
+void Activate(uint8_t* base, const std::function<uint32_t(uint32_t)>& written, Report* report) {
   *report = {};
   for (size_t i = 0; i < kSiteCount; ++i) {
     const SiteInfo& site = kSites[i];
     uint32_t state = 0;
-    if (patched(site.addr)) {
+    if (const uint32_t mask = written(site.addr)) {
+      // Guest memory may not hold the original instruction (the image can
+      // have its code blanked out), so only the written bytes are compared.
       const uint32_t word = REX_LOAD_U32(site.addr);
       for (uint32_t v = 0; v < site.count && !state; ++v) {
         if (site.words[v] == 0) {
-          // The same instruction with a new immediate. With the original
-          // instructions blanked out of the image, only the immediate is there.
-          const uint32_t high = word >> 16;
-          if (high == (site.imm_high & 0xFFFF) || high == 0) {
+          // The same instruction with a new immediate.
+          if (!(mask & 0xFFFF0000) || (word >> 16) == (site.imm_high & 0xFFFF)) {
             state = ((v + 1) << 16) | (word & 0xFFFF);
           }
-        } else if (word == site.words[v] &&
+        } else if ((word & mask) == (site.words[v] & mask) &&
                    (!site.caves[v] || std::memcmp(base + site.cave_addr[v], site.caves[v],
                                                   site.cave_size[v]) == 0)) {
           state = (v + 1) << 16;

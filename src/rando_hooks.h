@@ -25,9 +25,11 @@ struct Report {
 void Init(uint8_t* base);
 
 // Call after writing a world into guest memory, before guest code runs again.
-// `patched(addr)` tells whether the world changes the instruction word at
-// `addr`; each such site runs the patch it holds from now on.
-void Activate(uint8_t* base, const std::function<bool(uint32_t)>& patched, Report* report);
+// `written(addr)` is the mask of the bytes the world writes in the instruction
+// word at `addr` (0xFF000000: the first; 0: none); each such site runs the
+// patch it holds from now on. Bytes the world doesn't write are taken to be
+// the original instruction's, whatever guest memory holds there.
+void Activate(uint8_t* base, const std::function<uint32_t(uint32_t)>& written, Report* report);
 
 // Back to the recompiled instructions everywhere. Call before restoring the
 // base image.

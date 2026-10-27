@@ -16,8 +16,10 @@ namespace nocturne::rando::detail {
 inline constexpr const char* kMemoryXexPath = "<memory>/Rando.xex";
 
 // The buffer XB_Randomize patches, in the layout of the decrypted xex file.
-// Accesses at or past `limit` fail and set MemoryXexOutOfRange.
-void SetMemoryXex(std::vector<uint8_t>* data, size_t limit);
+// Accesses at or past `limit` fail and set MemoryXexOutOfRange. The offset of
+// every byte written is appended to `writes`, if given.
+void SetMemoryXex(std::vector<uint8_t>* data, size_t limit,
+                  std::vector<size_t>* writes = nullptr);
 bool MemoryXexOutOfRange();
 
 // What XB_SaveSpoilers wrote to "spoilers.txt" during the last run.

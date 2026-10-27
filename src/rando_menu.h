@@ -27,10 +27,9 @@ class RandoMenu {
   ~RandoMenu();
 
   // Registers the overlay and its keybind with the ImGui drawer
-  // (OnCreateDialogs). `game_data_root` holds default.xex;
-  // `user_data_root` holds the saved options and the spoiler log.
-  void Attach(rex::ui::ImGuiDrawer* drawer, const std::filesystem::path& game_data_root,
-              const std::filesystem::path& user_data_root);
+  // (OnCreateDialogs). `user_data_root` holds the saved options and the
+  // spoiler log.
+  void Attach(rex::ui::ImGuiDrawer* drawer, const std::filesystem::path& user_data_root);
 
  private:
   std::unique_ptr<RandoMenuDialog> dialog_;

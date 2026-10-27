@@ -50,6 +50,7 @@ struct MemoryFile {
   size_t pos = 0;
   size_t limit = 0;
   bool out_of_range = false;
+  std::vector<size_t>* writes = nullptr;
 };
 
 struct SpoilerFile {
@@ -66,9 +67,10 @@ thread_local uint32_t g_rand_state = 1;
 
 }  // namespace
 
-void SetMemoryXex(std::vector<uint8_t>* data, size_t limit) {
+void SetMemoryXex(std::vector<uint8_t>* data, size_t limit, std::vector<size_t>* writes) {
   g_xex = {};
   g_xex.data = data;
+  g_xex.writes = writes;
   // (No std::min: <windows.h> defines a min macro.)
   g_xex.limit = !data ? 0 : limit < data->size() ? limit : data->size();
 }
@@ -141,6 +143,9 @@ int RandoFputc(int c, std::FILE* f) {
   if (g_xex.pos >= g_xex.limit) {
     g_xex.out_of_range = true;
     return EOF;
+  }
+  if (g_xex.writes) {
+    g_xex.writes->push_back(g_xex.pos);
   }
   (*g_xex.data)[g_xex.pos++] = static_cast<uint8_t>(c);
   return static_cast<unsigned char>(c);

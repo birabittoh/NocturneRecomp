@@ -19,7 +19,6 @@
 #include <random>
 #include <thread>
 
-#include <rex/system/xex_module.h>
 
 #include "rando_core.h"
 #include "xb_rando.h"
@@ -58,15 +57,6 @@ constexpr const char* kNormal1 = "Basic Randomizer.";
 
 uint32_t ReadBE32(const uint8_t* p) {
   return uint32_t(p[0]) << 24 | uint32_t(p[1]) << 16 | uint32_t(p[2]) << 8 | p[3];
-}
-
-bool ReadFile(const std::filesystem::path& path, std::vector<uint8_t>& out) {
-  std::ifstream f(path, std::ios::binary);
-  if (!f) {
-    return false;
-  }
-  out.assign(std::istreambuf_iterator<char>(f), std::istreambuf_iterator<char>());
-  return true;
 }
 
 }  // namespace
@@ -246,8 +236,14 @@ std::string RandomSeedName() {
 
 namespace {
 
-std::shared_ptr<const BaseXex> BuildBaseXex(const std::filesystem::path& path,
-                                            std::string* error) {
+// Upstream's buffer is the decrypted retail default.xex: its 0x4000-byte
+// header, then the image. Its offsets map onto the image up to the end of the
+// retail file's first compressed data block, as kMappedSize says.
+constexpr uint32_t kHeaderSize = 0x4000;
+constexpr uint32_t kMappedSize = 15007744;
+
+std::shared_ptr<const BaseXex> BuildBaseXex(const uint8_t* image, size_t size,
+                                            uint32_t image_base, std::string* error) {
   auto fail = [&](const char* msg) -> std::shared_ptr<const BaseXex> {
     if (error) {
       *error = msg;
@@ -255,77 +251,40 @@ std::shared_ptr<const BaseXex> BuildBaseXex(const std::filesystem::path& path,
     return nullptr;
   };
 
-  std::vector<uint8_t> xex;
-  if (!ReadFile(path, xex) || xex.size() < 24) {
-    return fail("Couldn't read the game's default.xex.");
-  }
-  if (ReadBE32(xex.data()) != 0x58455832) {
-    return fail("Invalid XEX file.");
-  }
-  std::vector<uint8_t> image;
-  if (!rex::runtime::XexModule::ExtractBaseImage(xex.data(), xex.size(), image)) {
-    return fail("Couldn't decrypt default.xex (unsupported encryption or compression).");
-  }
-
-  const uint32_t header_size = ReadBE32(xex.data() + 8);
-  const uint32_t header_count = ReadBE32(xex.data() + 20);
-  constexpr uint32_t kFileFormatInfoKey = 0x3FF;
-  constexpr uint32_t kImageBaseKey = 0x10201;
-  uint32_t info = 0, image_base = 0;
-  for (uint32_t i = 0; i < header_count && 24 + 8 * i + 8 <= header_size; ++i) {
-    const uint32_t key = ReadBE32(xex.data() + 24 + 8 * i);
-    const uint32_t value = ReadBE32(xex.data() + 24 + 8 * i + 4);
-    if (key == kFileFormatInfoKey) {
-      info = value;
-    } else if (key == kImageBaseKey) {
-      image_base = value;
-    }
-  }
-  if (header_size > xex.size() || !info || info + 8 > header_size || !image_base) {
-    return fail("default.xex has no file format info or image base header.");
-  }
-
-  // info: u32 size, u16 encryption, u16 compression (0 none, 1 basic); basic
-  // is followed by (data_size, zero_size) blocks. Basic compression drops the
-  // zero runs between data blocks, so file and image offsets agree only up to
-  // the end of the first block.
-  const uint32_t info_size = ReadBE32(xex.data() + info);
-  const uint32_t compression = (uint32_t(xex[info + 6]) << 8) | xex[info + 7];
-  uint32_t mapped = 0;
-  if (compression == 0) {
-    mapped = static_cast<uint32_t>(image.size());
-  } else if (compression == 1 && info_size >= 16) {
-    mapped = ReadBE32(xex.data() + info + 8);
-  } else {
-    return fail("default.xex uses an unsupported compression type.");
-  }
-
   auto base = std::make_shared<BaseXex>();
-  base->header_size = header_size;
+  base->header_size = kHeaderSize;
   base->image_base = image_base;
-  base->mapped_end = header_size + std::min<uint32_t>(mapped, static_cast<uint32_t>(image.size()));
-  base->file.reserve(header_size + image.size());
-  base->file.assign(xex.begin(), xex.begin() + header_size);
-  base->file.insert(base->file.end(), image.begin(), image.end());
+  base->mapped_end = kHeaderSize + std::min<uint32_t>(kMappedSize, static_cast<uint32_t>(size));
+  base->file.reserve(kHeaderSize + size);
+  base->file.resize(kHeaderSize);
+  base->file.insert(base->file.end(), image, image + size);
 
   // Upstream's VerifyXEX, minus the word at 0x112: that is a security-header
   // field xextool rewrites when it decrypts. The PE timestamp identifies the
   // build on its own.
   const auto& f = base->file;
   if (f.size() < 0x4114 || ReadBE32(f.data() + 0x4000) != 0x4D5A9000) {
-    return fail("default.xex didn't decrypt to a PE image.");
+    return fail("The game image isn't a PE image.");
   }
   if (ReadBE32(f.data() + 0x4110) != 0x5DAEED45) {
-    return fail("This isn't the unpatched USA XBLA default.xex the randomizer supports.");
+    return fail("This isn't the USA XBLA game the randomizer supports.");
   }
   return base;
 }
 
-PatchSet DiffBase(const BaseXex& base, const std::vector<uint8_t>& patched) {
+// `writes`: the file offsets the core wrote, from SetMemoryXex.
+PatchSet DiffBase(const BaseXex& base, const std::vector<uint8_t>& patched,
+                  const std::vector<size_t>& writes) {
   // Changed bytes closer than this are kept in one run; the unchanged bytes
   // between them are written back as they were.
   constexpr size_t kMergeGap = 8;
   PatchSet set;
+  for (size_t off : writes) {
+    if (off >= base.header_size) {
+      const uint32_t guest = base.GuestOf(off);
+      set.writes[guest & ~3u] |= 0xFF000000u >> ((guest & 3) * 8);
+    }
+  }
   const size_t end = std::min(base.file.size(), patched.size());
   for (size_t off = base.header_size; off < end;) {
     if (base.file[off] == patched[off]) {
@@ -356,16 +315,9 @@ std::mutex g_core_mutex;
 
 }  // namespace
 
-std::shared_ptr<const BaseXex> LoadBaseXex(const std::filesystem::path& xex, std::string* error) {
-  static std::mutex mutex;
-  static std::filesystem::path cached_path;
-  static std::shared_ptr<const BaseXex> cached;
-  std::lock_guard lock(mutex);
-  if (!cached || cached_path != xex) {
-    cached = BuildBaseXex(xex, error);
-    cached_path = xex;
-  }
-  return cached;
+std::shared_ptr<const BaseXex> MakeBaseXex(const uint8_t* image, size_t size, uint32_t image_base,
+                                           std::string* error) {
+  return BuildBaseXex(image, size, image_base, error);
 }
 
 size_t PatchSet::ByteCount() const {
@@ -398,22 +350,18 @@ uint64_t PatchSet::Hash() const {
   return h;
 }
 
-std::shared_ptr<const Result> Generate(const std::filesystem::path& base_xex,
-                                       const Options& o, std::string* error) {
+std::shared_ptr<const Result> Generate(const BaseXex& base, const Options& o,
+                                       std::string* error) {
   auto fail = [&](const char* msg) -> std::shared_ptr<const Result> {
     if (error) {
       *error = msg;
     }
     return nullptr;
   };
-  auto base = LoadBaseXex(base_xex, error);
-  if (!base) {
-    return nullptr;
-  }
 
   std::lock_guard core_lock(g_core_mutex);
   auto& gen = Generator::Get();
-  gen.Append("default.xex loaded and decrypted.");
+  gen.Append("Game image loaded.");
 
   // What SyncGUI_OptionsToXB does: every XB_ option the core reads.
   const auto& presets = Presets();
@@ -442,8 +390,9 @@ std::shared_ptr<const Result> Generate(const std::filesystem::path& base_xex,
     seed += uint32_t(static_cast<int8_t>(sSeedName[i])) << ((i & 3) * 8);
   }
 
-  std::vector<uint8_t> patched = base->file;
-  detail::SetMemoryXex(&patched, base->mapped_end);
+  std::vector<uint8_t> patched = base.file;
+  std::vector<size_t> writes;
+  detail::SetMemoryXex(&patched, base.mapped_end, &writes);
   detail::SeedGeneratorRng(seed);
   XB_AbortSignal = 0;
   XB_GeneratedSeedComplexity = 0;
@@ -462,12 +411,12 @@ std::shared_ptr<const Result> Generate(const std::filesystem::path& base_xex,
   if (detail::MemoryXexOutOfRange()) {
     // A write the guest-address mapping doesn't cover; applying the rest
     // would leave a half-patched seed.
-    return fail("The randomizer wrote outside the mapped part of default.xex.");
+    return fail("The randomizer wrote outside the mapped part of the game image.");
   }
 
   auto result = std::make_shared<Result>();
   result->options = o;
-  result->patches = DiffBase(*base, patched);
+  result->patches = DiffBase(base, patched, writes);
   result->spoilers = std::move(spoilers);
   result->complexity = XB_GeneratedSeedComplexity;
   return result;
@@ -477,6 +426,7 @@ std::shared_ptr<const PatchSet> ComposeWorld(const BaseXex& base, const PatchSet
                                              const Enhancements& enhancements,
                                              std::string* error) {
   std::vector<uint8_t> patched = base.file;
+  std::vector<size_t> writes;
   if (seed) {
     for (const auto& run : seed->runs) {
       std::copy(run.bytes.begin(), run.bytes.end(),
@@ -485,18 +435,24 @@ std::shared_ptr<const PatchSet> ComposeWorld(const BaseXex& base, const PatchSet
   }
   if (!enhancements.Empty()) {
     std::lock_guard core_lock(g_core_mutex);
-    detail::SetMemoryXex(&patched, base.mapped_end);
+    detail::SetMemoryXex(&patched, base.mapped_end, &writes);
     detail::WriteEnhancements(enhancements);
     const bool out_of_range = detail::MemoryXexOutOfRange();
     detail::SetMemoryXex(nullptr, 0);
     if (out_of_range) {
       if (error) {
-        *error = "An enhancement wrote outside the mapped part of default.xex.";
+        *error = "An enhancement wrote outside the mapped part of the game image.";
       }
       return nullptr;
     }
   }
-  return std::make_shared<PatchSet>(DiffBase(base, patched));
+  auto world = std::make_shared<PatchSet>(DiffBase(base, patched, writes));
+  if (seed) {
+    for (const auto& [addr, mask] : seed->writes) {
+      world->writes[addr] |= mask;
+    }
+  }
+  return world;
 }
 
 Generator& Generator::Get() {
@@ -540,8 +496,11 @@ std::shared_ptr<const Result> Generator::result() const {
   return result_;
 }
 
-bool Generator::Start(const std::filesystem::path& base_xex, const std::filesystem::path& spoilers,
+bool Generator::Start(std::shared_ptr<const BaseXex> base, const std::filesystem::path& spoilers,
                       const Options& options) {
+  if (!base) {
+    return false;
+  }
   Status expected = status_;
   if (expected == Status::kRunning) {
     return false;
@@ -549,13 +508,15 @@ bool Generator::Start(const std::filesystem::path& base_xex, const std::filesyst
   status_ = Status::kRunning;
   XB_AbortSignal = 0;
   ClearLog();
-  std::thread([this, base_xex, spoilers, options] { Run(base_xex, spoilers, options); }).detach();
+  std::thread([this, base = std::move(base), spoilers, options] {
+    Run(base, spoilers, options);
+  }).detach();
   return true;
 }
 
-void Generator::Run(std::filesystem::path base_xex, std::filesystem::path spoilers, Options o) {
+void Generator::Run(std::shared_ptr<const BaseXex> base, std::filesystem::path spoilers, Options o) {
   std::string err;
-  auto result = Generate(base_xex, o, &err);
+  auto result = Generate(*base, o, &err);
   if (!result) {
     Fail(XB_AbortSignal ? Status::kAborted : Status::kFailed, err.c_str());
     return;

@@ -61,9 +61,13 @@ namespace nocturne {
 class RandoRuntime {
  public:
   // Call from OnPostLoadXexImage: the module is mapped and no guest code has
-  // run. Registers the guest tick and applies the saved active seed, if any.
-  void Bind(rex::Runtime* runtime, const std::filesystem::path& game_data_root,
-            const std::filesystem::path& user_data_root);
+  // run. Keeps a copy of the image as the randomizer's base, registers the
+  // guest tick and applies the saved active seed, if any.
+  void Bind(rex::Runtime* runtime, const std::filesystem::path& user_data_root);
+
+  // The image as loaded, which seeds are generated from; null when the
+  // randomizer isn't supported.
+  std::shared_ptr<const rando::BaseXex> base() const { return base_; }
 
   // Overlay requests, performed by the next guest tick. Rejected unless the
   // game is at the title / main menu.
@@ -125,10 +129,9 @@ class RandoRuntime {
   std::filesystem::path SlotPath(const std::string& slot) const;
 
   rex::Runtime* runtime_ = nullptr;
-  std::filesystem::path base_xex_;
   std::filesystem::path active_path_;
   std::filesystem::path slots_dir_;
-  std::shared_ptr<const rando::BaseXex> base_;
+  std::shared_ptr<const rando::BaseXex> base_;  // set by Bind, then constant
 
   std::mutex apply_mutex_;
   std::vector<std::shared_ptr<const rando::Result>> seed_cache_;  // under apply_mutex_

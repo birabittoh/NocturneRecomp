@@ -6,13 +6,15 @@
 #include <cinttypes>
 #include <cstring>
 #include <fstream>
-#include <set>
+#include <map>
 #include <utility>
 #include <vector>
 
 #include <rex/logging.h>
 #include <rex/runtime.h>
+#include <rex/system/kernel_state.h>
 #include <rex/system/mod_registry.h>
+#include <rex/system/user_module.h>
 #include <rex/system/xmemory.h>
 
 #include "generated/nocturnerecomp_init.h"
@@ -59,32 +61,33 @@ std::string HashText(uint64_t hash) {
 
 }  // namespace
 
-void RandoRuntime::Bind(rex::Runtime* runtime, const std::filesystem::path& game_data_root,
-                        const std::filesystem::path& user_data_root) {
+void RandoRuntime::Bind(rex::Runtime* runtime, const std::filesystem::path& user_data_root) {
   runtime_ = runtime;
-  base_xex_ = game_data_root / "default.xex";
   active_path_ = user_data_root / "rando_active.txt";
   slots_dir_ = user_data_root / "rando_slots";
   g_membase = runtime->memory()->virtual_membase();
   rando_hooks::Init(g_membase);
 
-  std::error_code ec;
+  // The randomizer works on the image as it was loaded, wherever it came
+  // from. Nothing has run yet to change it, so this is the base every world
+  // is diffed against.
+  std::string base_error = "The game module isn't loaded.";
+  const auto module = REX_KERNEL_STATE()->GetExecutableModule();
+  const auto* xex = module ? module->xex_module() : nullptr;
+  if (xex) {
+    base_ = rando::MakeBaseXex(runtime->memory()->TranslateVirtual<const uint8_t*>(
+                                   xex->base_address()),
+                               xex->image_size(), xex->base_address(), &base_error);
+  }
   {
     std::lock_guard lock(mutex_);
-    state_.supported = true;
-    if (std::filesystem::exists(game_data_root / "default.xexp", ec)) {
-      // UserModule::LoadFromFile applies a staged title update as a delta
-      // patch; the randomizer's offsets are for the unpatched image.
-      state_.supported = false;
-      state_.unsupported_reason =
-          "A title update is staged next to default.xex. The randomizer only supports the "
-          "unpatched game.";
-    } else if (!std::filesystem::exists(base_xex_, ec)) {
-      state_.supported = false;
-      state_.unsupported_reason = "default.xex wasn't found in the game folder.";
+    state_.supported = base_ != nullptr;
+    if (!base_) {
+      state_.unsupported_reason = base_error;
     }
   }
 
+  std::error_code ec;
   runtime->mod_registry()->RegisterTick([this] { Tick(); });
 
   // The New Game seed from the last run: also the world a save made before
@@ -154,7 +157,7 @@ std::shared_ptr<const rando::Result> RandoRuntime::LoadSeedFile(const std::files
     }
   }
   std::string gen_error;
-  auto seed = rando::Generate(base_xex_, options, &gen_error);
+  auto seed = rando::Generate(*base_, options, &gen_error);
   if (!seed) {
     *error = "Couldn't regenerate seed \"" + options.seed + "\": " + gen_error;
     return nullptr;
@@ -379,16 +382,14 @@ bool RandoRuntime::Apply(std::shared_ptr<const rando::Result> seed, std::string*
   const rando::Enhancements enhancements = CurrentEnhancements();
   const rando::Enhancements written =
       EffectiveEnhancements(enhancements, seed ? &seed->options : nullptr);
-  if (!seed && (written.Empty() || !state().supported)) {
+  if (!seed && (written.Empty() || !base_)) {
     // Enhancements need the image the randomizer's offsets are for.
     Revert();
     return true;
   }
   if (!base_) {
-    base_ = rando::LoadBaseXex(base_xex_, error);
-    if (!base_) {
-      return false;
-    }
+    *error = state().unsupported_reason;
+    return false;
   }
   std::shared_ptr<const rando::PatchSet> patches;
   if (written.Empty()) {
@@ -423,29 +424,31 @@ bool RandoRuntime::Apply(std::shared_ptr<const rando::Result> seed, std::string*
     WriteGuest(memory, run.guest, run.bytes.data(), run.bytes.size());
   }
 
-  // Code: point the hooks at the patches each site now holds. Changed
+  // Code: point the hooks at the patches each site now holds. Patched
   // instructions no hook covers stay inert.
   const uint32_t code_start = REX_CODE_BASE;
   const uint32_t code_end = REX_CODE_BASE + REX_CODE_SIZE;
-  std::set<uint32_t> changed_words;
-  for (const auto& run : patches->runs) {
-    for (size_t i = 0; i < run.bytes.size(); ++i) {
-      const uint32_t a = run.guest + static_cast<uint32_t>(i);
-      if (run.bytes[i] != run.base[i] && a >= code_start && a < code_end) {
-        changed_words.insert(a & ~3u);
-      }
+  std::map<uint32_t, uint32_t> code_writes;
+  for (const auto& [addr, mask] : patches->writes) {
+    if (addr >= code_start && addr < code_end) {
+      code_writes.emplace(addr, mask);
     }
   }
   rando_hooks::Report report;
   rando_hooks::Activate(
-      g_membase, [&](uint32_t addr) { return changed_words.count(addr) != 0; }, &report);
+      g_membase,
+      [&](uint32_t addr) {
+        const auto it = code_writes.find(addr);
+        return it == code_writes.end() ? 0u : it->second;
+      },
+      &report);
   size_t inactive = report.unknown.size();
   for (uint32_t addr : report.unknown) {
     REXLOG_WARN("[rando] the instruction at {:08X} holds {:08X}, a patch its hook doesn't know "
                 "-- this change stays inactive",
                 addr, ReadBE32(memory->TranslateVirtual<const uint8_t*>(addr)));
   }
-  for (uint32_t addr : changed_words) {
+  for (const auto& [addr, mask] : code_writes) {
     if (!rando_hooks::IsSite(addr)) {
       REXLOG_WARN("[rando] the instruction at {:08X} changed to {:08X}, but no hook covers it "
                   "-- this change stays inactive",

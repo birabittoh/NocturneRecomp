@@ -119,7 +119,7 @@ class NocturnerecompApp : public rex::ReXApp {
   // randomizer seed, so a randomized save loads into its own world. See
   // src/rando_runtime.h.
   void OnPostLoadXexImage() override {
-    nocturne::GetRandoRuntime().Bind(runtime(), game_data_root(), user_data_root());
+    nocturne::GetRandoRuntime().Bind(runtime(), user_data_root());
     // The start screen animates the save icons from the image's set.
     nocturne::CacheSaveIcons(user_data_root(), [](uint32_t address) {
       return REX_KERNEL_STATE()->memory()->TranslateVirtual<const uint8_t*>(address);
@@ -365,7 +365,7 @@ class NocturnerecompApp : public rex::ReXApp {
     nocturne::GetAccentColor().AttachWatcher(drawer);
     nocturne::GetFastForward().AttachWatcher(drawer);
     nocturne::GetPlayerInspector().Attach(drawer);
-    nocturne::GetRandoMenu().Attach(drawer, game_data_root(), user_data_root());
+    nocturne::GetRandoMenu().Attach(drawer, user_data_root());
   }
 
   // Replace the SDK's default pixel font with a serif face that fits the
