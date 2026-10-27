@@ -1,0 +1,787 @@
+# Randomizer code patches: one hook per patched instruction (or run of
+# instructions). Written by scripts/gen-rando-hooks.py --write-toml; see
+# src/rando_hooks.h.
+
+[[midasm_hook]]
+address = 0x8223AD30
+name = "RandoSite_8223AD30"
+registers = ["r3"]
+jump_address_on_true = 0x8223AD34
+
+[[midasm_hook]]
+address = 0x8223AD34
+name = "RandoSite_8223AD34"
+registers = ["r3"]
+jump_address_on_true = 0x8223AD38
+
+[[midasm_hook]]
+address = 0x8223DC14
+name = "RandoSite_8223DC14"
+registers = ["r3"]
+return_on_true = true
+
+[[midasm_hook]]
+address = 0x8223FC80
+name = "RandoSite_8223FC80"
+registers = ["r3"]
+jump_address_on_true = 0x8223FC84
+
+[[midasm_hook]]
+address = 0x8224035C
+name = "RandoSite_8224035C"
+registers = ["r3"]
+jump_address_on_true = 0x82240360
+
+[[midasm_hook]]
+address = 0x8224E3B4
+name = "RandoSite_8224E3B4"
+registers = ["r3"]
+jump_address_on_true = 0x8224E3B8
+
+[[midasm_hook]]
+address = 0x8225AF1C
+name = "RandoSite_8225AF1C"
+registers = ["r3"]
+jump_address_on_true = 0x8225AF20
+
+[[midasm_hook]]
+address = 0x8225AF30
+name = "RandoSite_8225AF30"
+registers = ["r3"]
+jump_address_on_true = 0x8225AF34
+
+[[midasm_hook]]
+address = 0x8225AF48
+name = "RandoSite_8225AF48"
+registers = ["r3"]
+jump_address_on_true = 0x8225AF4C
+
+[[midasm_hook]]
+address = 0x8225AF5C
+name = "RandoSite_8225AF5C"
+registers = ["r3"]
+jump_address_on_true = 0x8225AF60
+
+[[midasm_hook]]
+address = 0x8225AF6C
+name = "RandoSite_8225AF6C"
+registers = ["r3"]
+jump_address_on_true = 0x8225AF70
+
+[[midasm_hook]]
+address = 0x8225AF70
+name = "RandoSite_8225AF70"
+registers = ["r3"]
+jump_address_on_true = 0x8225AF74
+
+[[midasm_hook]]
+address = 0x8225AF84
+name = "RandoSite_8225AF84"
+registers = ["r3"]
+jump_address_on_true = 0x8225AF88
+
+[[midasm_hook]]
+address = 0x8225AF94
+name = "RandoSite_8225AF94"
+registers = ["r3"]
+jump_address_on_true = 0x8225AF98
+
+[[midasm_hook]]
+address = 0x8225AF9C
+name = "RandoSite_8225AF9C"
+registers = ["r3"]
+jump_address_on_true = 0x8225AFA0
+
+[[midasm_hook]]
+address = 0x8225AFB0
+name = "RandoSite_8225AFB0"
+registers = ["r3"]
+jump_address_on_true = 0x8225AFB4
+
+[[midasm_hook]]
+address = 0x8225AFC0
+name = "RandoSite_8225AFC0"
+registers = ["r3"]
+jump_address_on_true = 0x8225AFC4
+
+[[midasm_hook]]
+address = 0x8225AFC8
+name = "RandoSite_8225AFC8"
+registers = ["r3"]
+jump_address_on_true = 0x8225AFCC
+
+[[midasm_hook]]
+address = 0x8225AFDC
+name = "RandoSite_8225AFDC"
+registers = ["r3"]
+jump_address_on_true = 0x8225AFE0
+
+[[midasm_hook]]
+address = 0x8225AFEC
+name = "RandoSite_8225AFEC"
+registers = ["r3"]
+jump_address_on_true = 0x8225AFF0
+
+[[midasm_hook]]
+address = 0x8225AFF4
+name = "RandoSite_8225AFF4"
+registers = ["r3"]
+jump_address_on_true = 0x8225AFF8
+
+[[midasm_hook]]
+address = 0x8225B00C
+name = "RandoSite_8225B00C"
+registers = ["r3"]
+jump_address_on_true = 0x8225B010
+
+[[midasm_hook]]
+address = 0x8225B01C
+name = "RandoSite_8225B01C"
+registers = ["r3"]
+jump_address_on_true = 0x8225B020
+
+[[midasm_hook]]
+address = 0x8225B024
+name = "RandoSite_8225B024"
+registers = ["r3"]
+jump_address_on_true = 0x8225B028
+
+[[midasm_hook]]
+address = 0x8225B04C
+name = "RandoSite_8225B04C"
+registers = ["r3"]
+jump_address_on_true = 0x8225B050
+
+[[midasm_hook]]
+address = 0x8225B070
+name = "RandoSite_8225B070"
+registers = ["r3"]
+jump_address_on_true = 0x8225B074
+
+[[midasm_hook]]
+address = 0x8225B080
+name = "RandoSite_8225B080"
+registers = ["r3"]
+jump_address_on_true = 0x8225B084
+
+[[midasm_hook]]
+address = 0x8225B200
+name = "RandoSite_8225B200"
+registers = ["r3"]
+jump_address_on_true = 0x8225B204
+
+[[midasm_hook]]
+address = 0x8225B204
+name = "RandoSite_8225B204"
+registers = ["r3"]
+jump_address_on_true = 0x8225B208
+
+[[midasm_hook]]
+address = 0x8225B208
+name = "RandoSite_8225B208"
+registers = ["r3"]
+jump_address_on_true = 0x8225B20C
+
+[[midasm_hook]]
+address = 0x8225B20C
+name = "RandoSite_8225B20C"
+registers = ["r3"]
+jump_address_on_true = 0x8225B210
+
+[[midasm_hook]]
+address = 0x8225B210
+name = "RandoSite_8225B210"
+registers = ["r3"]
+jump_address_on_true = 0x8225B214
+
+[[midasm_hook]]
+address = 0x8225B214
+name = "RandoSite_8225B214"
+registers = ["r3"]
+jump_address_on_true = 0x8225B218
+
+[[midasm_hook]]
+address = 0x8225B218
+name = "RandoSite_8225B218"
+registers = ["r3"]
+jump_address_on_true = 0x8225B21C
+
+[[midasm_hook]]
+address = 0x8225B21C
+name = "RandoSite_8225B21C"
+registers = ["r3"]
+jump_address_on_true = 0x8225B220
+
+[[midasm_hook]]
+address = 0x8225B220
+name = "RandoSite_8225B220"
+registers = ["r3"]
+jump_address_on_true = 0x8225B224
+
+[[midasm_hook]]
+address = 0x8225B2A4
+name = "RandoSite_8225B2A4"
+registers = ["r3"]
+jump_address_on_true = 0x8225B2A8
+
+[[midasm_hook]]
+address = 0x8225B2A8
+name = "RandoSite_8225B2A8"
+registers = ["r3"]
+jump_address_on_true = 0x8225B2AC
+
+[[midasm_hook]]
+address = 0x8225B2AC
+name = "RandoSite_8225B2AC"
+registers = ["r3"]
+jump_address_on_true = 0x8225B2B0
+
+[[midasm_hook]]
+address = 0x8225B2B0
+name = "RandoSite_8225B2B0"
+registers = ["r3"]
+jump_address_on_true = 0x8225B2B4
+
+[[midasm_hook]]
+address = 0x8225B2B8
+name = "RandoSite_8225B2B8"
+registers = ["r3"]
+jump_address_on_true = 0x8225B2BC
+
+[[midasm_hook]]
+address = 0x8225B2FC
+name = "RandoSite_8225B2FC"
+registers = ["r3"]
+jump_address_on_true = 0x8225B300
+
+[[midasm_hook]]
+address = 0x8225B304
+name = "RandoSite_8225B304"
+registers = ["r3"]
+jump_address_on_true = 0x8225B308
+
+[[midasm_hook]]
+address = 0x8225B3E4
+name = "RandoSite_8225B3E4"
+registers = ["r3"]
+jump_address_on_true = 0x8225B3E8
+
+[[midasm_hook]]
+address = 0x8225B400
+name = "RandoSite_8225B400"
+registers = ["r3"]
+jump_address_on_true = 0x8225B404
+
+[[midasm_hook]]
+address = 0x8225B40C
+name = "RandoSite_8225B40C"
+registers = ["r3"]
+jump_address_on_true = 0x8225B410
+
+[[midasm_hook]]
+address = 0x8225B418
+name = "RandoSite_8225B418"
+registers = ["r3"]
+jump_address_on_true = 0x8225B41C
+
+[[midasm_hook]]
+address = 0x8225B424
+name = "RandoSite_8225B424"
+registers = ["r3"]
+jump_address_on_true = 0x8225B428
+
+[[midasm_hook]]
+address = 0x8225B490
+name = "RandoSite_8225B490"
+registers = ["r3"]
+jump_address_on_true = 0x8225B494
+
+[[midasm_hook]]
+address = 0x8225B498
+name = "RandoSite_8225B498"
+registers = ["r3"]
+jump_address_on_true = 0x8225B49C
+
+[[midasm_hook]]
+address = 0x8225B4A0
+name = "RandoSite_8225B4A0"
+registers = ["r3"]
+jump_address_on_true = 0x8225B4A4
+
+[[midasm_hook]]
+address = 0x8225B4A8
+name = "RandoSite_8225B4A8"
+registers = ["r3"]
+jump_address_on_true = 0x8225B4AC
+
+[[midasm_hook]]
+address = 0x8225B4B0
+name = "RandoSite_8225B4B0"
+registers = ["r3"]
+jump_address_on_true = 0x8225B4B4
+
+[[midasm_hook]]
+address = 0x8225B4B8
+name = "RandoSite_8225B4B8"
+registers = ["r3"]
+jump_address_on_true = 0x8225B4BC
+
+[[midasm_hook]]
+address = 0x8225B8F4
+name = "RandoSite_8225B8F4"
+registers = ["r3"]
+jump_address_on_true = 0x8225B8F8
+
+[[midasm_hook]]
+address = 0x8225B934
+name = "RandoSite_8225B934"
+registers = ["r3"]
+jump_address_on_true = 0x8225B938
+
+[[midasm_hook]]
+address = 0x8225B93C
+name = "RandoSite_8225B93C"
+registers = ["r3"]
+jump_address_on_true = 0x8225B940
+
+[[midasm_hook]]
+address = 0x8225BAC8
+name = "RandoSite_8225BAC8"
+registers = ["r3"]
+jump_address_on_true = 0x8225BACC
+
+[[midasm_hook]]
+address = 0x8225BAF8
+name = "RandoSite_8225BAF8"
+registers = ["r3"]
+jump_address_on_true = 0x8225BAFC
+
+[[midasm_hook]]
+address = 0x8225BB58
+name = "RandoSite_8225BB58"
+registers = ["r3"]
+jump_address_on_true = 0x8225BB5C
+
+[[midasm_hook]]
+address = 0x822AB3FC
+name = "RandoSite_822AB3FC"
+registers = ["r3"]
+jump_address_on_true = 0x822AB400
+
+[[midasm_hook]]
+address = 0x822AB514
+name = "RandoSite_822AB514"
+registers = ["r3"]
+jump_address_on_true = 0x822AB518
+
+[[midasm_hook]]
+address = 0x822AB540
+name = "RandoSite_822AB540"
+registers = ["r3"]
+jump_address_on_true = 0x822AB544
+
+[[midasm_hook]]
+address = 0x822AB58C
+name = "RandoSite_822AB58C"
+registers = ["r3"]
+jump_address_on_true = 0x822AB590
+
+[[midasm_hook]]
+address = 0x822ABAD8
+name = "RandoSite_822ABAD8"
+registers = ["r3"]
+jump_address_on_true = 0x822ABADC
+
+[[midasm_hook]]
+address = 0x822C3D64
+name = "RandoSite_822C3D64"
+registers = ["r3"]
+jump_address_on_true = 0x822C3D68
+
+[[midasm_hook]]
+address = 0x822CC6F0
+name = "RandoSite_822CC6F0"
+registers = ["r3"]
+jump_address_on_true = 0x822CC6F4
+
+[[midasm_hook]]
+address = 0x822CCAAC
+name = "RandoSite_822CCAAC"
+registers = ["r3"]
+jump_address_on_true = 0x822CCAB0
+
+[[midasm_hook]]
+address = 0x822CCBC4
+name = "RandoSite_822CCBC4"
+registers = ["r3"]
+jump_address_on_true = 0x822CCBC8
+
+[[midasm_hook]]
+address = 0x822CD988
+name = "RandoSite_822CD988"
+registers = ["r3"]
+jump_address_on_true = 0x822CD98C
+
+[[midasm_hook]]
+address = 0x822CDAB8
+name = "RandoSite_822CDAB8"
+registers = ["r3"]
+jump_address_on_true = 0x822CDABC
+
+[[midasm_hook]]
+address = 0x822CDB2C
+name = "RandoSite_822CDB2C"
+registers = ["r3"]
+return_on_true = true
+
+[[midasm_hook]]
+address = 0x822CE164
+name = "RandoSite_822CE164"
+registers = ["r3"]
+jump_address_on_true = 0x822CE168
+
+[[midasm_hook]]
+address = 0x822CE198
+name = "RandoSite_822CE198"
+registers = ["r3"]
+jump_address_on_true = 0x822CE19C
+
+[[midasm_hook]]
+address = 0x822D75F0
+name = "RandoSite_822D75F0"
+registers = ["r3"]
+jump_address_on_true = 0x822D75F4
+
+[[midasm_hook]]
+address = 0x822D75F4
+name = "RandoSite_822D75F4"
+registers = ["r3"]
+jump_address_on_true = 0x822D75F8
+
+[[midasm_hook]]
+address = 0x822E4FB8
+name = "RandoSite_822E4FB8"
+registers = ["r3"]
+jump_address_on_true = 0x822E4FBC
+
+[[midasm_hook]]
+address = 0x822E8140
+name = "RandoSite_822E8140"
+registers = ["r3"]
+jump_address_on_true = 0x822E8144
+
+[[midasm_hook]]
+address = 0x8230A84C
+name = "RandoSite_8230A84C"
+registers = ["r3"]
+jump_address_on_true = 0x8230A850
+
+[[midasm_hook]]
+address = 0x8230A868
+name = "RandoSite_8230A868"
+registers = ["r3"]
+jump_address_on_true = 0x8230A89C
+
+[[midasm_hook]]
+address = 0x8231223C
+name = "RandoSite_8231223C"
+registers = ["r3"]
+jump_address_on_true = 0x82312240
+
+[[midasm_hook]]
+address = 0x823123BC
+name = "RandoSite_823123BC"
+registers = ["r3"]
+jump_address_on_true = 0x823123F4
+jump_address_on_false = 0x82312B6C
+
+[[midasm_hook]]
+address = 0x82314EEC
+name = "RandoSite_82314EEC"
+registers = ["r3"]
+jump_address_on_true = 0x82314EF0
+
+[[midasm_hook]]
+address = 0x8231D158
+name = "RandoSite_8231D158"
+registers = ["r3"]
+jump_address_on_true = 0x8231D15C
+
+[[midasm_hook]]
+address = 0x8231D160
+name = "RandoSite_8231D160"
+registers = ["r3"]
+jump_address_on_true = 0x8231D164
+
+[[midasm_hook]]
+address = 0x8231D170
+name = "RandoSite_8231D170"
+registers = ["r3"]
+jump_address_on_true = 0x8231D174
+
+[[midasm_hook]]
+address = 0x8234372C
+name = "RandoSite_8234372C"
+registers = ["r3"]
+jump_address_on_true = 0x82343730
+
+[[midasm_hook]]
+address = 0x82343AD0
+name = "RandoSite_82343AD0"
+registers = ["r3"]
+jump_address_on_true = 0x82343AD4
+
+[[midasm_hook]]
+address = 0x8234891C
+name = "RandoSite_8234891C"
+registers = ["r3"]
+jump_address_on_true = 0x82348970
+jump_address_on_false = 0x82348920
+
+[[midasm_hook]]
+address = 0x82348920
+name = "RandoSite_82348920"
+registers = ["r3"]
+jump_address_on_true = 0x82348924
+jump_address_on_false = 0x8234893C
+
+[[midasm_hook]]
+address = 0x8234D094
+name = "RandoSite_8234D094"
+registers = ["r3"]
+jump_address_on_true = 0x8234D098
+
+[[midasm_hook]]
+address = 0x8234D0A4
+name = "RandoSite_8234D0A4"
+registers = ["r3"]
+jump_address_on_true = 0x8234D0A8
+
+[[midasm_hook]]
+address = 0x8234E374
+name = "RandoSite_8234E374"
+registers = ["r3"]
+jump_address_on_true = 0x8234E378
+
+[[midasm_hook]]
+address = 0x8234E37C
+name = "RandoSite_8234E37C"
+registers = ["r3"]
+jump_address_on_true = 0x8234E380
+
+[[midasm_hook]]
+address = 0x82395914
+name = "RandoSite_82395914"
+registers = ["r3"]
+jump_address_on_true = 0x82395918
+
+[[midasm_hook]]
+address = 0x82395948
+name = "RandoSite_82395948"
+registers = ["r3"]
+jump_address_on_true = 0x8239594C
+
+[[midasm_hook]]
+address = 0x823ABA54
+name = "RandoSite_823ABA54"
+registers = ["r3"]
+jump_address_on_true = 0x823ABA58
+
+[[midasm_hook]]
+address = 0x823ABA64
+name = "RandoSite_823ABA64"
+registers = ["r3"]
+jump_address_on_true = 0x823ABA68
+
+[[midasm_hook]]
+address = 0x823C95D0
+name = "RandoSite_823C95D0"
+registers = ["r3"]
+jump_address_on_true = 0x823C95D4
+
+[[midasm_hook]]
+address = 0x823C95E0
+name = "RandoSite_823C95E0"
+registers = ["r3"]
+jump_address_on_true = 0x823C95E4
+
+[[midasm_hook]]
+address = 0x8240252C
+name = "RandoSite_8240252C"
+registers = ["r3"]
+jump_address_on_true = 0x82402530
+
+[[midasm_hook]]
+address = 0x82406048
+name = "RandoSite_82406048"
+registers = ["r3"]
+jump_address_on_true = 0x82406068
+
+[[midasm_hook]]
+address = 0x8240E064
+name = "RandoSite_8240E064"
+registers = ["r3"]
+jump_address_on_true = 0x8240E068
+
+[[midasm_hook]]
+address = 0x8240EA30
+name = "RandoSite_8240EA30"
+registers = ["r3"]
+jump_address_on_true = 0x8240EA34
+
+[[midasm_hook]]
+address = 0x82428AE8
+name = "RandoSite_82428AE8"
+registers = ["r3"]
+jump_address_on_true = 0x82428AEC
+
+[[midasm_hook]]
+address = 0x8242B768
+name = "RandoSite_8242B768"
+registers = ["r3"]
+jump_address_on_true = 0x8242B76C
+
+[[midasm_hook]]
+address = 0x8242F2CC
+name = "RandoSite_8242F2CC"
+registers = ["r3"]
+jump_address_on_true = 0x8242F2D0
+
+[[midasm_hook]]
+address = 0x824346FC
+name = "RandoSite_824346FC"
+registers = ["r3"]
+jump_address_on_true = 0x82434710
+
+[[midasm_hook]]
+address = 0x824451CC
+name = "RandoSite_824451CC"
+registers = ["r3"]
+jump_address_on_true = 0x824451D0
+
+[[midasm_hook]]
+address = 0x8244BDA4
+name = "RandoSite_8244BDA4"
+registers = ["r3"]
+jump_address_on_true = 0x8244BDA8
+
+[[midasm_hook]]
+address = 0x82467C04
+name = "RandoSite_82467C04"
+registers = ["r3"]
+jump_address_on_true = 0x82467C08
+
+[[midasm_hook]]
+address = 0x8247193C
+name = "RandoSite_8247193C"
+registers = ["r3"]
+jump_address_on_true = 0x82471940
+
+[[midasm_hook]]
+address = 0x82478C90
+name = "RandoSite_82478C90"
+registers = ["r3"]
+jump_address_on_true = 0x82478C94
+
+[[midasm_hook]]
+address = 0x8248AA58
+name = "RandoSite_8248AA58"
+registers = ["r3"]
+jump_address_on_true = 0x8248AA5C
+
+[[midasm_hook]]
+address = 0x8248AA68
+name = "RandoSite_8248AA68"
+registers = ["r3"]
+jump_address_on_true = 0x8248AA6C
+
+[[midasm_hook]]
+address = 0x8248F238
+name = "RandoSite_8248F238"
+registers = ["r3"]
+jump_address_on_true = 0x8248F23C
+
+[[midasm_hook]]
+address = 0x8248F248
+name = "RandoSite_8248F248"
+registers = ["r3"]
+jump_address_on_true = 0x8248F24C
+
+[[midasm_hook]]
+address = 0x824A148C
+name = "RandoSite_824A148C"
+registers = ["r3"]
+jump_address_on_true = 0x824A1490
+
+[[midasm_hook]]
+address = 0x824A1490
+name = "RandoSite_824A1490"
+registers = ["r3"]
+jump_address_on_true = 0x824A1494
+
+[[midasm_hook]]
+address = 0x824A149C
+name = "RandoSite_824A149C"
+registers = ["r3"]
+jump_address_on_true = 0x824A14A0
+
+[[midasm_hook]]
+address = 0x824A17A4
+name = "RandoSite_824A17A4"
+registers = ["r3"]
+jump_address_on_true = 0x824A17A8
+
+[[midasm_hook]]
+address = 0x824A91A4
+name = "RandoSite_824A91A4"
+registers = ["r3"]
+jump_address_on_true = 0x824A91A8
+
+[[midasm_hook]]
+address = 0x824B23BC
+name = "RandoSite_824B23BC"
+registers = ["r3"]
+jump_address_on_true = 0x824B23C0
+
+[[midasm_hook]]
+address = 0x824BDABC
+name = "RandoSite_824BDABC"
+registers = ["r3"]
+jump_address_on_true = 0x824BDB08
+
+[[midasm_hook]]
+address = 0x824D79DC
+name = "RandoSite_824D79DC"
+registers = ["r3"]
+jump_address_on_true = 0x824D79E0
+
+[[midasm_hook]]
+address = 0x824D79E8
+name = "RandoSite_824D79E8"
+registers = ["r3"]
+jump_address_on_true = 0x824D79EC
+
+[[midasm_hook]]
+address = 0x824DB49C
+name = "RandoSite_824DB49C"
+registers = ["r3"]
+jump_address_on_true = 0x824DB4A0
+
+[[midasm_hook]]
+address = 0x824DB4A0
+name = "RandoSite_824DB4A0"
+registers = ["r3"]
+jump_address_on_true = 0x824DB4A4
+
+[[midasm_hook]]
+address = 0x824DB4A4
+name = "RandoSite_824DB4A4"
+registers = ["r3"]
+jump_address_on_true = 0x824DB4A8
+
+[[midasm_hook]]
+address = 0x824DB4A8
+name = "RandoSite_824DB4A8"
+registers = ["r3"]
+jump_address_on_true = 0x824DB4AC
+jump_address_on_false = 0x824DB4E4

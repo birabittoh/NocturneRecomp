@@ -184,6 +184,25 @@ add_custom_command(
     VERBATIM
 )
 
+# The randomizer's code patches compiled into hooks (see src/rando_hooks.h):
+# translated from the instructions in assets/default.xex and the core's code
+# caves. src/rando_hooks.generated.cpp is a gitignored build artifact; the
+# generator also checks that nocturnerecomp_rando_hooks.toml (which codegen
+# reads) is current.
+set(NOCTURNE_RANDO_HOOKS ${CMAKE_SOURCE_DIR}/src/rando_hooks.generated.cpp)
+add_custom_command(
+    OUTPUT ${NOCTURNE_RANDO_HOOKS}
+    COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/scripts/gen-rando-hooks.py
+    DEPENDS
+        ${CMAKE_SOURCE_DIR}/scripts/gen-rando-hooks.py
+        ${CMAKE_SOURCE_DIR}/ext/KryptonRecomp/xex_image.py
+        ${CMAKE_SOURCE_DIR}/ext/SOTN_XB_RANDO/Source/xb_rando.cpp
+        ${CMAKE_SOURCE_DIR}/nocturnerecomp_rando_hooks.toml
+        ${CMAKE_SOURCE_DIR}/assets/default.xex
+    COMMENT "Generating src/rando_hooks.generated.cpp"
+    VERBATIM
+)
+
 # The guest shader pack: translate the shader files in assets/MEDIA with
 # KryptonRecomp, compile them with DXC, and pack the results. The generator also
 # writes a `.S` that `.incbin`s the pack into read-only data, so there is no
@@ -292,10 +311,10 @@ set(NOCTURNERECOMP_SOURCES
     src/native_ui.cpp
     src/player_inspector.cpp
     src/player_status.cpp
-    src/ppc_interpreter.cpp
     src/enhancements.cpp
     src/rando_menu.cpp
     src/rando_runtime.cpp
+    src/rando_hooks.generated.cpp
     src/rando/rando_core.cpp
     src/rando/rando_host.cpp
     src/room_presence.cpp

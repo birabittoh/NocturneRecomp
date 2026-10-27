@@ -32,6 +32,9 @@ src/main.cpp.bak
 /src/icon.generated.ico
 /src/images.generated.h
 
+# Randomizer patch hooks, rebuilt from assets/default.xex by scripts/gen-rando-hooks.py
+/src/rando_hooks.generated.cpp
+
 # Windows exe-icon resource script, rewritten by CMake with an absolute path
 # to src/icon.generated.ico (see CMakeLists.txt)
 /src/nocturnerecomp.generated.rc

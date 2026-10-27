@@ -2,140 +2,29 @@
 
 #include "rando_runtime.h"
 
-#include <algorithm>
 #include <cctype>
-#include <array>
-#include <atomic>
 #include <cinttypes>
 #include <cstring>
 #include <fstream>
-#include <map>
 #include <set>
 #include <utility>
 #include <vector>
 
 #include <rex/logging.h>
 #include <rex/runtime.h>
-#include <rex/system/function_dispatcher.h>
 #include <rex/system/mod_registry.h>
 #include <rex/system/xmemory.h>
 
 #include "generated/nocturnerecomp_init.h"
 
 #include "enhancements.h"
-#include "function_hooks.h"
 #include "game_state.h"
-#include "ppc_interpreter.h"
+#include "rando_hooks.h"
 
 namespace nocturne {
 namespace {
 
-// Fixed pool of interpreter entry thunks: the dispatcher wants a plain
-// PPCFunc* per function, so each interpreted function gets one template
-// instantiation bound to a slot in g_thunk_bounds. A slot is keyed by its
-// bounds and never freed or rebound, so a guest thread still inside a thunk
-// while seeds change never sees its bounds move. A function's bounds don't
-// depend on the seed, so slots are reused across seeds; 512 is far more
-// than SOTN_XB_RANDO patches in total.
-constexpr size_t kMaxInterpThunks = 512;
-constexpr size_t kNoSlot = ~size_t(0);
-
-struct FuncBounds {
-  uint32_t start;
-  uint32_t end;
-};
-FuncBounds g_thunk_bounds[kMaxInterpThunks];
-std::mutex g_slot_mutex;
-std::map<std::pair<uint32_t, uint32_t>, size_t> g_slot_of;  // bounds -> slot
-
-template <size_t I>
-void InterpThunk(PPCContext& ctx, uint8_t* base) {
-  PpcInterpret(ctx, base, g_thunk_bounds[I].start, g_thunk_bounds[I].end);
-}
-
-template <size_t... Is>
-constexpr std::array<PPCFunc*, sizeof...(Is)> MakeThunks(std::index_sequence<Is...>) {
-  return {&InterpThunk<Is>...};
-}
-constexpr auto g_thunks = MakeThunks(std::make_index_sequence<kMaxInterpThunks>{});
-
-size_t SlotFor(uint32_t start, uint32_t end) {
-  std::lock_guard lock(g_slot_mutex);
-  auto [it, inserted] = g_slot_of.try_emplace({start, end}, g_slot_of.size());
-  if (inserted) {
-    if (it->second >= kMaxInterpThunks) {
-      g_slot_of.erase(it);
-      return kNoSlot;
-    }
-    g_thunk_bounds[it->second] = {start, end};
-  }
-  return it->second;
-}
-
-// Functions with an entry hook (rando_hooked_functions.inc), and the ones the active seed has
-// patched, with their end address. The hook runs a patched function through the interpreter.
-constexpr uint32_t kHookedFunctions[] = {
-#define RANDO_HOOKED_FUNCTION(addr, name) addr,
-#include "rando_hooked_functions.inc"
-#undef RANDO_HOOKED_FUNCTION
-};
-std::mutex g_patched_mutex;
-std::map<uint32_t, uint32_t> g_patched;  // start -> end
-std::atomic<bool> g_any_patched{false};
-
-bool IsHooked(uint32_t start) {
-  return std::binary_search(std::begin(kHookedFunctions), std::end(kHookedFunctions), start);
-}
-
-// The active seed's code caves: regions it writes into previously-zero
-// space outside the recompiled range. Calls into them miss the dispatcher's
-// table and reach CaveResolver.
-struct CaveRegion {
-  uint32_t start;
-  uint32_t end;
-};
-std::mutex g_cave_mutex;
-std::vector<CaveRegion> g_cave_regions;  // sorted, disjoint
 uint8_t* g_membase = nullptr;
-
-PPCFunc* CaveResolver(uint32_t target) {
-  std::lock_guard lock(g_cave_mutex);
-  auto it = std::upper_bound(g_cave_regions.begin(), g_cave_regions.end(), target,
-                             [](uint32_t addr, const CaveRegion& r) { return addr < r.start; });
-  if (it == g_cave_regions.begin()) {
-    return nullptr;
-  }
-  const CaveRegion& region = *(it - 1);
-  if (target >= region.end || (target & 3)) {
-    return nullptr;
-  }
-  uint32_t bad_pc = 0, bad_insn = 0;
-  if (!PpcScanFunction(g_membase, target, region.end, &bad_pc, &bad_insn)) {
-    REXLOG_WARN("[rando] cave function {:08X} uses instruction {:08X} at {:08X} the "
-                "interpreter doesn't support -- call will trap",
-                target, bad_insn, bad_pc);
-    return nullptr;
-  }
-  const size_t slot = SlotFor(target, region.end);
-  if (slot == kNoSlot) {
-    REXLOG_WARN("[rando] out of interpreter thunk slots for cave function {:08X}", target);
-    return nullptr;
-  }
-  return g_thunks[slot];
-}
-
-// Recompiled function starts, sorted.
-const std::vector<uint32_t>& FunctionStarts() {
-  static const std::vector<uint32_t> starts = [] {
-    std::vector<uint32_t> v;
-    for (const PPCFuncMapping* m = PPCFuncMappings; m->guest; ++m) {
-      v.push_back(static_cast<uint32_t>(m->guest));
-    }
-    std::sort(v.begin(), v.end());
-    return v;
-  }();
-  return starts;
-}
 
 uint32_t ReadBE32(const uint8_t* p) {
   return (uint32_t(p[0]) << 24) | (uint32_t(p[1]) << 16) | (uint32_t(p[2]) << 8) | p[3];
@@ -170,28 +59,6 @@ std::string HashText(uint64_t hash) {
 
 }  // namespace
 
-// Entry hook body: a function the active seed has patched is run by the interpreter instead of
-// the recompiled body.
-bool RandoEnter(PPCRegister& r3, uint32_t start) {
-  if (!g_any_patched.load(std::memory_order_acquire)) {
-    return false;
-  }
-  uint32_t end;
-  {
-    std::lock_guard lock(g_patched_mutex);
-    auto it = g_patched.find(start);
-    if (it == g_patched.end()) {
-      return false;
-    }
-    end = it->second;
-  }
-  PpcInterpret(fnhook::ContextFromR3(r3), g_membase, start, end);
-  return true;
-}
-
-namespace {
-}  // namespace
-
 void RandoRuntime::Bind(rex::Runtime* runtime, const std::filesystem::path& game_data_root,
                         const std::filesystem::path& user_data_root) {
   runtime_ = runtime;
@@ -199,6 +66,7 @@ void RandoRuntime::Bind(rex::Runtime* runtime, const std::filesystem::path& game
   active_path_ = user_data_root / "rando_active.txt";
   slots_dir_ = user_data_root / "rando_slots";
   g_membase = runtime->memory()->virtual_membase();
+  rando_hooks::Init(g_membase);
 
   std::error_code ec;
   {
@@ -217,7 +85,6 @@ void RandoRuntime::Bind(rex::Runtime* runtime, const std::filesystem::path& game
     }
   }
 
-  runtime->function_dispatcher()->SetFallbackResolver(&CaveResolver);
   runtime->mod_registry()->RegisterTick([this] { Tick(); });
 
   // The New Game seed from the last run: also the world a save made before
@@ -533,8 +400,6 @@ bool RandoRuntime::Apply(std::shared_ptr<const rando::Result> seed, std::string*
     }
   }
   auto* memory = runtime_->memory();
-  const uint32_t code_start = REX_CODE_BASE;
-  const uint32_t code_end = REX_CODE_BASE + REX_CODE_SIZE;
   const uint32_t image_end = base_->image_base +
                              static_cast<uint32_t>(base_->file.size() - base_->header_size);
   for (const auto& run : patches->runs) {
@@ -558,92 +423,54 @@ bool RandoRuntime::Apply(std::shared_ptr<const rando::Result> seed, std::string*
     WriteGuest(memory, run.guest, run.bytes.data(), run.bytes.size());
   }
 
-  // Code: the recompiled functions whose instructions changed, and the caves
-  // (changed dwords that were zero in the base image, outside the code
-  // range). Cave runs separated by short gaps (alignment padding between
-  // cave functions) are one region; single dwords are pointers patched into
-  // zero data, not code.
-  const auto& starts = FunctionStarts();
-  std::set<size_t> changed;  // indices into `starts`
-  std::vector<CaveRegion> caves;
-  constexpr uint32_t kCaveMergeGap = 32;
+  // Code: point the hooks at the patches each site now holds. Changed
+  // instructions no hook covers stay inert.
+  const uint32_t code_start = REX_CODE_BASE;
+  const uint32_t code_end = REX_CODE_BASE + REX_CODE_SIZE;
+  std::set<uint32_t> changed_words;
   for (const auto& run : patches->runs) {
-    const uint32_t run_end = run.guest + static_cast<uint32_t>(run.bytes.size());
-    for (uint32_t a = run.guest; a < run_end; ++a) {
-      if (a < code_start || a >= code_end || run.bytes[a - run.guest] == run.base[a - run.guest]) {
-        continue;
-      }
-      auto it = std::upper_bound(starts.begin(), starts.end(), a);
-      if (it != starts.begin()) {
-        changed.insert(static_cast<size_t>((it - 1) - starts.begin()));
-      }
-    }
-    for (uint32_t d = run.guest & ~3u; d < run_end; d += 4) {
-      if (d >= code_start && d < code_end) {
-        continue;
-      }
-      const uint8_t* base = base_->file.data() + base_->header_size + (d - base_->image_base);
-      if (ReadBE32(base) != 0 || ReadBE32(memory->TranslateVirtual<const uint8_t*>(d)) == 0) {
-        continue;
-      }
-      if (!caves.empty() && d >= caves.back().end && d - caves.back().end <= kCaveMergeGap) {
-        caves.back().end = d + 4;
-      } else if (caves.empty() || d >= caves.back().end) {
-        caves.push_back({d, d + 4});
+    for (size_t i = 0; i < run.bytes.size(); ++i) {
+      const uint32_t a = run.guest + static_cast<uint32_t>(i);
+      if (run.bytes[i] != run.base[i] && a >= code_start && a < code_end) {
+        changed_words.insert(a & ~3u);
       }
     }
   }
-  caves.erase(std::remove_if(caves.begin(), caves.end(),
-                             [](const CaveRegion& r) { return r.end - r.start <= 4; }),
-              caves.end());
-  if (!caves.empty()) {
-    std::vector<std::pair<uint32_t, uint32_t>> ranges;
-    for (const CaveRegion& r : caves) {
-      REXLOG_INFO("[rando] code cave {:08X}-{:08X} ({} bytes)", r.start, r.end, r.end - r.start);
-      ranges.emplace_back(r.start, r.end);
-    }
-    if (!PpcAddInterpretableRanges(ranges)) {
-      REXLOG_WARN("[rando] interpreter range table is full -- some cave code may trap");
-    }
+  rando_hooks::Report report;
+  rando_hooks::Activate(
+      g_membase, [&](uint32_t addr) { return changed_words.count(addr) != 0; }, &report);
+  size_t inactive = report.unknown.size();
+  for (uint32_t addr : report.unknown) {
+    REXLOG_WARN("[rando] the instruction at {:08X} holds {:08X}, a patch its hook doesn't know "
+                "-- this change stays inactive",
+                addr, ReadBE32(memory->TranslateVirtual<const uint8_t*>(addr)));
   }
-  {
-    std::lock_guard lock(g_cave_mutex);
-    g_cave_regions = caves;
-  }
-
-  size_t inactive = 0;
-  std::map<uint32_t, uint32_t> patched;
-  for (size_t idx : changed) {
-    const uint32_t start = starts[idx];
-    const uint32_t end = idx + 1 < starts.size() ? starts[idx + 1] : code_end;
-    uint32_t bad_pc = 0, bad_insn = 0;
-    if (!PpcScanFunction(g_membase, start, end, &bad_pc, &bad_insn)) {
-      REXLOG_WARN("[rando] patched function {:08X} uses instruction {:08X} at {:08X} the "
-                  "interpreter doesn't support -- this change stays inactive",
-                  start, bad_insn, bad_pc);
+  for (uint32_t addr : changed_words) {
+    if (!rando_hooks::IsSite(addr)) {
+      REXLOG_WARN("[rando] the instruction at {:08X} changed to {:08X}, but no hook covers it "
+                  "-- this change stays inactive",
+                  addr, ReadBE32(memory->TranslateVirtual<const uint8_t*>(addr)));
       ++inactive;
-    } else if (!IsHooked(start)) {
-      REXLOG_WARN("[rando] patched function {:08X} has no entry hook -- this change stays "
-                  "inactive (add it to rando_hooked_functions.inc and the config)",
-                  start);
-      ++inactive;
-    } else {
-      patched.emplace(start, end);
     }
   }
-  {
-    std::lock_guard lock(g_patched_mutex);
-    g_patched = patched;
-    g_any_patched = !g_patched.empty();
+  if (!report.active_sites.empty()) {
+    std::string sites;
+    for (const auto& [addr, state] : report.active_sites) {
+      sites += fmt::format(" {:08X}:{}", addr, state >> 16);
+      if (state & 0xFFFF) {
+        sites += fmt::format("/{:X}", state & 0xFFFF);
+      }
+    }
+    REXLOG_INFO("[rando] patched instructions (site:variant/immediate):{}", sites);
   }
 
   REXLOG_INFO("[rando] applied {} with enhancements {:05X}/{}/{:08X}/{}: {} runs, {} bytes, {} "
-              "function(s) interpreted, {} inactive, {} cave(s), {} run(s) where live memory "
-              "wasn't the base image",
+              "patched instruction(s) active, {} inactive, {} run(s) where live memory wasn't "
+              "the base image",
               seed ? "seed \"" + seed->options.seed + "\"" : "the vanilla game",
               written.flags, written.wing_smash_color, written.alchemy_vats,
               static_cast<int>(written.game_mode), patches->runs.size(),
-              patches->ByteCount(), patched.size(), inactive, caves.size(), live_mismatches);
+              patches->ByteCount(), report.active_sites.size(), inactive, live_mismatches);
   applied_ = std::move(patches);
   std::lock_guard lock(mutex_);
   state_.active = std::move(seed);
@@ -653,15 +480,7 @@ bool RandoRuntime::Apply(std::shared_ptr<const rando::Result> seed, std::string*
 }
 
 void RandoRuntime::Revert() {
-  {
-    std::lock_guard lock(g_patched_mutex);
-    g_patched.clear();
-    g_any_patched = false;
-  }
-  {
-    std::lock_guard lock(g_cave_mutex);
-    g_cave_regions.clear();
-  }
+  rando_hooks::Deactivate();
 
   {
     std::lock_guard lock(mutex_);
@@ -753,8 +572,3 @@ REX_HOOK_RAW(sub_825D8218) {
   __imp__sub_825D8218(ctx, base);
   nocturne::GetRandoRuntime().OnSaveDeleted(slot);
 }
-
-#define RANDO_HOOKED_FUNCTION(addr, name) \
-  bool RandoHook_##name(PPCRegister& r3) { return nocturne::RandoEnter(r3, addr); }
-#include "rando_hooked_functions.inc"
-#undef RANDO_HOOKED_FUNCTION

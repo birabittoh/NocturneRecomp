@@ -2,19 +2,13 @@
 // takes it back off, without booting a patched xex or restarting.
 //
 // A seed is a PatchSet: guest byte runs against the base image. Applying one
-// writes the bytes into guest memory and then makes the code changes take
-// effect:
-//   * Recompiled functions execute natively and never re-read .text, so each
-//     function whose instructions the seed changes is overridden (through
-//     rex::runtime::FunctionDispatcher) with a thunk that interprets it from
-//     guest memory (src/ppc_interpreter.h). Functions using instructions the
-//     interpreter doesn't cover stay native with that patch inert; the count
-//     is reported to the overlay.
-//   * "Code caves" (new code the seed writes into zero space outside the
-//     recompiled range, reached through patched branches) have no recompiled
-//     function at all. Calls to them land in the dispatcher's fallback
-//     resolver, which binds an interpreter thunk per entry point.
-// Reverting restores the base bytes and every overridden function.
+// writes the bytes into guest memory. Recompiled functions never re-read
+// their instructions from guest memory, so the code changes take effect
+// through the hooks of src/rando_hooks.h: every instruction the randomizer
+// can patch, and every code cave it can branch to, is compiled in already,
+// and applying a world tells those hooks which patch each site now holds.
+// Patched instructions no hook knows stay inert; the count is reported to
+// the overlay. Reverting turns the hooks off and restores the base bytes.
 //
 // History, kept because it was learned the hard way:
 //   * The randomizer used to work by booting a patched Rando.xex. A comment
@@ -94,8 +88,7 @@ class RandoRuntime {
     // What New Game gets (the overlay's choice); null: vanilla. Differs
     // from `active` only while a save bound to another world is loaded.
     std::shared_ptr<const rando::Result> new_game;
-    // Patched functions the interpreter couldn't take over; those changes
-    // are inert.
+    // Patched instructions no hook knows; those changes are inert.
     size_t inactive_code_patches = 0;
     // Outcome of the last request or of the boot-time restore.
     std::string message;
