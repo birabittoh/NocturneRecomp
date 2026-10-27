@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<paths>
+    <!-- AutoUpdater::StagingRoot() under the app's internal files dir -->
+    <files-path name="pending_update" path=".pending-self-update/" />
+</paths>

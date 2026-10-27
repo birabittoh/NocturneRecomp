@@ -1,0 +1,26 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+    Material You. The system_* colour resources are the palette Android derives
+    from the user's wallpaper on API 31+, so the app's accents match the rest of
+    their device. They do not exist below 31, which is why this is a v31 folder
+    rather than an item in the base theme.
+-->
+<resources>
+    <style name="Theme.NocturneRecomp" parent="@android:style/Theme.DeviceDefault.NoActionBar.Fullscreen">
+        <item name="android:windowBackground">@android:color/black</item>
+        <item name="android:windowNoTitle">true</item>
+        <item name="android:windowFullscreen">true</item>
+        <item name="android:windowContentTransitions">false</item>
+
+        <item name="android:colorPrimary">@android:color/system_accent1_600</item>
+        <item name="android:colorPrimaryDark">@android:color/system_accent1_800</item>
+        <item name="android:colorAccent">@android:color/system_accent1_400</item>
+        <item name="android:colorBackground">@android:color/system_neutral1_900</item>
+
+        <!-- Drawn over by the game, so they only show while the system bars are
+             being swiped back in over a running frame. Transparent keeps that
+             from flashing a slab of colour across it. -->
+        <item name="android:statusBarColor">@android:color/transparent</item>
+        <item name="android:navigationBarColor">@android:color/transparent</item>
+    </style>
+</resources>

@@ -1,0 +1,80 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+    <!-- Mod catalog, mod downloads and release updates -->
+    <uses-permission android:name="android.permission.INTERNET" />
+    <!-- Self-update hands the downloaded APK to the system installer -->
+    <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES" />
+
+    <!-- Game assets live on shared storage until we have a proper asset-import flow -->
+    <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE"
+                     android:maxSdkVersion="32" />
+
+    <!-- Vulkan is required by the native renderer (Plume) -->
+    <uses-feature android:name="android.hardware.vulkan.level" android:version="0" android:required="true" />
+    <uses-feature android:name="android.hardware.vulkan.version" android:version="0x00401000" android:required="true" />
+
+    <!-- Any rotation the device normally offers (sensor skips reverse portrait on phones) -->
+    <uses-feature android:name="android.hardware.screen.landscape" android:required="false" />
+
+    <!-- Touch screen is not strictly required (gamepad works) -->
+    <uses-feature android:name="android.hardware.touchscreen" android:required="false" />
+
+    <!-- Gamepad / controller support -->
+    <uses-feature android:name="android.hardware.gamepad" android:required="false" />
+
+    <!--
+        appCategory tells the launcher, Digital Wellbeing and the Game Mode /
+        Game Dashboard framework what this app is; isGame is the pre-API-26
+        spelling of the same thing, still read by some launchers.
+    -->
+    <!--
+        Predictive back (default on for targetSdk 33+) delivers back through
+        OnBackInvokedCallback instead of the classic KEYCODE_BACK, which is
+        what SDL_HINT_ANDROID_TRAP_BACK_BUTTON (window_sdl.cpp) hooks. Opt out
+        so back still reaches the host menu (host_menu.cpp).
+    -->
+    <application
+        android:label="NocturneRecomp"
+        android:icon="@mipmap/ic_launcher"
+        android:hasCode="true"
+        android:appCategory="game"
+        android:isGame="true"
+        android:enableOnBackInvokedCallback="false">
+
+        <!--
+            NocturneRecompActivity extends SDLActivity and overrides getLibraries()
+            to load librexruntime.so (which contains SDL3) + libnocturnerecomp.so.
+        -->
+        <activity
+            android:name="com.birabittoh.nocturnerecomp.NocturneRecompActivity"
+            android:label="NocturneRecomp"
+            android:configChanges="keyboard|keyboardHidden|orientation|screenSize|screenLayout|uiMode"
+            android:screenOrientation="sensorLandscape"
+            android:exported="true"
+            android:theme="@style/Theme.NocturneRecomp">
+
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+
+            <!-- SDL3 metadata: tells the SDL Android glue which library has SDL_main -->
+            <meta-data android:name="SDL_MAIN_ENTRY_FUNCTION" android:value="SDL_main" />
+        </activity>
+
+        <!-- Serves the staged update APK to the package installer (the SDK's
+             AutoUpdater looks this authority up by name). -->
+        <provider
+            android:name="androidx.core.content.FileProvider"
+            android:authorities="${applicationId}.fileprovider"
+            android:exported="false"
+            android:grantUriPermissions="true">
+            <meta-data
+                android:name="android.support.FILE_PROVIDER_PATHS"
+                android:resource="@xml/file_paths" />
+        </provider>
+
+    </application>
+
+</manifest>

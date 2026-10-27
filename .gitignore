@@ -42,7 +42,7 @@ src/main.cpp.bak
 # Runtime artifacts — binary, logs, and bundled shared libraries
 /sdk/
 /logs/
-nocturnerecomp
+/nocturnerecomp
 nocturnerecomp.exe
 nocturnerecomp.pdb
 nocturnerecomp.toml
@@ -85,3 +85,21 @@ __pycache__/
 /local/
 
 CLAUDE.md
+
+# Android build artifacts (Gradle output, staged JNI libs, staged assets)
+/android/.gradle/
+/android/app/build/
+/android/app/jniLibs/
+/android/app/assets/
+/android/build/
+/android/local.properties
+# Sideload signing key (see android/app/build.gradle.kts). A private key does
+# not belong in the repository; regenerate it with keytool, or point the build
+# at another one with -PsideloadKeystore / NOCTURNE_KEYSTORE.
+/android/keystore/
+# Generated launcher icons (rebuilt from assets/default.xex by scripts/gen-android-icon.py)
+/android/app/src/main/res/mipmap-mdpi/
+/android/app/src/main/res/mipmap-hdpi/
+/android/app/src/main/res/mipmap-xhdpi/
+/android/app/src/main/res/mipmap-xxhdpi/
+/android/app/src/main/res/mipmap-xxxhdpi/

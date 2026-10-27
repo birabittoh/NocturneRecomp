@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+    DeviceDefault rather than a hardcoded Material theme: it resolves to
+    whatever the OEM ships as the current system look, so this follows the
+    device instead of pinning the app to one platform generation the way
+    Theme.NoTitleBar.Fullscreen did.
+
+    values-v31/ overrides this with the Material You dynamic palette.
+-->
+<resources>
+    <style name="Theme.NocturneRecomp" parent="@android:style/Theme.DeviceDefault.NoActionBar.Fullscreen">
+        <!-- The game draws every pixel itself, so anything behind it is only
+             ever visible during the starting window, before the surface is up. -->
+        <item name="android:windowBackground">@android:color/black</item>
+        <item name="android:windowNoTitle">true</item>
+        <item name="android:windowFullscreen">true</item>
+        <!-- SDL manages the surface size; letting the system animate a resize
+             on top of that just shows a stretched frame. -->
+        <item name="android:windowContentTransitions">false</item>
+    </style>
+</resources>
