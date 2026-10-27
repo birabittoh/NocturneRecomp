@@ -72,7 +72,7 @@ class RandoMenuDialog : public rex::ui::ImGuiDialog {
     LoadOptions();
     SetSeedIfEmpty();
     rex::ui::RegisterBind(
-        "bind_randomizer", "F6", "Toggle randomizer overlay", [this] { visible_ = !visible_; },
+        "bind_randomizer", "F5", "Toggle randomizer overlay", [this] { visible_ = !visible_; },
         [this] { return visible_; }, kWindowTitle);
   }
 

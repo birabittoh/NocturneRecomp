@@ -1,4 +1,4 @@
-// Randomizer overlay (default F6): pick a preset and options, enter a seed,
+// Randomizer overlay (default F5): pick a preset and options, enter a seed,
 // and randomize the running game with the vendored SOTN_XB_RANDO core (see
 // src/rando/rando.h), applied in memory by src/rando_runtime.h. Only from the
 // title screen or main menu: once a game is running (file select on), the
