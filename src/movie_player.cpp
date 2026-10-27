@@ -260,12 +260,14 @@ bool StartDown() {
 
 enum class Hold { kNoMovie, kPlaying, kFinished };
 
-// Starts |name| from the game folder's DATA/video on the first call and holds
-// the caller while it plays.
+// Starts |name| from JP's DATA/video on the first call and holds the caller
+// while it plays. Without JP installed the vanilla code runs.
 Hold HoldForMovie(const char* name) {
   switch (g_movie.phase()) {
     case Movie::Phase::kIdle: {
-      const auto path = GameDataRoot() / "DATA" / "video" / name;
+      if (JpDir().empty())
+        return Hold::kNoMovie;
+      const auto path = JpDir() / "DATA" / "video" / name;
       std::error_code ec;
       if (!std::filesystem::is_regular_file(path, ec))
         return Hold::kNoMovie;

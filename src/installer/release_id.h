@@ -31,10 +31,6 @@ struct Release {
   const char* file_sha256;
   bool supported;
   uint32_t languages;
-  // Whether the recompiled image can run it. A release that is supported but
-  // not startable is identified and extracted into the library, then listed
-  // as not playable yet.
-  bool startable;
 };
 
 // The release whose identifying file has this hash, or null.

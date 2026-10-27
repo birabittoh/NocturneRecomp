@@ -104,7 +104,7 @@ class NocturnerecompApp : public rex::ReXApp {
     // what the CI matrix publishes.
     config.update_asset_format = "nocturnerecomp-{tag}-{platform}";
     config.update_repo = "birabittoh/NocturneRecomp";
-    // Called after FinishGameDataPaths has latched the picked version.
+    // Called after FinishGameDataPaths has latched the mounted version.
     config.game_targets = nocturne::GameTargets;
 
     // One-shot toast shown top-left as the game starts
@@ -176,7 +176,7 @@ class NocturnerecompApp : public rex::ReXApp {
 
   // Game data is resolved here rather than in SetupEnvironment because the
   // window exists by now, so the start screen can draw: it lists the installed
-  // versions, extracts new ones from an XBLA package, and starts the pick.
+  // versions, extracts new ones from an XBLA package, and starts them.
   std::optional<rex::PathConfig> OnFinalizePaths(
       const rex::PathConfig& defaults, std::function<void(rex::PathConfig)> resume) override {
     // Before the start screen, which can sit open for a long while.
@@ -214,14 +214,16 @@ class NocturnerecompApp : public rex::ReXApp {
     return std::nullopt;
   }
 
-  // The runtime mounts the picked version folder. game_data_root stays the
-  // library root in the config, since the settings save every cvar to it.
+  // The runtime mounts one version folder (World's, unless JP is the only
+  // one); JP's is read beside it for what only it has. game_data_root stays
+  // the library root in the config, since the settings save every cvar to it.
   rex::PathConfig FinishGameDataPaths() {
     nocturne::ReleaseIntroScreen();
     RefreshPathDefaultsIfCvarsChanged();
     rex::PathConfig paths = resolved_path_defaults();
-    paths.game_data_root = nocturne::SelectedGameDirectory();
-    nocturne::DetectTarget(paths.game_data_root);
+    const nocturne::GameDirectories& dirs = nocturne::StartedGameDirectories();
+    paths.game_data_root = dirs.mounted;
+    nocturne::DetectTarget(paths.game_data_root, dirs.jp);
     return paths;
   }
 

@@ -13,10 +13,10 @@ namespace {
 constexpr std::array kReleases = {
     Release{"xbla-world", "Castlevania: Symphony of the Night (Xbox Live Arcade, World)",
             "default.xex", "26a58b074c5dd6185b77a8111a0012866d11cba674b4b0810d79dbf07ad68aa6",
-            true, kTextAll, true},
+            true, kTextAll},
     Release{"xbla-jp", "Dracula X: Nocturne in the Moonlight (Xbox Live Arcade, Japan)",
             "default.xex", "a524d039ee167c89bfd710033ac6fb43bbc874ae4dec1473c51d08f7974ea61b",
-            true, kTextAll, true},
+            true, kTextAll},
 };
 
 constexpr std::array<uint32_t, 64> kRound = {

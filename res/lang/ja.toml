@@ -264,7 +264,7 @@ err_rename_extracted = "展開したファイルの名前を変更できませ�
 err_prepare_failed = "ゲームファイルの準備に失敗しました: {}"
 err_unsupported = "{} にはまだ対応していません。"
 err_incomplete = "展開したファイルが不完全です。"
-choose_version = "プレイするバージョンを選んでください。"
+library_ready = "インストールしたバージョンはまとめて使われます。「スタート」を押してプレイしてください。"
 hint_select = "決定"
 hint_back = "戻る"
 hint_quit = "終了"
@@ -285,8 +285,6 @@ err_truncated = "パッケージが途中で切れています。"
 err_extract_failed = "展開に失敗しました。パッケージが破損しているか、ディスクの空き容量が不足している可能性があります。"
 err_not_extracted = "このフォルダには展開済みのゲームファイルがありません (default.xex と MEDIA なし)。"
 err_xbla_unknown = "この「悪魔城ドラキュラX 月下の夜想曲」のパッケージは既知のリリースではありません。"
-not_supported_yet = "まだプレイできません"
-not_playable = "{} はまだプレイできません。ファイルは今後のアップデートのために保存されます。"
 
 [sdk_ui]
 auto_sort = "自動並べ替え"

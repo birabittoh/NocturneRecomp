@@ -2,9 +2,8 @@
 
 // The installed versions of the game. Each one is a flat game tree in its own
 // folder inside the library root (the resolved game_data_root, "xbla-world",
-// "xbla-jp"), extracted there from its XBLA package. The pick is the
-// game_version cvar, kept in settings.toml, since launchers own
-// game_data_root.
+// "xbla-jp"), extracted there from its XBLA package. They are started
+// together: World's files are the game's, JP's add what only it has.
 
 #include <cstdint>
 #include <filesystem>
@@ -30,17 +29,14 @@ struct GameVersion {
   bool needs_phases = false;
   // Unpacked by an older conversion: only unpacking the game again fixes it.
   bool outdated = false;
-  // Release::startable; an unknown release is let through.
-  bool startable = true;
 };
 
-// Where SaveSelectedVersion writes, and where MigrateLibrary drops the
-// settings older builds kept.
+// Where MigrateLibrary drops the settings older builds kept.
 void BindLibrarySettings(const std::filesystem::path& user_settings_path);
 
 // Moves single version installs (the root itself, or legacy `candidates`)
-// into version folders, and drops the linked folders older builds kept (their
-// files are left where they are). Finishes a move an earlier launch was killed
+// into version folders, and drops the linked folders and the picked version
+// older builds kept (linked files are left where they are). Finishes a move an earlier launch was killed
 // in. Cheap when there is nothing to do.
 void MigrateLibrary(const std::filesystem::path& root,
                     const std::vector<std::filesystem::path>& candidates);
@@ -70,9 +66,9 @@ std::string ReadVersionId(const std::filesystem::path& dir);
 void RefreshRootExecutable(const std::filesystem::path& root,
                            const std::vector<GameVersion>& versions);
 
-std::string SelectedVersion();
-// Sets game_version and saves it; empty clears it.
-void SaveSelectedVersion(const std::string& key);
+// The game directory the command line names to start instead of the
+// library, or empty. A developer override, never saved.
+std::string GameDirectoryOverride();
 
 // For the start screen: "Xbox Live Arcade, World", or the folder name.
 std::string VersionLabel(const GameVersion& version);

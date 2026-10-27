@@ -261,7 +261,7 @@ err_rename_extracted = "Die extrahierten Dateien konnten nicht umbenannt werden:
 err_prepare_failed = "Die Vorbereitung der Spieldateien ist fehlgeschlagen: {}"
 err_unsupported = "{} wird noch nicht unterstützt."
 err_incomplete = "Die extrahierten Dateien sind unvollständig."
-choose_version = "Wähle die Version, die du spielen möchtest."
+library_ready = "Die installierten Versionen werden zusammen gespielt. Drücke Starten, um zu spielen."
 hint_select = "Auswählen"
 hint_back = "Zurück"
 hint_quit = "Beenden"
@@ -282,8 +282,6 @@ err_truncated = "Das Paket ist unvollständig."
 err_extract_failed = "Extraktion fehlgeschlagen. Das Paket ist möglicherweise beschädigt oder der Datenträger voll."
 err_not_extracted = "Dieser Ordner enthält keine extrahierten Spieldateien (kein default.xex und MEDIA)."
 err_xbla_unknown = "Dieses Paket von Castlevania: Symphony of the Night ist keine bekannte Version."
-not_supported_yet = "Noch nicht spielbar"
-not_playable = "{} kann noch nicht gespielt werden. Die Dateien bleiben für ein zukünftiges Update erhalten."
 
 [sdk_ui]
 auto_sort = "Automatisch sortieren"

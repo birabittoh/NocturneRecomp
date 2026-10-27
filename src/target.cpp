@@ -12,17 +12,26 @@ namespace nocturne {
 namespace {
 
 std::filesystem::path g_root;
+std::filesystem::path g_jp;
 
 }  // namespace
 
-void DetectTarget(const std::filesystem::path& game_data_root) {
+void DetectTarget(const std::filesystem::path& game_data_root,
+                  const std::filesystem::path& jp_dir) {
   g_root = game_data_root;
+  g_jp = jp_dir;
   REXLOG_INFO("Game data target: {}",
               TargetReleaseId().empty() ? "unknown release" : TargetReleaseId());
+  if (!g_jp.empty())
+    REXLOG_INFO("JP game files: {}", g_jp.string());
 }
 
 const std::filesystem::path& GameDataRoot() {
   return g_root;
+}
+
+const std::filesystem::path& JpDir() {
+  return g_jp;
 }
 
 const std::string& TargetRelease() {

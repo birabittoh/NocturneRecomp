@@ -22,9 +22,9 @@ constexpr std::array<const char*, size_t(IntroText::kCount)> kKeys = {
     "copy_hint",       "selected",          "title",            "unsupported_language",
     "delete_files",    "cancel",            "confirm_delete",   "not_enough_space",
     "add_version",     "delete_version",    "already_installed", "linked",
-    "needs_update",    "choose_version",    "hint_select",      "hint_back",
+    "needs_update",    "library_ready",    "hint_select",      "hint_back",
     "hint_quit",       "dialog_needs_mouse", "outdated",        "outdated_question",
-    "skip",            "extract_again",     "not_supported_yet", "not_playable",
+    "skip",            "extract_again",
 };
 constexpr std::array<const char*, kInstallPhaseCount> kPhaseKeys = {"phase_extract"};
 constexpr std::array<const char*, 3> kProgressKeys = {"progress_extracting", "progress_deleting",

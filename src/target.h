@@ -1,6 +1,6 @@
 // nocturnerecomp - ReXGlue Recompiled Project
 //
-// Which release's data game_data_root holds.
+// Which release's data game_data_root holds, and where JP's is.
 
 #pragma once
 
@@ -10,12 +10,17 @@
 
 namespace nocturne {
 
-// Latches the target from the resolved game directory. Call once, before the
-// runtime is constructed.
-void DetectTarget(const std::filesystem::path& game_data_root);
+// Latches the target from the mounted game directory, and JP's folder (empty
+// when it is not installed). Call once, before the runtime is constructed.
+void DetectTarget(const std::filesystem::path& game_data_root,
+                  const std::filesystem::path& jp_dir);
 
-// The directory DetectTarget latched.
+// The mounted directory DetectTarget latched.
 const std::filesystem::path& GameDataRoot();
+
+// JP's folder, read for what only JP has whatever is mounted; empty when JP
+// is not installed.
+const std::filesystem::path& JpDir();
 
 // The platform and region that directory was installed from, as "Xbox Live
 // Arcade, World", or empty when unknown. Hashes default.xex on first call.

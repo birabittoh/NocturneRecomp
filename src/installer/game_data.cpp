@@ -32,8 +32,7 @@
 // The storage probes come from the SDK's GameDataSelector
 // (src/system/game_data_selector.cpp), which this replaces.
 
-REXCVAR_DEFINE_BOOL(show_start_screen, false, "Game",
-                    "Show the start screen on every launch, to pick the game version");
+REXCVAR_DEFINE_BOOL(show_start_screen, false, "Game", "Show the start screen on every launch");
 
 namespace nocturne {
 namespace {
@@ -192,7 +191,7 @@ struct Flow {
   std::function<void(bool)> done;
   GameDataPrompt prompt;
   std::vector<GameVersion> versions;
-  // The version Start applies to, or -1.
+  // The version Delete applies to, or -1.
   int selected = -1;
   // The identified source Extract installs, and the room it needs.
   std::string picked;
@@ -204,10 +203,59 @@ struct Flow {
 std::atomic<bool> g_extracting{false};
 fs::path g_root;
 std::vector<GameVersion> g_versions;
-int g_selected = -1;
 // The screen was asked for, so it waits for Start.
 bool g_asked = false;
-fs::path g_selected_dir;
+GameDirectories g_started;
+
+// The library's copy of release `id`, or null.
+const GameVersion* Installed(const std::vector<GameVersion>& versions, std::string_view id) {
+  for (const GameVersion& version : versions) {
+    if (!version.temporary && version.id == id)
+      return &version;
+  }
+  return nullptr;
+}
+
+// The version the command line names, or null.
+const GameVersion* Override(const std::vector<GameVersion>& versions) {
+  const std::string key = GameDirectoryOverride();
+  if (key.empty())
+    return nullptr;
+  for (const GameVersion& version : versions) {
+    if (version.temporary || version.key == key)
+      return &version;
+  }
+  return nullptr;
+}
+
+// What Start mounts and reads; false with nothing installed.
+bool Choose(const std::vector<GameVersion>& versions, GameDirectories& out) {
+  const GameVersion* world = Installed(versions, "xbla-world");
+  const GameVersion* jp = Installed(versions, "xbla-jp");
+  const GameVersion* given = Override(versions);
+  const GameVersion* mounted = given ? given : world ? world : jp;
+  if (!mounted && !versions.empty())
+    mounted = &versions.front();
+  if (!mounted)
+    return false;
+  out.mounted = mounted->dir;
+  out.jp = given && given->id == "xbla-jp" ? given->dir : jp ? jp->dir : fs::path();
+  return true;
+}
+
+// Only extracting the game again fixes it; asked about before Start.
+const GameVersion* FirstOutdated(const std::vector<GameVersion>& versions) {
+  for (const GameVersion& version : versions) {
+    if (version.outdated)
+      return &version;
+  }
+  return nullptr;
+}
+
+bool NeedsPhases(const std::vector<GameVersion>& versions) {
+  return std::any_of(versions.begin(), versions.end(),
+                     [](const GameVersion& version) { return version.needs_phases; });
+}
 
 fs::path LibraryRoot(const GameDataOptions& options) {
   fs::path root = options.game_data_root;
@@ -311,8 +359,8 @@ GameDataChoice MessageBoxPrompt(const GameDataPrompt& prompt) {
   int count = 0;
   std::string message = prompt.error.empty() ? "" : prompt.error + "\n\n";
   if (Library(prompt)) {
-    const int at = std::max(prompt.selected_version, 0);
-    message += prompt.versions[size_t(at)].label;
+    for (const VersionRow& row : prompt.versions)
+      message += row.label + "\n";
     buttons[count++] = {SDL_MESSAGEBOX_BUTTON_RETURNKEY_DEFAULT, int(GameDataChoice::kStart),
                         Tr(IntroText::kStart)};
     if (int(prompt.versions.size()) < kMaxVersions)
@@ -381,7 +429,7 @@ void CheckSpace(Flow& flow) {
 // directory listed, and selects `prefer` when given.
 void Rescan(Flow& flow, const fs::path& prefer) {
   flow.versions = ScanLibrary(g_root);
-  FindVersion(flow.versions, SelectedVersion());
+  FindVersion(flow.versions, GameDirectoryOverride());
   RefreshRootExecutable(g_root, flow.versions);
   const int count = int(flow.versions.size());
   if (!prefer.empty()) {
@@ -394,19 +442,13 @@ void Rescan(Flow& flow, const fs::path& prefer) {
 }
 
 void Begin(const std::shared_ptr<Flow>& flow) {
-  const GameVersion& version = flow->versions[size_t(flow->selected)];
-  // Extracted for later, but this build cannot run it yet.
-  if (!version.startable) {
-    flow->prompt.error = Tr(IntroText::kNotPlayable, VersionLabel(version));
+  GameDirectories dirs;
+  if (!Choose(flow->versions, dirs)) {
     Ask(flow);
     return;
   }
-  // A directory given on the command line is a one off.
-  if (!version.temporary)
-    SaveSelectedVersion(version.key);
-  g_selected_dir = version.dir;
-  REXLOG_INFO("Starting {} from {}", version.release.empty() ? version.key : version.release,
-              version.dir.string());
+  g_started = dirs;
+  REXLOG_INFO("Starting the game files in {}", dirs.mounted.string());
   Finish(flow, true);
 }
 
@@ -471,15 +513,23 @@ void StartJob(std::shared_ptr<Flow> flow, JobWork work, JobDone then) {
   });
 }
 
-// The phases a saved or picked version still needs, then Start when
-// `start` (or back to the library).
+// The phases the installed versions still need, then Start when `start` (or
+// back to the library).
 void RunPhases(std::shared_ptr<Flow> flow, bool start) {
-  const fs::path dir = flow->versions[size_t(flow->selected)].dir;
+  std::vector<fs::path> dirs;
+  for (const GameVersion& version : flow->versions) {
+    if (version.needs_phases)
+      dirs.push_back(version.dir);
+  }
   StartJob(
       std::move(flow),
-      [dir](const InstallHooks& hooks, fs::path& out) {
-        out = dir;
-        return InstallDirectory(dir, hooks);
+      [dirs](const InstallHooks& hooks, fs::path& out) {
+        for (const fs::path& dir : dirs) {
+          out = dir;
+          if (std::string error = InstallDirectory(dir, hooks); !error.empty())
+            return error;
+        }
+        return std::string();
       },
       [start](std::shared_ptr<Flow> flow, std::string error, fs::path dir) {
         Rescan(*flow, dir);
@@ -632,8 +682,6 @@ void DeleteSelected(std::shared_ptr<Flow> flow) {
     EndIntroWork();
     flow->prompt.error = job.error;
   }
-  if (SelectedVersion() == removed.key)
-    SaveSelectedVersion({});
   Rescan(*flow, {});
   Ask(flow);
 }
@@ -657,19 +705,19 @@ void OnChoice(std::shared_ptr<Flow> flow, GameDataChoice choice, int version) {
       Finish(flow, false);
       return;
     case GameDataChoice::kStart:
-      if (const GameVersion* selected = Selected(*flow)) {
-        if (selected->outdated && !skipped) {
-          flow->prompt.outdated = Tr(IntroText::kOutdatedQuestion, VersionLabel(*selected));
-          Ask(flow);
-          return;
-        }
-        if (selected->needs_phases)
-          RunPhases(flow, true);
-        else
-          Begin(flow);
+      if (flow->versions.empty()) {
+        Ask(flow);
         return;
       }
-      Ask(flow);
+      if (const GameVersion* outdated = FirstOutdated(flow->versions); outdated && !skipped) {
+        flow->prompt.outdated = Tr(IntroText::kOutdatedQuestion, VersionLabel(*outdated));
+        Ask(flow);
+        return;
+      }
+      if (NeedsPhases(flow->versions))
+        RunPhases(flow, true);
+      else
+        Begin(flow);
       return;
     case GameDataChoice::kExtractAgain:
       flow->prompt.adding = true;
@@ -730,10 +778,7 @@ void FillVersionRows(Flow& flow) {
     if (version.needs_phases || version.outdated)
       row.note = Tr(version.needs_phases ? IntroText::kNeedsUpdate : IntroText::kOutdated) +
                  (row.note.empty() ? "" : "   " + row.note);
-    if (!version.startable)
-      row.note = Tr(IntroText::kNotSupportedYet) + (row.note.empty() ? "" : "   " + row.note);
     row.languages = version.languages;
-    row.startable = version.startable;
     row.can_delete = !version.temporary && IsDeletable(version.dir);
     prompt.versions.push_back(std::move(row));
   }
@@ -772,21 +817,20 @@ bool UsePreparedGameData(const GameDataOptions& options) {
   BindLibrarySettings(options.user_settings_path);
   MigrateLibrary(g_root, PreparedCandidates());
   g_versions = ScanLibrary(g_root);
-  g_selected = FindVersion(g_versions, SelectedVersion());
+  FindVersion(g_versions, GameDirectoryOverride());
   RefreshRootExecutable(g_root, g_versions);
   g_asked = ConsumeStartScreenRequest(options.start_screen_flag) || REXCVAR_GET(show_start_screen);
-  if (g_selected < 0)
+  for (const GameVersion& version : g_versions)
+    REXLOG_INFO("Game version {} at {}", version.key, version.dir.string());
+  GameDirectories dirs;
+  if (!Choose(g_versions, dirs) || g_asked || NeedsPhases(g_versions) || FirstOutdated(g_versions))
     return false;
-  const GameVersion& version = g_versions[size_t(g_selected)];
-  REXLOG_INFO("Game version {} at {}", version.key, version.dir.string());
-  if (g_asked || version.needs_phases || version.outdated || !version.startable)
-    return false;
-  g_selected_dir = version.dir;
+  g_started = dirs;
   return true;
 }
 
-fs::path SelectedGameDirectory() {
-  return g_selected_dir;
+const GameDirectories& StartedGameDirectories() {
+  return g_started;
 }
 
 void AskForGameData(const GameDataOptions& options, rex::ui::WindowedAppContext& context,
@@ -797,22 +841,19 @@ void AskForGameData(const GameDataOptions& options, rex::ui::WindowedAppContext&
   flow->done = std::move(done);
   flow->prompt.copy_hint = CopyHint();
   flow->versions = std::move(g_versions);
-  flow->selected = g_selected;
-  if (flow->selected < 0 && !flow->versions.empty())
-    flow->selected = 0;
-  const GameVersion* saved = g_selected >= 0 ? Selected(*flow) : nullptr;
+  flow->selected = flow->versions.empty() ? -1 : 0;
   // Asked on every launch until the game is unpacked again; Skip starts it.
-  if (saved && saved->outdated && !g_asked) {
-    flow->prompt.outdated = Tr(IntroText::kOutdatedQuestion, VersionLabel(*saved));
+  if (const GameVersion* outdated = FirstOutdated(flow->versions); outdated && !g_asked) {
+    flow->prompt.outdated = Tr(IntroText::kOutdatedQuestion, VersionLabel(*outdated));
     Ask(flow);
     return;
   }
-  if (!saved || !saved->needs_phases) {
+  if (!NeedsPhases(flow->versions)) {
     Ask(flow);
     return;
   }
-  // The saved version is behind this build: the intro shows its phases
-  // running, then starts it unless the screen was asked for.
+  // A version is behind this build: the intro shows its phases running, then
+  // starts the library unless the screen was asked for.
   if (IntroScreenAvailable()) {
     FillVersionRows(*flow);
     ShowIntroScreen(flow->prompt,

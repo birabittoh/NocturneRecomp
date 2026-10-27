@@ -62,7 +62,6 @@ SourceInfo FromHash(const std::vector<uint8_t>& file, const std::string& unknown
   }
   SourceInfo info{release->name, {}, release->languages};
   info.id = release->id;
-  info.startable = release->startable;
   if (!release->supported)
     info.error = TrErr("err_unsupported", info.release);
   return info;

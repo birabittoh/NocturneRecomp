@@ -41,7 +41,7 @@ enum class IntroText {
   kAlreadyInstalled,
   kLinked,
   kNeedsUpdate,
-  kChooseVersion,
+  kLibraryReady,
   kHintSelect,
   kHintBack,
   kHintQuit,
@@ -50,8 +50,6 @@ enum class IntroText {
   kOutdatedQuestion,
   kSkip,
   kExtractAgain,
-  kNotSupportedYet,
-  kNotPlayable,
   kCount,
 };
 

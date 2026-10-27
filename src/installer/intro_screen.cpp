@@ -468,7 +468,7 @@ class IntroDialog final : public rex::ui::ImGuiDialog {
         } else if (!prompt_.outdated.empty()) {
           body = prompt_.outdated;
         } else if (Library()) {
-          body = Tr(IntroText::kChooseVersion);
+          body = Tr(IntroText::kLibraryReady);
         } else if (prompt_.can_extract) {
           body = (prompt_.release.empty() ? std::string(Tr(IntroText::kFound))
                                           : Tr(IntroText::kFoundRelease, prompt_.release)) +
@@ -649,15 +649,20 @@ class IntroDialog final : public rex::ui::ImGuiDialog {
                : nullptr;
   }
 
-  // The release Start or Extract applies to.
+  // The text of the release Extract applies to, or of every one Start does.
   uint32_t Languages() const {
     if (!Library())
       return prompt_.languages;
-    const VersionRow* row = SelectedRow();
-    return row ? row->languages : 0;
+    uint32_t languages = 0;
+    for (const VersionRow& row : prompt_.versions) {
+      if (!row.languages)
+        return 0;
+      languages |= row.languages;
+    }
+    return languages;
   }
 
-  // Whether that release has text in language `index`; any does before one
+  // Whether those releases have text in language `index`; any does before one
   // is picked.
   bool Supported(int index) const {
     const uint32_t languages = Languages();
@@ -751,7 +756,7 @@ class IntroDialog final : public rex::ui::ImGuiDialog {
     const VersionRow* row = SelectedRow();
     switch (option.choice) {
       case GameDataChoice::kStart:
-        return row && Supported(IntroLanguage()) && mod_block_.empty();
+        return Supported(IntroLanguage()) && mod_block_.empty();
       case GameDataChoice::kExtract:
         return prompt_.can_extract;
       case GameDataChoice::kDelete:
@@ -838,7 +843,7 @@ class IntroDialog final : public rex::ui::ImGuiDialog {
     }
   }
 
-  // A version row picks that version and hands the cursor to Start.
+  // A version row picks that version for Delete and hands the cursor to Start.
   void Press(int i) {
     const Option& option = options_[size_t(i)];
     if (option.mods) {
@@ -1067,7 +1072,7 @@ class IntroDialog final : public rex::ui::ImGuiDialog {
       } else if (option.version < 0 && option.choice == go && prompt_.confirm.empty() &&
                  !Supported(IntroLanguage())) {
         const std::string release =
-            library ? (SelectedRow() ? SelectedRow()->label : std::string()) : prompt_.release;
+            library ? prompt_.versions.front().label : prompt_.release;
         DrawLanguageWarning(draw, font, size, unit, ImVec2(max.x, min.y), h, alpha, release);
       }
     }
@@ -1412,7 +1417,7 @@ class IntroDialog final : public rex::ui::ImGuiDialog {
   GameDataPrompt prompt_;
   std::vector<Option> options_;
   int selected_ = 0;
-  // The version Start applies to, and the version list's first shown row.
+  // The version Delete applies to, and the version list's first shown row.
   int selected_version_ = -1;
   bool gamepad_ = false;
   // The language picker has the keys instead of selected_.

@@ -33,16 +33,18 @@ The game opens on a start screen. Pick your legally dumped XBLA package (the
 **Extract**.
 
 Two releases are recognized, and each is installed into its own folder of
-the game library:
+the game library. Either one is enough to play, and with both installed the
+game uses them together: World's files, plus what only the Japanese release
+has.
 
-| Release | Folder | Status |
+| Release | Folder | Adds |
 |---|---|---|
-| Castlevania: Symphony of the Night (Xbox Live Arcade, World) | `assets/xbla-world` | playable |
-| Dracula X: Nocturne in the Moonlight (Xbox Live Arcade, Japan) | `assets/xbla-jp` | extracts, not playable yet |
+| Castlevania: Symphony of the Night (Xbox Live Arcade, World) | `assets/xbla-world` | the base game |
+| Dracula X: Nocturne in the Moonlight (Xbox Live Arcade, Japan) | `assets/xbla-jp` | the story movies (opening, castle collapse, ending) |
 
 The start screen also has a **Mods** page and a **Saves** page (export a
 save as a zip, import one into an empty slot, delete). It is skipped once a
-playable version is picked; use **Restart to Start Screen** in the settings
+version is installed; use **Restart to Start Screen** in the settings
 overlay (F4) to come back to it, or set `show_start_screen = true` to see it
 on every launch.
 

@@ -16,11 +16,10 @@
 #endif
 
 #include "install_pipeline.h"
-#include "release_id.h"
 
 REXCVAR_DEFINE_STRING(game_version, "", "Game",
-                      "The installed game version to start: its folder name in game_data_root, "
-                      "or the path of a game directory")
+                      "A game directory to start in place of the library's releases, for this "
+                      "run only")
     .hidden();
 
 namespace nocturne {
@@ -74,19 +73,12 @@ std::string TomlString(std::string_view text) {
   return out + "\"";
 }
 
-void SaveSettings(const char* name) {
-  if (!g_user_settings_path.empty())
-    rex::cvar::SaveConfigSubset(g_user_settings_path, {name});
-}
-
-// Older builds kept game directories outside the library, used in place, in
-// game_version_links. They are no longer listed; the line goes, and the log
-// names the folders, which are left as they are.
-void DropLinkedVersions() {
+// Removes `name`'s line from settings.toml and returns the string it held.
+std::string DropSetting(std::string_view name) {
   if (g_user_settings_path.empty())
-    return;
+    return {};
   std::istringstream in(ReadText(g_user_settings_path));
-  std::string kept;
+  std::string kept, value;
   bool dropped = false;
   std::string line;
   while (std::getline(in, line)) {
@@ -95,27 +87,40 @@ void DropLinkedVersions() {
         std::string_view(line).substr(0, equals == std::string::npos ? 0 : equals);
     while (!key.empty() && (key.back() == ' ' || key.back() == '\t'))
       key.remove_suffix(1);
-    if (key != "game_version_links") {
+    if (key != name) {
       kept += line + '\n';
       continue;
     }
     dropped = true;
-    std::string value;
     try {
-      value = toml::parse(line)["game_version_links"].value_or(std::string());
+      value = toml::parse(line)[name].value_or(std::string());
     } catch (const toml::parse_error&) {
-    }
-    size_t from = 0;
-    while (from < value.size()) {
-      const size_t bar = std::min(value.find('|', from), value.size());
-      if (bar > from)
-        REXLOG_INFO("No longer listing the linked game files in {}; they are left there",
-                    value.substr(from, bar - from));
-      from = bar + 1;
     }
   }
   if (dropped && !WriteText(g_user_settings_path, kept))
     REXLOG_WARN("Could not rewrite {}", g_user_settings_path.string());
+  return value;
+}
+
+// Older builds kept game directories outside the library, used in place, in
+// game_version_links, and the one release to start in game_version. Both lines
+// go; the log names the folders, which are left as they are.
+void DropOldSettings() {
+  const std::string links = DropSetting("game_version_links");
+  size_t from = 0;
+  while (from < links.size()) {
+    const size_t bar = std::min(links.find('|', from), links.size());
+    if (bar > from)
+      REXLOG_INFO("No longer listing the linked game files in {}; they are left there",
+                  links.substr(from, bar - from));
+    from = bar + 1;
+  }
+  if (const std::string pick = DropSetting("game_version"); !pick.empty())
+    REXLOG_INFO("Dropped the saved game version {}: every installed release starts", pick);
+  // Only the command line names a directory to start now.
+  const auto* flag = rex::cvar::GetFlagInfo("game_version");
+  if (flag && flag->source == rex::cvar::Source::kConfig)
+    REXCVAR_SET(game_version, "");
 }
 
 bool SamePath(const fs::path& a, const fs::path& b) {
@@ -223,8 +228,6 @@ void Describe(GameVersion& version, bool write) {
     if (write && !info.release.empty())
       WriteVersionInfo(version.dir, info.id, info.release, info.languages);
   }
-  const Release* release = FindReleaseById(version.id);
-  version.startable = !release || release->startable;
   version.needs_phases = NeedsConversion(version.dir) || NeedsPatching(version.dir);
   version.outdated = IsOutdated(version.dir);
 }
@@ -248,7 +251,7 @@ void MigrateLibrary(const fs::path& root, const std::vector<fs::path>& candidate
       FinishMove(root, folder);
   }
 
-  DropLinkedVersions();
+  DropOldSettings();
 
   // Goopie's Select Folder links the root to an extraction. Only the link
   // goes: the migration below would otherwise move the files it points to.
@@ -421,13 +424,8 @@ void RefreshRootExecutable(const fs::path& root, const std::vector<GameVersion>&
   REXLOG_INFO("{} now comes from {}", xex.string(), source.string());
 }
 
-std::string SelectedVersion() {
+std::string GameDirectoryOverride() {
   return REXCVAR_GET(game_version);
-}
-
-void SaveSelectedVersion(const std::string& key) {
-  REXCVAR_SET(game_version, key);
-  SaveSettings("game_version");
 }
 
 std::string VersionLabel(const GameVersion& version) {

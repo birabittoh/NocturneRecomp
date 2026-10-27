@@ -49,8 +49,6 @@ struct SourceInfo {
   uint64_t required_bytes = 0;
   // The library folder name (Release::id), empty when not known.
   std::string id;
-  // Release::startable; false for a known release this build cannot run yet.
-  bool startable = true;
 };
 
 // Identifies `picked` (as Install takes it, or a game directory) without
