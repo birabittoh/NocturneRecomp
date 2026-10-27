@@ -317,11 +317,14 @@ void RandoRuntime::Tick() {
   was_front_end_ = front_end;
 
   // An enhancement was switched in the settings: rewrite the world in memory,
-  // at the title only, like a seed.
+  // wherever the game is. Unlike a seed, enhancements are not part of what a
+  // save was written in, so nothing breaks if a game is running; this is the
+  // guest thread between frames, so no guest code sees a half-written world.
+  // Data the game already copied out of the image (a stage's layout, say)
+  // keeps its old bytes until the game loads it again.
   const State current = state();
   const rando::Enhancements wanted = CurrentEnhancements();
-  if (front_end && current.supported && !current.request_pending &&
-      wanted != current.enhancements) {
+  if (current.supported && !current.request_pending && wanted != current.enhancements) {
     std::string error;
     std::lock_guard apply_lock(apply_mutex_);
     // A set that failed was reported once; wait for another change.

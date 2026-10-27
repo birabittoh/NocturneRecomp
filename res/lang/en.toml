@@ -52,7 +52,6 @@ update_restart = "Restart to {}"
 [enhancements]
 intro = "Fixes and tweaks from MottZilla's SOTN_XB_RANDO randomizer. They apply to the vanilla game and on top of randomizer seeds."
 applying = "Applying..."
-takes_effect = "Changes take effect at the title screen."
 in_seed = "(in seed)"
 not_applied = "(not applied)"
 tip_in_seed = "Always on with the active randomizer seed."

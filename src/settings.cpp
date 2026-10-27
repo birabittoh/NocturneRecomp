@@ -447,7 +447,7 @@ class CuratedSettingsDialog : public rex::ui::ImGuiDialog {
   }
 
   // The randomizer core's standalone patches (see enhancements.h). The
-  // runtime picks a change up at the title screen, so this tab only edits
+  // runtime picks a change up on the next guest frame, so this tab only edits
   // the cvars.
   void DrawEnhancementsTab() {
     const auto runtime = GetRandoRuntime().state();
@@ -460,8 +460,7 @@ class CuratedSettingsDialog : public rex::ui::ImGuiDialog {
       ImGui::PopStyleColor();
     } else if (CurrentEnhancements() != runtime.enhancements) {
       ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 0.85f, 0.2f, 1.0f));
-      ImGui::TextUnformatted(GetRandoRuntime().InFrontEnd() ? Tr("enhancements", "applying")
-                                                            : Tr("enhancements", "takes_effect"));
+      ImGui::TextUnformatted(Tr("enhancements", "applying"));
       ImGui::PopStyleColor();
     }
     ImGui::PopTextWrapPos();

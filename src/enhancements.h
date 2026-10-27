@@ -5,8 +5,8 @@
 // (settings.cpp).
 //
 // They are not part of any seed: RandoRuntime writes them over whatever world
-// is in guest memory (vanilla or a seed), and like seeds they only change at
-// the title screen / main menu (see src/rando_runtime.h). Over a seed, the
+// is in guest memory (vanilla or a seed), and change on the next guest tick
+// even mid-game (see src/rando_runtime.h). Over a seed, the
 // ones the seed already applies or would clash with are left out
 // (EffectiveEnhancements).
 #pragma once

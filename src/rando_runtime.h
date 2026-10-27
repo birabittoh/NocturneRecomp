@@ -37,8 +37,8 @@
 // The enhancements (src/enhancements.h) are written over whichever world is
 // in memory, vanilla or seed, so what guest memory holds is always one
 // composed PatchSet (rando::ComposeWorld). They are game settings, not part
-// of a seed or a save: a change made while a game runs waits for the title
-// screen, like a seed.
+// of a seed or a save: a change made while a game runs is applied on the next
+// tick, where a seed waits for the title screen.
 #pragma once
 
 #include <cstddef>

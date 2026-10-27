@@ -47,7 +47,6 @@ update_restart = "Riavvia a {}"
 [enhancements]
 intro = "Correzioni e ritocchi dal randomizer SOTN_XB_RANDO di MottZilla. Valgono per il gioco originale e si sommano ai seed del randomizer."
 applying = "Applicazione..."
-takes_effect = "Le modifiche hanno effetto alla schermata del titolo."
 in_seed = "(nel seed)"
 not_applied = "(non applicato)"
 tip_in_seed = "Sempre attivo con il seed del randomizer in uso."

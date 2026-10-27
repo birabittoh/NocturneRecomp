@@ -50,7 +50,6 @@ update_restart = "{} に再起動"
 [enhancements]
 intro = "MottZillaのランダマイザー SOTN_XB_RANDO の修正と調整です。通常のゲームにも、ランダマイザーのシードの上にも適用されます。"
 applying = "適用中..."
-takes_effect = "変更はタイトル画面で反映されます。"
 in_seed = "(シードに含む)"
 not_applied = "(未適用)"
 tip_in_seed = "有効なランダマイザーのシードでは常にオンです。"
