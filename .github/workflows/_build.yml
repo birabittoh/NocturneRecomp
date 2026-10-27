@@ -21,7 +21,7 @@ on:
 env:
   ASSETS_REPO: ${{ vars.ASSETS_REPO }}
   ASSET_PATH: default.xex
-  ASSET_CACHE_KEY: codegen-assets-v2
+  ASSET_CACHE_KEY: codegen-assets-v3
 
 jobs:
   build:
@@ -32,10 +32,6 @@ jobs:
       # `platform` names both the SDK to download and the release asset, so
       # it has to match ModState::HostPlatformId() for the auto-updater.
       matrix:
-        platform:
-          - win-amd64
-          - linux-amd64
-          - linux-arm64
         include:
           - platform: win-amd64
             runner: windows-latest
@@ -46,19 +42,31 @@ jobs:
           - platform: linux-arm64
             runner: ubuntu-24.04-arm
 
+          - platform: mac-amd64
+            runner: macos-26-intel
+
+          - platform: mac-arm64
+            runner: macos-26
+
+          - platform: android-arm64
+            runner: ubuntu-latest
+            # Host SDK for codegen (runs natively on x86_64 Linux)
+            sdk_dir: linux-amd64
+            # Target SDK for cross-compile (Android ARM64 libraries)
+            target_sdk_dir: android-arm64
+            ndk_version: "27.0.12077973"
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
         with:
           submodules: recursive
-          # Full history + tags: CMakeLists.txt derives NOCTURNE_VERSION from
-          # `git describe --tags`, and a shallow checkout has no tags, so the
-          # build would stamp 0.0.0 and reject mods that declare a
-          # `game_version` requirement.
+          # The Android versionCode/versionName come from the newest reachable
+          # v* tag, which a default shallow checkout does not fetch.
+          fetch-tags: true
           fetch-depth: 0
 
       - name: Install dependencies (Linux)
-        if: startsWith(matrix.platform, 'linux-')
+        if: startsWith(matrix.platform, 'linux')
         run: |
           wget -qO- https://apt.llvm.org/llvm.sh | sudo bash -s -- 20
           sudo apt-get install -y \
@@ -68,15 +76,83 @@ jobs:
           sudo update-alternatives --install /usr/bin/clang clang /usr/bin/clang-20 200
           sudo update-alternatives --install /usr/bin/clang++ clang++ /usr/bin/clang++-20 200
 
+      - name: Install dependencies (Android)
+        if: matrix.platform == 'android-arm64'
+        run: |
+          wget -qO- https://apt.llvm.org/llvm.sh | sudo bash -s -- 20
+          sudo apt-get install -y ninja-build
+
+      - name: Install dependencies (macOS)
+        if: startsWith(matrix.platform, 'mac-')
+        run: brew install cmake ninja vulkan-loader molten-vk
+
+      # Xcode 26's `metal` compiler lives in a separate, opt-in component;
+      # HLSL-to-metallib shader compilation needs it installed explicitly.
+      - name: Install Metal Toolchain (macOS)
+        if: startsWith(matrix.platform, 'mac-')
+        run: xcodebuild -downloadComponent MetalToolchain
+
       - name: Install LLVM, CMake, Ninja (Windows)
         if: matrix.platform == 'win-amd64'
         run: choco install llvm cmake ninja -y
+
+      - name: Install Android NDK
+        if: matrix.platform == 'android-arm64'
+        run: |
+          SDKMANAGER="$(ls "$ANDROID_HOME"/cmdline-tools/*/bin/sdkmanager | sort -V | tail -1)"
+          "$SDKMANAGER" --install "ndk;${{ matrix.ndk_version }}"
+          echo "ANDROID_NDK_HOME=$ANDROID_HOME/ndk/${{ matrix.ndk_version }}" >> "$GITHUB_ENV"
+
+      - name: Set up JDK 17 (Android)
+        if: matrix.platform == 'android-arm64'
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Set up Gradle (Android)
+        if: matrix.platform == 'android-arm64'
+        uses: gradle/actions/setup-gradle@v5
+        with:
+          gradle-version: '8.11.1'
 
       - name: Set up sccache
         uses: hendrikmuhs/ccache-action@v1.2.22
         with:
           variant: sccache
           key: ${{ matrix.platform }}
+
+      # download-sdk.py authenticates its GitHub API calls with this token so
+      # the 6 parallel matrix legs share the 5000/hour authenticated rate
+      # limit instead of the 60/hour unauthenticated one, which a burst of
+      # simultaneous requests from the runner IPs could exhaust on its own.
+      - name: Download ReXGlue SDK
+        shell: bash
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: python scripts/download-sdk.py sdk/${{ matrix.sdk_dir || matrix.platform }} --pinned
+
+      - name: Download ReXGlue SDK (Android target)
+        if: matrix.target_sdk_dir
+        shell: bash
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: python scripts/download-sdk.py sdk/${{ matrix.target_sdk_dir }} --pinned --platform ${{ matrix.target_sdk_dir }}
+
+      # Ninja re-invokes codegen using the SDK CMAKE_PREFIX_PATH points at,
+      # which here is the Android target SDK's ARM64 rexglue, built for the
+      # device. rexglue is build-only tooling, so swap in the host binary
+      # here. Its librexruntime.so dependency comes from LD_LIBRARY_PATH on
+      # the build step below, keeping the target SDK's own arm64 runtime
+      # libraries in place.
+      - name: Use host rexglue for codegen in the Android target SDK
+        if: matrix.target_sdk_dir
+        shell: bash
+        run: cp sdk/${{ matrix.sdk_dir || matrix.platform }}/bin/rexglue sdk/${{ matrix.target_sdk_dir }}/bin/rexglue
+
+      - name: Install Python build dependencies
+        shell: bash
+        run: python -m pip install --disable-pip-version-check cryptography Pillow numpy
 
       - name: Cache XEX asset for codegen
         id: asset-cache
@@ -87,6 +163,9 @@ jobs:
             assets/MEDIA
           key: ${{ env.ASSET_CACHE_KEY }}
 
+      # On a cold cache all 6 matrix legs hit the assets repo's contents API
+      # at once, and the burst can trip a 403 on whichever request lands
+      # last. Retry with a backoff rather than serialising the legs.
       - name: Fetch XEX asset
         if: steps.asset-cache.outputs.cache-hit != 'true'
         env:
@@ -94,30 +173,81 @@ jobs:
         shell: bash
         run: |
           mkdir -p assets
-          gh api -H "Accept: application/vnd.github.raw" \
-            "repos/${{ env.ASSETS_REPO }}/contents/${{ env.ASSET_PATH }}" \
-            > "assets/${{ env.ASSET_PATH }}"
-          size=$(wc -c < "assets/${{ env.ASSET_PATH }}")
-          echo "Fetched ${{ env.ASSET_PATH }} ($size bytes)"
-          [ "$size" -ge 1048576 ] || { echo "Asset too small — fetch likely failed"; exit 1; }
+          fetch() {
+            for attempt in 1 2 3 4 5; do
+              if gh api -H "Accept: application/vnd.github.raw" "repos/${{ env.ASSETS_REPO }}/contents/$1" > "assets/$1"; then
+                size=$(wc -c < "assets/$1")
+                echo "Fetched $1 ($size bytes)"
+                [ "$size" -ge "$2" ] && return 0
+                echo "Asset too small, fetch likely failed"
+              fi
+              echo "Attempt $attempt failed; retrying in $((attempt * 15))s"
+              sleep $((attempt * 15))
+            done
+            rm -f "assets/$1"
+            return 1
+          }
+          fetch "${{ env.ASSET_PATH }}" 1048576
 
           # Shader containers that gen-guest-shaders.py translates.
           mkdir -p assets/MEDIA
-          for f in $(gh api "repos/${{ env.ASSETS_REPO }}/contents/MEDIA" --jq '.[].name'); do
-            gh api -H "Accept: application/vnd.github.raw" \
-              "repos/${{ env.ASSETS_REPO }}/contents/MEDIA/$f" > "assets/MEDIA/$f"
+          names=""
+          for attempt in 1 2 3 4 5; do
+            names=$(gh api "repos/${{ env.ASSETS_REPO }}/contents/MEDIA" --jq '.[].name') && break
+            sleep $((attempt * 15))
+          done
+          [ -n "$names" ] || { echo "Could not list MEDIA"; exit 1; }
+          for f in $names; do
+            fetch "MEDIA/$f" 1 || exit 1
           done
           ls assets/MEDIA/*.xvu assets/MEDIA/*.xpu
 
-      - name: Download SDK
+      - name: Build (desktop)
+        if: matrix.platform != 'android-arm64'
         shell: bash
-        run: python scripts/download-sdk.py "sdk/${{ matrix.platform }}" --pinned
+        env:
+          # Version the self-updater compares releases against; empty for CI
+          # artifact builds, where CMake falls back to the newest reachable tag.
+          NOCTURNE_VERSION_NAME: ${{ inputs.tag }}
+        run: python scripts/build.py --release --sdk-dir sdk/${{ matrix.sdk_dir || matrix.platform }}
 
-      - name: Build
+      # Android: codegen runs on the host SDK, then cross-compile with NDK
+      # against the Android target SDK.
+      - name: Run codegen (Android)
+        if: matrix.platform == 'android-arm64'
         shell: bash
-        run: python scripts/build.py --release --sdk-dir sdk/${{ matrix.platform }}
+        run: |
+          sdk/${{ matrix.sdk_dir || matrix.platform }}/bin/rexglue codegen nocturnerecomp_manifest.toml
+          sed -i 's/^sdk_version = .*/sdk_version = ""/' nocturnerecomp_manifest.toml
 
-      - name: Package
+      - name: CMake configure (Android)
+        if: matrix.platform == 'android-arm64'
+        shell: bash
+        env:
+          NOCTURNE_VERSION_NAME: ${{ inputs.tag }}
+        run: |
+          cmake --preset android-arm64-release \
+            -DCMAKE_ANDROID_NDK="$ANDROID_NDK_HOME" \
+            -DCMAKE_PREFIX_PATH=sdk/${{ matrix.target_sdk_dir }} \
+            -DCMAKE_FIND_ROOT_PATH="$PWD/sdk/${{ matrix.target_sdk_dir }}" \
+            -DCMAKE_CXX_COMPILER_LAUNCHER=sccache
+
+      - name: CMake build (Android)
+        if: matrix.platform == 'android-arm64'
+        shell: bash
+        # Lets the host rexglue swapped into the target SDK's bin/ (see step
+        # above) find its librexruntime.so, without a copy near the arm64 one.
+        env:
+          LD_LIBRARY_PATH: ${{ github.workspace }}/sdk/${{ matrix.sdk_dir || matrix.platform }}/bin:${{ github.workspace }}/sdk/${{ matrix.sdk_dir || matrix.platform }}/lib
+        run: cmake --build --preset android-arm64-release --parallel $(nproc)
+
+      - name: sccache stats
+        if: always()
+        shell: bash
+        run: sccache --show-stats || true
+
+      - name: Package (desktop)
+        if: matrix.platform != 'android-arm64' && !startsWith(matrix.platform, 'mac-')
         shell: bash
         run: |
           if [ "${{ inputs.publish_mode }}" = "artifact" ]; then
@@ -127,23 +257,115 @@ jobs:
           fi
           python scripts/build.py --package "${out}"
 
+      # macOS gets a .app inside a .dmg rather than a tar.gz: the Vulkan
+      # runtime has to be bundled (there is none on macOS by default), and a
+      # disk image is what lets the user drag the app out to /Applications,
+      # which is also what frees it from App Translocation. See
+      # scripts/package-mac.py.
+      - name: Package (macOS)
+        if: startsWith(matrix.platform, 'mac-')
+        shell: bash
+        run: |
+          if [ "${{ inputs.publish_mode }}" = "artifact" ]; then
+            out="${{ inputs.artifact_name }}-${{ matrix.platform }}"
+            version="0.0.0"
+          else
+            out="nocturnerecomp-${{ inputs.tag }}-${{ matrix.platform }}"
+            version="$(echo "${{ inputs.tag }}" | sed 's/^v//')"
+          fi
+          python scripts/package-mac.py --name "${out}" --version "${version}"
+
+      - name: Generate Android launcher icon
+        if: matrix.platform == 'android-arm64'
+        shell: bash
+        run: python -m pip install --disable-pip-version-check Pillow && python scripts/gen-android-icon.py
+
+      # Without this the APK is debug-signed with the runner's throwaway key,
+      # so it cannot be installed over a locally built one (and vice versa)
+      # without uninstalling first, which drops saves and extracted game data.
+      - name: Restore sideload signing keystore (Android)
+        if: matrix.platform == 'android-arm64'
+        shell: bash
+        env:
+          KEYSTORE_BASE64: ${{ secrets.NOCTURNE_KEYSTORE_BASE64 }}
+        run: |
+          if [ -z "$KEYSTORE_BASE64" ]; then
+            echo "::warning::NOCTURNE_KEYSTORE_BASE64 is not set; the APK will be debug-signed and will not install over a sideload-signed build."
+            exit 0
+          fi
+          mkdir -p android/keystore
+          echo "$KEYSTORE_BASE64" | base64 -d > android/keystore/sideload.jks
+          echo "Restored android/keystore/sideload.jks ($(wc -c < android/keystore/sideload.jks) bytes)"
+
+      - name: Package (Android)
+        if: matrix.platform == 'android-arm64'
+        shell: bash
+        env:
+          # Empty for CI artifact builds, where Gradle falls back to the newest
+          # reachable tag.
+          NOCTURNE_VERSION_NAME: ${{ inputs.tag }}
+          NOCTURNE_KEYSTORE_PASSWORD: ${{ secrets.NOCTURNE_KEYSTORE_PASSWORD }}
+          NOCTURNE_KEY_ALIAS: ${{ secrets.NOCTURNE_KEY_ALIAS }}
+          NOCTURNE_KEY_PASSWORD: ${{ secrets.NOCTURNE_KEY_PASSWORD }}
+        run: |
+          if [ "${{ inputs.publish_mode }}" = "artifact" ]; then
+            name="${{ inputs.artifact_name }}-${{ matrix.platform }}"
+          else
+            name="nocturnerecomp-${{ inputs.tag }}-${{ matrix.platform }}"
+          fi
+
+          BUILD_DIR="$PWD/out/build/android-arm64-release"
+          JNI_DIR="$PWD/android/app/jniLibs/arm64-v8a"
+          mkdir -p "$JNI_DIR"
+
+          # Stage the project's own shared library.
+          cp -v "$BUILD_DIR/libnocturnerecomp.so" "$JNI_DIR/"
+          # libadrenotools' hooks, loaded by name from nativeLibraryDir.
+          cp -v "$BUILD_DIR"/lib{main_hook,file_redirect_hook,gsl_alloc_hook,hook_impl}.so "$JNI_DIR/"
+
+          # Stage SDK runtime libraries (release variants only).
+          for lib in sdk/${{ matrix.target_sdk_dir }}/lib/*.so; do
+            base=$(basename "$lib")
+            # Skip debug ("d") and relwithdebinfo ("rd") variants.
+            case "$base" in
+              *rd.so) continue ;;
+              *d.so)  continue ;;
+            esac
+            # Skip DXC — build-time shader compiler, not a runtime dependency.
+            # Skip GPU plugins: the native renderer is the only one.
+            case "$base" in
+              libdxcompiler*|libdxil*|librexgpu-*) continue ;;
+            esac
+            cp -v "$lib" "$JNI_DIR/"
+          done
+
+          echo "=== Staged jniLibs ==="
+          ls -lh "$JNI_DIR/"
+
+          # Signed with the sideload key when the keystore was restored above,
+          # otherwise debug-signed.
+          cd android
+          gradle assembleRelease --no-daemon
+
+          # Locate the built APK and stage it for upload.
+          APK=$(find app/build/outputs/apk/release -name '*.apk' | head -1)
+          mkdir -p ../pkg
+          cp "$APK" "../pkg/${name}.apk"
+          echo "ARTIFACT_PATH=pkg/${name}.apk" >> "$GITHUB_ENV"
+          echo "ARTIFACT_NAME=${name}" >> "$GITHUB_ENV"
+
       - name: Upload CI artifact
         if: inputs.publish_mode == 'artifact'
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
-          name: ${{ inputs.artifact_name }}-${{ matrix.platform }}
+          name: ${{ env.ARTIFACT_NAME }}
           path: pkg/
           if-no-files-found: error
 
       - name: Upload release artifact
         if: inputs.publish_mode == 'release'
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: release-${{ matrix.platform }}
           path: ${{ env.ARTIFACT_PATH }}
           if-no-files-found: error
-
-      - name: sccache stats
-        if: always()
-        shell: bash
-        run: sccache --show-stats || true
