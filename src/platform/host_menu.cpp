@@ -1,6 +1,7 @@
 #include "host_menu.h"
 
 #include <rex/platform.h>
+#include <rex/platform/process.h>
 #include <rex/ui/keybinds.h>
 #include <rex/ui/window.h>
 #include <rex/ui/windowed_app_context.h>
@@ -190,6 +191,8 @@ bool RestartAndroidApp() {
 HostMenu::HostMenu(rex::ui::Window* window) : window_(window) {
   g_instance = this;
 #if REX_PLATFORM_ANDROID
+  // The SDK mod overlay's restart button goes through Relaunch(), which would fork.
+  rex::platform::process::SetRelaunchHandler(RestartAndroidApp);
   // "BrowserBack" is the Android back button (trapped by SDL_HINT_
   // ANDROID_TRAP_BACK_BUTTON in window_sdl.cpp so it arrives as a key event
   // instead of backgrounding the app) and doubles as a desktop keyboard's
@@ -202,6 +205,7 @@ HostMenu::HostMenu(rex::ui::Window* window) : window_(window) {
 
 HostMenu::~HostMenu() {
 #if REX_PLATFORM_ANDROID
+  rex::platform::process::SetRelaunchHandler(nullptr);
   rex::ui::UnregisterBind("bind_host_menu");
 #endif
   g_instance = nullptr;
