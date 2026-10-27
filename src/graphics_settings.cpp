@@ -32,6 +32,7 @@
 #include <rex/system/mod_storage.h>
 
 #include "function_hooks.h"
+#include "jp_artwork.h"
 #include "language_switch.h"
 #include "player_status.h"
 
@@ -1122,6 +1123,7 @@ extern "C" void GraphicsSettings_PerFrame(PPCContext& ctx, uint8_t* base) {
   // Not graphics, but this is the one per-frame hook with a live context.
   nocturne::player::ApplyRequestedLevelUp(ctx, base);
   ApplyPendingLanguageSwitch(ctx, base);
+  ApplyPendingArtwork(base);
 
   ApplyRequestedPreset(ctx, base);
   ApplyPendingCustomRatioRequest(base);

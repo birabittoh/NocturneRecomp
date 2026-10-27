@@ -177,8 +177,7 @@ bool PatchTables(const fs::path& world_sound, const fs::path& jp_sound) {
 }  // namespace
 
 bool JpVoicesAvailable() {
-  std::error_code ec;
-  return !JpDir().empty() && !fs::equivalent(JpDir(), GameDataRoot(), ec);
+  return JpOverlaysAvailable();
 }
 
 void InstallJpVoices(rex::Runtime* runtime) {

@@ -7,6 +7,7 @@
 #include "game_data.h"
 #include "graphics_settings.h"
 #include "host_menu.h"
+#include "jp_artwork.h"
 #include "jp_voices.h"
 #include "rando_runtime.h"
 #include "touch_input_driver.h"
@@ -143,11 +144,11 @@ constexpr std::array kGameDefaults = {
 // host_timer_resolution_ms is absent here on purpose: 5ms is right for
 // everyone, so it gets no curated row. It is listed in kAdvancedCvarNames
 // instead, where the generic widget exposes it as the raw millisecond value.
-constexpr std::array<const char*, 16> kBasicCvarNames = {
+constexpr std::array<const char*, 17> kBasicCvarNames = {
     "fullscreen",       "vsync",         "user_name",       "user_language",
     "gpu_backend",      "vulkan_device", "audio_mute",      "audio_volume",
     "graphics_style_enhanced", "touch_controls", "touch_movement", "touch_function_keys", "touch_scale",
-    "touch_opacity", "touch_hide_delay", "english_voices"};
+    "touch_opacity", "touch_hide_delay", "english_voices", "artwork"};
 
 // audio_volume is stored (and applied to samples by the SDL audio driver) as
 // linear amplitude, but human loudness perception is roughly logarithmic --
@@ -355,6 +356,7 @@ class CuratedSettingsDialog : public rex::ui::ImGuiDialog {
     DrawAudioMuteRow();
     DrawAudioVolumeRow();
     DrawEnglishVoicesRow();
+    DrawArtworkRow();
     DrawUserNameRow();
     DrawLanguageRow();
     // The native renderer reads both: gpu_backend picks D3D12 or Vulkan (only
@@ -793,6 +795,42 @@ class CuratedSettingsDialog : public rex::ui::ImGuiDialog {
     ImGui::PushID("english_voices");
     if (rex::ui::DrawCvarWidget(*entry, 160.0f, /*persist=*/true)) {
       SaveBasic();
+    }
+    ImGui::PopID();
+  }
+
+  // Only with both releases installed: otherwise there is one set of artwork.
+  // Applies live (see jp_artwork.h); "Auto" follows the language.
+  void DrawArtworkRow() {
+    const auto* entry = rex::cvar::GetFlagInfo("artwork");
+    if (!entry || !JpArtworkAvailable())
+      return;
+
+    static const std::array<std::string, 3> kValues = {"auto", "jp", "world"};
+    auto label_for = [](const std::string& id) -> std::string {
+      if (id == "jp")
+        return "JP";
+      if (id == "world")
+        return "World";
+      return Tr("settings", "auto");
+    };
+
+    const std::string current = entry->getter();
+    ImGui::TextUnformatted(Tr("settings", "artwork"));
+    ImGui::SameLine(180.0f);
+    ImGui::SetNextItemWidth(160.0f);
+    ImGui::PushID("artwork");
+    if (ImGui::BeginCombo("##v", label_for(current).c_str())) {
+      for (const auto& value : kValues) {
+        const bool selected = value == current;
+        if (ImGui::Selectable(label_for(value).c_str(), selected)) {
+          rex::cvar::SetFlagByName("artwork", value, /*persist=*/true);
+          SaveBasic();
+        }
+        if (selected)
+          ImGui::SetItemDefaultFocus();
+      }
+      ImGui::EndCombo();
     }
     ImGui::PopID();
   }

@@ -34,6 +34,11 @@ const std::filesystem::path& JpDir() {
   return g_jp;
 }
 
+bool JpOverlaysAvailable() {
+  std::error_code ec;
+  return !g_jp.empty() && !std::filesystem::equivalent(g_jp, g_root, ec);
+}
+
 const std::string& TargetRelease() {
   static const std::string release = [] {
     std::string name = ReadVersionRelease(g_root);

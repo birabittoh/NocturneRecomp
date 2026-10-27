@@ -22,6 +22,10 @@ const std::filesystem::path& GameDataRoot();
 // is not installed.
 const std::filesystem::path& JpDir();
 
+// JP is installed and is not the mounted folder, so its files can be layered
+// over World's (voices, artwork) and the settings offer the choice.
+bool JpOverlaysAvailable();
+
 // The platform and region that directory was installed from, as "Xbox Live
 // Arcade, World", or empty when unknown. Hashes default.xex on first call.
 const std::string& TargetRelease();

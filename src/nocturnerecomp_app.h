@@ -39,6 +39,7 @@
 #include "achievements_screen.h"
 #include "fast_forward.h"
 #include "font_overlay.h"
+#include "jp_artwork.h"
 #include "jp_voices.h"
 #include "fonts.generated.h"
 #include "game_data.h"
@@ -316,6 +317,9 @@ class NocturnerecompApp : public rex::ReXApp {
     // With World mounted, play JP's voice banks unless English ones are
     // forced (see jp_voices.h).
     nocturne::InstallJpVoices(runtime());
+
+    // JP's artwork over World's, switched live (see jp_artwork.h).
+    nocturne::BindJpArtwork();
 
     // The constructor is what registers the Android back button bind.
     host_menu_ = std::make_unique<nocturne::HostMenu>(window());

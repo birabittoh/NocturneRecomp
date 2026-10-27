@@ -368,6 +368,7 @@ set(NOCTURNERECOMP_SOURCES
     src/graphics_settings.cpp
     src/host_timer_resolution.cpp
     src/intro_skips.cpp
+    src/jp_artwork.cpp
     src/jp_voices.cpp
     src/language_switch.cpp
     src/movie_player.cpp
