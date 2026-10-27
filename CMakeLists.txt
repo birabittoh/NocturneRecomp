@@ -257,7 +257,10 @@ set(NOCTURNERECOMP_SOURCES
     src/host_timer_resolution.cpp
     src/intro_skips.cpp
     src/language_switch.cpp
+    src/help_options_menu.cpp
+    src/native_enhancements.cpp
     src/native_options.cpp
+    src/native_ui.cpp
     src/player_inspector.cpp
     src/player_status.cpp
     src/ppc_interpreter.cpp

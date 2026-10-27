@@ -439,8 +439,9 @@ the same list, so a language added this way shows up there too, with no
 separate registration needed.
 
 **Interface text and translations**: everything NocturneRecomp writes itself
-(the settings and randomizer overlays, and the rows it adds to the game's
-Options screen) lives in `res/lang/<code>.toml`, one file per language and one
+(the settings and randomizer overlays, the rows it adds to the game's
+Options screen, its Enhancements page and the Help & Options item that opens
+it) lives in `res/lang/<code>.toml`, one file per language and one
 table per screen (`[settings]`, `[enhancements]`, `[randomizer]`, and `[native]`
 for the text the game itself draws). Each key is looked up in the language
 `user_language` selects, then in English. `scripts/check-lang.py` verifies every
@@ -475,9 +476,8 @@ has; the overlay tables use PT Serif, or DotGothic16 for Japanese, so a mod lang
 
 The older `"settings.native_string"` event still works and is the same as a
 `settings.ui_string` in the `[native]` table, with a bare `key=value` payload
-(`fullscreen_label`, `fullscreen_off`, `fullscreen_on`, `language_label`,
-`vsync_label`, `preset_label`, `custom_prompt_label`). It also carries the
-achievement text (`achv_name_<id>`, `achv_desc_<id>`, `achv_desc_locked_<id>`).
+(any key of `en.toml`'s `[native]` table, such as `fullscreen_label`). It
+also carries the achievement text (`achv_name_<id>`, `achv_desc_<id>`, `achv_desc_locked_<id>`).
 
 **Keybind collisions**: `rex::ui::RegisterBind` auto-resolves collisions
 rather than silently shadowing one bind. If two mods both default to the

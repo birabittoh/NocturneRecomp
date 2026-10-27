@@ -2,9 +2,10 @@
 // (main menu, or pause -> help & options -> settings), driven by the same
 // left/right in-place cycling the stock rows use.
 //
-// To add a row, append an entry to kCustomRows in native_options.cpp -- see
-// the "Adding a row" section at the top of that file. It also documents the
-// reverse-engineering the whole thing rests on.
+// The screen shows one of several pages of rows (native_options_page.h). To
+// add a row or a page, see the "Adding a row or a page" section at the top of
+// native_options.cpp. It also documents the reverse-engineering the whole
+// thing rests on.
 #pragma once
 
 #include <cstdint>
@@ -31,6 +32,16 @@ namespace nocturne {
 // Call from a guest thread just before posting the switch to `page`, and only
 // when no save is loaded; the suppression disarms itself on the way back out.
 void EnterPregameScreen(uint32_t page);
+
+// The pages Help & Options can open the settings screen on.
+enum class SettingsPage {
+  kSettings,
+  kEnhancements,
+};
+
+// Picks the page the settings screen shows the next time it opens. Guest
+// thread only; call just before the page switch to the screen.
+void SelectSettingsPage(SettingsPage page);
 
 // Repaints the text this file sets itself (row labels and values, the Y
 // prompt) and re-spaces the prompt bar, after a language switch has changed

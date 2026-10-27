@@ -151,6 +151,12 @@ registers = ["r3"]
 return_on_true = true
 
 [[midasm_hook]]
+address = 0x825D40E0
+name = "NativeOptions_MoveSelectionHook"
+registers = ["r3"]
+return_on_true = true
+
+[[midasm_hook]]
 address = 0x825B3F58
 name = "NativeOptions_SettingsEventHook"
 registers = ["r3"]
@@ -183,6 +189,45 @@ return_on_true = true
 [[midasm_hook]]
 address = 0x825B4CC0
 name = "NativeOptions_SettingsUpdateHook"
+registers = ["r3"]
+return_on_true = true
+
+# Help & Options -> Enhancements (src/help_options_menu.cpp): the main-menu
+# screen's list setup, builder, event handler and update, and the pause-menu
+# screen's Activate and event handler.
+[[midasm_hook]]
+address = 0x825D3AE0
+name = "HelpOptions_MenuListSetupHook"
+registers = ["r3"]
+return_on_true = true
+
+[[midasm_hook]]
+address = 0x825C0230
+name = "HelpOptions_MainBuildHook"
+registers = ["r3"]
+return_on_true = true
+
+[[midasm_hook]]
+address = 0x825C00C8
+name = "HelpOptions_MainEventHook"
+registers = ["r3"]
+return_on_true = true
+
+[[midasm_hook]]
+address = 0x825C05F8
+name = "HelpOptions_MainUpdateHook"
+registers = ["r3"]
+return_on_true = true
+
+[[midasm_hook]]
+address = 0x825B32F8
+name = "HelpOptions_PauseActivateHook"
+registers = ["r3"]
+return_on_true = true
+
+[[midasm_hook]]
+address = 0x825B2F18
+name = "HelpOptions_PauseEventHook"
 registers = ["r3"]
 return_on_true = true
 

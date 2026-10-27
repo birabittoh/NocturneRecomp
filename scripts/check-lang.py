@@ -52,11 +52,13 @@ used = set()
 sources = [p for p in (root / "src").rglob("*") if p.suffix in (".cpp", ".h")]
 pat_tr = re.compile(r'\bTr(?:Or|Current|Args)?\(\s*"(\w+)"\s*,\s*"(\w+)"')
 pat_native = re.compile(r'\bTrNative(?:Current)?\(\s*"(\w+)"')
+# native_ui.h's NativeText, as `NativeText name{"key"}` or `NativeText{"key"}`.
+pat_native_text = re.compile(r'\bNativeText(?:\s+\w+(?:\[[^\]]*\])?)?\s*\{\s*"(\w+)"')
 for path in sources:
     text = path.read_text(encoding="utf8", errors="replace")
     for sec, key in pat_tr.findall(text):
         used.add((sec, key))
-    for key in pat_native.findall(text):
+    for key in pat_native.findall(text) + pat_native_text.findall(text):
         used.add(("native", key))
 
 # Keys composed at run time.
@@ -65,6 +67,10 @@ for cvar in re.findall(r'\{Enhancement::\w+,\s*"(enh_\w+)"', enh):
     used |= {("enhancements", cvar), ("enhancements", cvar + "_desc")}
 for key in re.findall(r'"(section_\w+)"', enh):
     used.add(("enhancements", key))
+# The enhancements page's on/off rows, labelled by their cvar's name.
+native_enh = (root / "src/native_enhancements.cpp").read_text(encoding="utf8")
+for cvar in re.findall(r'\bBoolRow\(\s*\d+\s*,\s*"(\w+)"', native_enh):
+    used.add(("native", cvar))
 for prefix, extra in (("mode_", "_desc"), ("color_", "")):
     for key in en["enhancements"]:
         if re.fullmatch(prefix + r"\d+(_desc)?", key):

@@ -1,25 +1,33 @@
-// native_options - appends extra rows to the game's own settings screen
-// (main menu or pause -> help & options -> settings), cycled in place with
-// left/right exactly like the stock "Graphics" and "Volume" rows.
+// native_options: shows pages of our own rows on the game's own settings
+// screen (main menu or pause -> help & options -> settings, and -> enhancements
+// for the second page), cycled in place with left/right exactly like the stock
+// "Graphics" and "Volume" rows.
 //
 // ---------------------------------------------------------------------------
-// Adding a row
+// Adding a row or a page
 // ---------------------------------------------------------------------------
 //
-// Append an entry to kCustomRows below and you are done. Widget creation,
-// layout, left/right cycling with wraparound, commit on A, re-seed on B/X and
-// the localized label are all handled generically from the table.
+// A page is an OptionsPage over a table of OptionRows (native_options_page.h):
+// kSettingsPage below, and the enhancements page in native_enhancements.cpp.
+// Append an entry to a table and you are done. Widget creation, layout,
+// left/right cycling with wraparound, scrolling a page longer than the screen,
+// commit on A, re-seed on B/X and the localized label are all handled
+// generically from the table.
 //
 // A row is either:
-//   * enumerated -- give it `values` (the display text per value) and
-//     `value_count`; indices run 0..value_count-1, and this file paints the
-//     text; or
-//   * numeric -- leave `values` null and fill in min/max/step/multiplier;
-//     the game's own renderer prints `multiplier * value`, same as the stock
-//     Volume row, and this file only paints the label.
+//   * enumerated: give it `value_count` and `values` (the localized text per
+//     value) or `value_text`; indices run 0..value_count-1, and this file
+//     paints the text; or
+//   * numeric: leave those empty and fill in min/max/step/multiplier; the
+//     game's own renderer prints `multiplier * value`, same as the stock Volume
+//     row, and this file only paints the label.
 //
 // `get` supplies the value to show when the screen opens; `commit` is handed
-// the value when the player accepts with A. Nothing else needs touching.
+// the value when the player accepts with A. A row backed by a single cvar can
+// name it in `cvar` and use the generic Get/CommitCvar* helpers.
+//
+// A new page also needs a way in: see help_options_menu.cpp, which picks the
+// page with SelectSettingsPage before the screen opens.
 //
 // ---------------------------------------------------------------------------
 // How that screen is built (all derived from the pinned build's default.xex)
@@ -92,8 +100,9 @@
 
 #include "game_state.h"
 #include "graphics_settings.h"
+#include "native_options_page.h"
+#include "native_ui.h"
 #include "settings.h"
-#include "ui_text.h"
 
 #include <fmt/format.h>
 #include <fmt/ranges.h>
@@ -124,15 +133,15 @@ namespace {
 constexpr uint32_t kListSetupFnAddr = 0x825D32B0u;         // (list, x, y, count, spacing, ...)
 constexpr uint32_t kBindRowsFnAddr = 0x825D36B8u;          // (list, entries, count)
 constexpr uint32_t kCycleRowFnAddr = 0x825D35C0u;          // (list, direction)
+constexpr uint32_t kMoveSelectionFnAddr = 0x825D40E0u;     // (list, direction, controller)
 constexpr uint32_t kEnableRowFnAddr = 0x825D3530u;         // (list, row)
 constexpr uint32_t kListUpdateFnAddr = 0x825D38A8u;        // (list, delta)
 constexpr uint32_t kSetWidgetColourFnAddr = 0x825D2138u;   // (widget, argb)
-constexpr uint32_t kSetWidgetTextFnAddr = 0x825D1EE0u;     // (widget, utf16_text)
-constexpr uint32_t kSetTextScaleFnAddr = 0x825D20C0u;      // (widget, scale) -- scale in f1
 constexpr uint32_t kSettingsEventFnAddr = 0x825B3F58u;     // (screen, message)
 constexpr uint32_t kSettingsActivateFnAddr = 0x825B43E0u;  // (screen, user_index)
 constexpr uint32_t kSettingsUpdateFnAddr = 0x825B4CC0u;    // (screen, delta)
 constexpr uint32_t kSetWidgetTextByIdFnAddr = 0x825D1EE8u;  // (widget, string_id)
+constexpr uint32_t kSetWidgetTextFnAddr = 0x825D1EE0u;     // (widget, utf16_text)
 // Formats a setting entry's current value as display text: the number, or
 // the localized string an enumerated stock row (Graphics) shows for it.
 constexpr uint32_t kFormatEntryValueFnAddr = 0x82580060u;  // (entry, utf16_out, out_chars)
@@ -206,7 +215,7 @@ constexpr uint32_t kListSelectedRow = 536;
 constexpr uint32_t kListRowLabels = 648;
 constexpr uint32_t kListRowValues = 760;
 // The list's own idea of normal row text scale (float), set to 0.75 by both
-// sub_825D2C48 and sub_825D32B0. See SetWidgetText for why we reassert it.
+// sub_825D2C48 and sub_825D32B0. See SetRowText for why we reassert it.
 constexpr uint32_t kListTextScale = 560;
 // Normal (unhighlighted) row colour.
 constexpr uint32_t kListNormalColour = 608;
@@ -218,8 +227,6 @@ constexpr uint32_t kWidgetTextScaleOffset = 536;
 // there, and the reason NativeOptions_ListUpdate exists.
 constexpr uint32_t kStockLabelResetCount = 3;
 constexpr float kFallbackTextScale = 0.75f;
-// Hard ceiling on rows: sub_825D3200 zeroes exactly 16 value-widget slots.
-constexpr uint32_t kListMaxRows = 16;
 
 // Setting-entry layout.
 constexpr uint32_t kEntryStride = 96;
@@ -229,9 +236,6 @@ constexpr uint32_t kEntryMin = 12;
 constexpr uint32_t kEntryMax = 16;
 constexpr uint32_t kEntryStep = 20;
 constexpr uint32_t kEntryMultiplier = 24;
-
-// The stock screen's three rows: Graphics / Volume / Change Screen Size...
-constexpr uint32_t kVanillaRowCount = 3;
 
 // The screen's own option list, off the screen instance.
 constexpr uint32_t kScreenListOffset = 560;
@@ -257,10 +261,12 @@ constexpr uint32_t kTitleCenterX = 0x140;
 constexpr uint32_t kGatedFirstRow = 1;
 constexpr uint32_t kGatedLastRow = 2;
 
-// The stock "Change Screen Size..." row, now the Preset row. Still the row the
-// screen special-cases as "the one that opens another screen", which is what
-// NativeOptions_SettingsEvent and NativeOptions_SettingsUpdate undo.
-constexpr uint32_t kPresetRow = 2;
+// The stock "Change Screen Size..." row, now the Preset row. Still the list row
+// the screen special-cases as "the one that opens another screen", whatever
+// row of whichever page it shows, which is what NativeOptions_SettingsEvent,
+// NativeOptions_SettingsUpdate and NativeOptions_ListUpdate undo.
+constexpr uint32_t kSubmenuRow = 2;
+constexpr uint32_t kPresetRow = kSubmenuRow;
 
 // The screen's prompt-bar widget, and the string ids the screen sets it to:
 // sub_825B3F58 opens with `set_text_by_id(screen+584, selected == 2 ? 9 : 4)`
@@ -284,10 +290,6 @@ constexpr uint32_t kArrowYBias = 2;
 
 // The UI manager, again a pointer stored at this address.
 constexpr uint32_t kUiManagerPtrAddr = 0x82E7A02Cu;
-
-// Widget vtable slot that makes a widget visible (the hide side, slot +20, is
-// what the stock update calls on row 2).
-constexpr uint32_t kWidgetVtableShow = 16;
 
 // Message layout for a screen's event handler: word 0 is the event class
 // (0 = button press) and word 2 is the button. 4/5/6 are A/B/X, matching the
@@ -315,17 +317,19 @@ constexpr uint32_t kButtonStretchScreen = 7;
 bool AnyPendingRestart() { return !rex::cvar::GetPendingRestartFlags().empty(); }
 
 // Set once by NativeOptions::Bind from Runtime::user_data_root(); empty means
-// Bind() couldn't resolve it (or hasn't run yet), in which case
-// SaveToUserSettings below just no-ops rather than guessing a path.
+// Bind() couldn't resolve it (or hasn't run yet), in which case SaveCvar just
+// no-ops rather than guessing a path.
 std::filesystem::path g_user_settings_path;
 
-// Persists a single cvar to the same settings.toml the ImGui overlay's Basic
-// section writes (see settings.cpp's SaveBasic/user_settings_path). Setting a
-// cvar with persist=true only flags it as *worth* saving next time someone
-// saves -- unlike the overlay, which calls SaveBasic() itself after every
-// change, nothing here was actually writing the file, so a value picked from
-// this screen looked committed (it applied, and the restart marker/banner
-// both showed) but reverted to whatever was last saved on the next launch.
+}  // namespace
+
+// Persists a single cvar to the same settings.toml the ImGui overlay writes
+// (see settings.cpp's SaveBasic/user_settings_path). Setting a cvar with
+// persist=true only flags it as *worth* saving next time someone saves:
+// unlike the overlay, which saves itself after every change, nothing here was
+// actually writing the file, so a value picked from this screen looked
+// committed (it applied) but reverted to whatever was last saved on the next
+// launch.
 //
 // Resolved from g_user_settings_path (see NativeOptions::Bind), NOT the
 // `user_data_root` *cvar* -- that cvar (runtime.h) is only a command-line
@@ -333,124 +337,68 @@ std::filesystem::path g_user_settings_path;
 // on every normal launch. The actual resolved path lives on the Runtime
 // object (Runtime::user_data_root()), which Bind() only has once, so it's
 // cached in a global rather than re-derived per commit.
-void SaveToUserSettings(const char* cvar_name) {
+void SaveCvar(const char* cvar) {
   if (g_user_settings_path.empty()) {
     return;
   }
-  rex::cvar::SaveConfigSubset(g_user_settings_path, {cvar_name});
+  rex::cvar::SaveConfigSubset(g_user_settings_path, {cvar});
 }
 
-// ---------------------------------------------------------------------------
-// Row table
-// ---------------------------------------------------------------------------
-
-struct CustomRow {
-  // Which row of the list this occupies.
-  //
-  // >= kVanillaRowCount appends a new row (they must run contiguously up from
-  // kVanillaRowCount). < kVanillaRowCount *takes over* a stock row instead:
-  // the row keeps its position and its own localized label, but its value is
-  // seeded from `get` and applied through `commit`, and it is no longer
-  // mirrored back into the game's model -- so whatever the stock row used to
-  // drive is left alone entirely.
-  uint32_t list_row;
-
-  // Localized label, re-read every time the row is painted so a mid-session
-  // language change is picked up on the next visit to the screen. Leave null
-  // on an override row to keep the game's own label (which is the usual
-  // choice: it is already localized, and set at the right scale).
-  const char16_t* (*label)() = nullptr;
-
-  // Enumerated row: one display string per value, indices 0..value_count-1.
-  // Null for a numeric row, which uses the min/max/step/multiplier below and
-  // is rendered by the game itself.
-  const char16_t* const* values = nullptr;
-  uint32_t value_count = 0;
-
-  // Optional: how many of `values` are actually offered right now, re-asked
-  // every time the screen binds. For a row whose tail entries only become
-  // reachable once something exists to back them (the Preset row's "Custom").
-  // Must never exceed `value_count`, which stays the size of the array.
-  uint32_t (*live_value_count)() = nullptr;
-
-  // Numeric row bounds. Ignored when `values` is set.
-  int32_t min = 0;
-  int32_t max = 0;
-  int32_t step = 1;
-  int32_t multiplier = 1;
-
-  // Value to show when the screen opens, and where it goes on A.
-  //
-  // Both null makes this a *label-only* row: the stock row keeps its value,
-  // its behaviour and its model copy-back untouched, and only its text is
-  // replaced. Useful for correcting a label without adopting the setting.
-  int32_t (*get)() = nullptr;
-  void (*commit)(int32_t value) = nullptr;
-
-  // Apply on every left/right as well as on A, so the player gets immediate
-  // feedback (and B puts the original value back). Right for things you can
-  // perceive while the menu is open, like volume; pointless for restart-scoped
-  // settings.
-  bool live = false;
-
-  // Override rows only: force the stock setting this row displaced to its
-  // maximum, so whatever now backs the row has the full range to work with
-  // rather than being multiplied down by a leftover value nobody can reach
-  // any more.
-  bool pin_stock_to_max = false;
-
-  // Optional runtime gate. Returning false leaves an override row completely
-  // alone -- the stock row keeps its vanilla behaviour, model copy-back and
-  // all. An appended row may use this too, but only the *last* one in the
-  // table: NativeOptions::Bind folds the decision into g_active_row_count
-  // before the list is ever built, so an inactive trailing row's widget
-  // simply never gets created rather than being left blank. An appended row
-  // that isn't last can't use this -- suppressing it would leave a gap.
-  bool (*available)() = nullptr;
-};
-
-// --- Fullscreen ---------------------------------------------------------
-
-// `fullscreen` is kHotReload -- Window::SetFullscreen applies live via the
-// change callback ReXApp::SetupPresentation registers -- so this row is
-// `live`, same as Volume, and needs no "applies on next launch" caveat.
-constexpr const char* kFullscreenCvar = "fullscreen";
-constexpr std::array<const char*, 2> kFullscreenCvarValues = {"false", "true"};
-// Populated by SyncFullscreenText, called every time the screen binds (see
-// `live_value_count`'s doc comment on CustomRow) so a translation a mod
-// registers after this row's already been read once still takes effect on
-// the next visit. `values` needs a fixed, compile-time-addressable buffer
-// (see CustomRow::values) -- this is that buffer's storage.
-std::array<const char16_t*, 2> g_fullscreen_values = {u"", u""};
-
-uint32_t SyncFullscreenText() {
-  g_fullscreen_values[0] = TrNative("fullscreen_off");
-  g_fullscreen_values[1] = TrNative("fullscreen_on");
-  return static_cast<uint32_t>(g_fullscreen_values.size());
+int32_t GetCvarBool(const OptionRow& row) {
+  return rex::cvar::GetFlagByName(row.cvar) == "true" ? 1 : 0;
 }
 
-// The shared string table has no id for "Fullscreen", so the label is authored
-// here rather than looked up. Title case to match the stock rows, not the
+void CommitCvarBool(const OptionRow& row, int32_t value) {
+  const char* text = value ? "true" : "false";
+  if (rex::cvar::GetFlagByName(row.cvar) == text) {
+    return;
+  }
+  rex::cvar::SetFlagByName(row.cvar, text, /*persist=*/true);
+  SaveCvar(row.cvar);
+}
+
+int32_t GetCvarInt(const OptionRow& row) {
+  return static_cast<int32_t>(std::atoi(rex::cvar::GetFlagByName(row.cvar).c_str()));
+}
+
+void CommitCvarInt(const OptionRow& row, int32_t value) {
+  const std::string text = std::to_string(value);
+  if (rex::cvar::GetFlagByName(row.cvar) == text) {
+    return;
+  }
+  rex::cvar::SetFlagByName(row.cvar, text, /*persist=*/true);
+  SaveCvar(row.cvar);
+}
+
+int32_t GetCvarDefault(const OptionRow& row) {
+  const auto* info = rex::cvar::GetFlagInfo(row.cvar);
+  if (!info) {
+    return 0;
+  }
+  if (info->default_value == "true" || info->default_value == "false") {
+    return info->default_value == "true" ? 1 : 0;
+  }
+  return static_cast<int32_t>(std::atoi(info->default_value.c_str()));
+}
+
+namespace {
+
+// ---------------------------------------------------------------------------
+// The settings page
+// ---------------------------------------------------------------------------
+
+// --- Fullscreen and VSync ---------------------------------------------------
+
+// Both apply live: `fullscreen` through the change callback
+// ReXApp::SetupPresentation registers, `vsync` on the renderer's next present
+// (see ApplyVsyncIfChanged). So both rows are `live`, same as Volume.
+//
+// The shared string table has no id for either label, so they are res/lang
+// [native] strings rather than looked up by id. Title case to match the stock rows, not the
 // all-caps prompt bar.
-const char16_t* FullscreenLabel() {
-  return TrNative("fullscreen_label");
-}
+constexpr NativeText kFullscreenLabel{"fullscreen_label"};
 
-int32_t GetFullscreenIndex() {
-  return rex::cvar::GetFlagByName(kFullscreenCvar) == "true" ? 1 : 0;
-}
-
-void CommitFullscreenIndex(int32_t index) {
-  if (index < 0 || index >= static_cast<int32_t>(kFullscreenCvarValues.size())) {
-    return;
-  }
-  const char* value = kFullscreenCvarValues[static_cast<size_t>(index)];
-  if (rex::cvar::GetFlagByName(kFullscreenCvar) == value) {
-    return;
-  }
-  rex::cvar::SetFlagByName(kFullscreenCvar, value, /*persist=*/true);
-  SaveToUserSettings(kFullscreenCvar);
-}
+constexpr NativeText kVsyncLabel{"vsync_label"};
 
 // --- Language -------------------------------------------------------------
 
@@ -459,31 +407,23 @@ void CommitFullscreenIndex(int32_t index) {
 // screen, this one included -- see RefreshNativeOptionsText.
 constexpr const char* kLanguageCvar = "user_language";
 
-// The row's `values` array must be a fixed, compile-time-addressable buffer
-// (see CustomRow::values), but the actual language *list* isn't known until
-// mods finish registering via settings.h's GetLanguageOptions -- the same
-// six built-in entries plus whatever mods appended to the curated overlay's
-// Language dropdown (see making-mods.md's "Adding a Language dropdown
-// entry"). So this row works like the Graphics Preset row's "Custom" tail
-// entry: a fixed-capacity array sized for well more than anyone's likely to
-// register, populated once lazily, with `live_value_count` (below) telling
-// the row how many of those slots are actually in use right now.
+// The actual language *list* isn't known until mods finish registering via
+// settings.h's GetLanguageOptions: the same six built-in entries plus
+// whatever mods appended to the curated overlay's Language dropdown (see
+// making-mods.md's "Adding a Language dropdown entry"). So this row works like
+// the Preset row's "Custom" tail entry: a fixed capacity sized for well more
+// than anyone's likely to register, populated once lazily, with
+// `live_value_count` telling the row how many of those are in use right now.
 constexpr uint32_t kMaxLanguageOptions = 32;
 
 // Populated once by EnsureLanguageOptionsBuilt(). Parallel arrays: index i's
-// id/label/UTF-16 text all describe the same option. The id and UTF-16
-// strings are owned here (reserved up front so push_back never reallocates
-// and invalidates the c_str() pointers g_language_values holds into them).
+// id and UTF-16 text describe the same option.
 std::vector<std::string> g_language_ids;
-std::vector<std::u16string> g_language_text_storage;
-std::array<const char16_t*, kMaxLanguageOptions> g_language_values{};
-uint32_t g_language_option_count = 0;
+std::vector<std::u16string> g_language_texts;
 bool g_language_options_built = false;
 
 // Mod-supplied labels are plain ASCII display names (see making-mods.md's
-// language-option example), so a byte-widening conversion is enough; there
-// is no font glyph coverage for anything beyond ASCII anyway (see
-// FullscreenLabel's comment on font_<lang>.xpr's limited atlas).
+// language-option example), so a byte-widening conversion is enough.
 std::u16string AsciiToUtf16(const std::string& s) {
   std::u16string out;
   out.reserve(s.size());
@@ -500,7 +440,7 @@ void EnsureLanguageOptionsBuilt() {
   g_language_options_built = true;
 
   const std::vector<nocturne::LanguageOption> options = nocturne::GetLanguageOptions();
-  g_language_option_count =
+  const auto count =
       std::min<uint32_t>(static_cast<uint32_t>(options.size()), kMaxLanguageOptions);
   if (options.size() > kMaxLanguageOptions) {
     REXLOG_WARN(
@@ -508,77 +448,54 @@ void EnsureLanguageOptionsBuilt() {
         "Language row",
         options.size(), kMaxLanguageOptions);
   }
-
-  g_language_ids.reserve(g_language_option_count);
-  g_language_text_storage.reserve(g_language_option_count);
-  for (uint32_t i = 0; i < g_language_option_count; ++i) {
+  for (uint32_t i = 0; i < count; ++i) {
     g_language_ids.push_back(options[i].id);
-    g_language_text_storage.push_back(AsciiToUtf16(options[i].label));
-    g_language_values[i] = g_language_text_storage.back().c_str();
+    g_language_texts.push_back(AsciiToUtf16(options[i].label));
   }
 }
 
 uint32_t LanguageOptionCount() {
   EnsureLanguageOptionsBuilt();
-  return g_language_option_count;
+  return static_cast<uint32_t>(g_language_ids.size());
 }
 
-const char16_t* LanguageRowLabel() {
-  return TrNative("language_label");
+const char16_t* LanguageText(int32_t index) {
+  EnsureLanguageOptionsBuilt();
+  return static_cast<size_t>(index) < g_language_texts.size()
+             ? g_language_texts[static_cast<size_t>(index)].c_str()
+             : nullptr;
 }
 
-int32_t GetLanguageIndex() {
+// 言/語 aren't in font_ja.xpr's glyph atlas, so Japanese uses the katakana
+// loanword instead.
+constexpr NativeText kLanguageLabel{"language_label"};
+
+int32_t GetLanguageIndex(const OptionRow&) {
   EnsureLanguageOptionsBuilt();
   const std::string current = rex::cvar::GetFlagByName(kLanguageCvar);
-  for (uint32_t i = 0; i < g_language_option_count; ++i) {
+  for (size_t i = 0; i < g_language_ids.size(); ++i) {
     if (g_language_ids[i] == current) {
       return static_cast<int32_t>(i);
     }
   }
   // An id the row doesn't know (e.g. a mod-added language whose owning mod
   // got disabled after the cvar was saved) falls back to the first entry
-  // rather than clamping to the last -- see native_options.cpp's history for
-  // why clamping to the top of the range is the wrong default here.
+  // rather than clamping to the last.
   return 0;
 }
 
-void CommitLanguageIndex(int32_t index) {
+void CommitLanguageIndex(const OptionRow&, int32_t index) {
   EnsureLanguageOptionsBuilt();
-  if (index < 0 || static_cast<uint32_t>(index) >= g_language_option_count) {
+  if (index < 0 || static_cast<size_t>(index) >= g_language_ids.size()) {
     return;
   }
-  const std::string& value = g_language_ids[static_cast<uint32_t>(index)];
+  const std::string& value = g_language_ids[static_cast<size_t>(index)];
   if (rex::cvar::GetFlagByName(kLanguageCvar) == value) {
     return;
   }
   rex::cvar::SetFlagByName(kLanguageCvar, value, /*persist=*/true);
-  SaveToUserSettings(kLanguageCvar);
+  SaveCvar(kLanguageCvar);
   REXLOG_INFO("[native_options] language set to {}", value);
-}
-
-// --- VSync --------------------------------------------------------------
-
-// `vsync` is applied live: the renderer re-reads it on the next present (see
-// ApplyVsyncIfChanged), so this row is `live` with no restart caveat. On/Off
-// text is the Fullscreen row's, refreshed by SyncFullscreenText.
-constexpr const char* kVsyncCvar = "vsync";
-
-const char16_t* VsyncLabel() {
-  return TrNative("vsync_label");
-}
-
-int32_t GetVsyncIndex() { return rex::cvar::GetFlagByName(kVsyncCvar) == "true" ? 1 : 0; }
-
-void CommitVsyncIndex(int32_t index) {
-  if (index < 0 || index > 1) {
-    return;
-  }
-  const char* value = index ? "true" : "false";
-  if (rex::cvar::GetFlagByName(kVsyncCvar) == value) {
-    return;
-  }
-  rex::cvar::SetFlagByName(kVsyncCvar, value, /*persist=*/true);
-  SaveToUserSettings(kVsyncCvar);
 }
 
 // --- Volume (takes over the stock row 1) ------------------------------------
@@ -605,19 +522,19 @@ bool MasterVolumeAvailable() {
   return rex::cvar::GetFlagInfo(kAudioVolumeCvar) != nullptr;
 }
 
-int32_t GetMasterVolumeStep() {
+int32_t GetMasterVolumeStep(const OptionRow&) {
   const double amplitude = std::atof(rex::cvar::GetFlagByName(kAudioVolumeCvar).c_str());
   const int percent = VolumePercentFromAmplitude(amplitude);
   const int32_t step = static_cast<int32_t>(std::lround(percent * kVolumeSteps / 100.0));
   return std::clamp(step, int32_t{0}, kVolumeSteps);
 }
 
-void CommitMasterVolumeStep(int32_t step) {
+void CommitMasterVolumeStep(const OptionRow&, int32_t step) {
   step = std::clamp(step, int32_t{0}, kVolumeSteps);
   const int percent = static_cast<int>(std::lround(step * 100.0 / kVolumeSteps));
   const double amplitude = VolumeAmplitudeFromPercent(percent);
   rex::cvar::SetFlagByName(kAudioVolumeCvar, std::to_string(amplitude), /*persist=*/true);
-  SaveToUserSettings(kAudioVolumeCvar);
+  SaveCvar(kAudioVolumeCvar);
 }
 
 // --- Preset (takes over the stock row 2) ------------------------------------
@@ -626,8 +543,7 @@ void CommitMasterVolumeStep(int32_t step) {
 // another screen (page 17) instead of cycling a value. That screen's entire
 // job was picking a stretch preset -- graphics_settings.cpp already cycled its
 // own catalog there with X -- so the row is replaced outright by a normal
-// spinner over that same catalog, and the screen is no longer reachable from
-// this menu. Everything the screen offered is now one left/right away.
+// spinner over that same catalog. The screen itself is still one Y away.
 //
 // Taking over row 2 specifically means neutralising the three places the
 // stock screen treats it as "the row that opens a screen" rather than as an
@@ -639,38 +555,28 @@ void CommitMasterVolumeStep(int32_t step) {
 // so graphics_settings applies it on its next per-frame tick. That is also why
 // this row is `live` -- the player sees each preset as they cycle onto it, one
 // frame later, and B puts the original back the same way.
-const char16_t* PresetLabel() {
-  return TrNative("preset_label");
-}
+constexpr NativeText kPresetLabel{"preset_label"};
 
 // The Y prompt's text. All caps to match the prompt bar's own strings (the
 // rows are title case, the bar is not), and kept short because a fourth prompt
-// has to share the bar's 640px with three others -- NativeOptions_SettingsBuild
-// silently leaves the stock layout alone if the four don't fit, so a long
-// translation would cost the prompt entirely rather than overflow.
-//
-// Read when the screen object is built, and again by RefreshNativeOptionsText
-// after a language switch.
-const char16_t* CustomPromptLabel() {
-  return TrNative("custom_prompt_label");
-}
+// has to share the bar's 640px with three others: LayoutPromptBar silently
+// leaves the bar alone if the four don't fit, so a long translation would cost
+// the prompt entirely rather than overflow.
+constexpr NativeText kCustomPromptLabel{"custom_prompt_label"};
 
 // --- Graphics (stock row 0, relabelled) -------------------------------------
 
 // The Italian localisation of the Graphics row reads "Grafici" (the plural of
 // "graph"/"chart") where it should read "Grafica". Every other language's
-// string is fine, so res/lang has `graphics_label` for Italian only and this
-// returns null for the rest -- RenderCustomRow skips a
-// null label, leaving the game's own text in place, and no translation has to
-// be invented here.
+// string is fine, so only it.toml has `graphics_label` and this is null for
+// the rest: RenderRow skips a null label, leaving the game's own text in
+// place, and no translation has to be invented.
 //
 // Fixing it this way rather than patching the string table means nothing on
 // disk changes and the entry stays correct for every other screen that shows
 // it (see docs/reverse-engineering.md for the static-text patching route,
 // which would be the wrong tool here).
-const char16_t* GraphicsLabel() {
-  return TrNativeCurrent("graphics_label");
-}
+constexpr NativeText kGraphicsLabel{"graphics_label", /*current_only=*/true};
 
 // --- The table itself -------------------------------------------------------
 
@@ -679,13 +585,14 @@ constexpr uint32_t kStockVolumeRow = 1;
 constexpr uint32_t kFullscreenRow = kVanillaRowCount;
 constexpr uint32_t kVsyncRow = kVanillaRowCount + 1;
 constexpr uint32_t kLanguageRow = kVanillaRowCount + 2;
+constexpr uint32_t kSettingsRowCount = kVanillaRowCount + 3;
 
-constexpr CustomRow kCustomRows[] = {
+constexpr OptionRow kSettingsRows[] = {
     {
         // Label-only: no get/commit, so the Graphics setting itself is
         // untouched -- value, behaviour and model copy-back all stay stock.
         .list_row = kStockGraphicsRow,
-        .label = &GraphicsLabel,
+        .label = kGraphicsLabel,
     },
     {
         // Keeps the game's own localized "Volume" label and its 0-10 spinner.
@@ -700,110 +607,112 @@ constexpr CustomRow kCustomRows[] = {
     },
     {
         .list_row = kPresetRow,
-        .label = &PresetLabel,
-        .values = kGraphicsPresetTexts,
+        .label = kPresetLabel,
         .value_count = kGraphicsPresetCount,
+        .value_text = [](int32_t value) { return kGraphicsPresetTexts[value]; },
         // "Custom" (the last entry) only joins the cycle once the player has
         // dialled a stretch in by hand on the screen Y opens.
         .live_value_count = &GraphicsPresetChoiceCount,
-        .get = &GetGraphicsPresetIndex,
-        .commit = &RequestGraphicsPreset,
+        .get = [](const OptionRow&) { return GetGraphicsPresetIndex(); },
+        .commit = [](const OptionRow&, int32_t value) { RequestGraphicsPreset(value); },
         .live = true,
     },
     {
         .list_row = kFullscreenRow,
-        .label = &FullscreenLabel,
-        .values = g_fullscreen_values.data(),
-        .value_count = static_cast<uint32_t>(g_fullscreen_values.size()),
-        // Count never actually changes; this is (ab)used purely for the
-        // "re-asked every bind" refresh timing to pick up a translation a
-        // mod registers after the row's already been read once. See
-        // SyncFullscreenText.
-        .live_value_count = &SyncFullscreenText,
-        .get = &GetFullscreenIndex,
-        .commit = &CommitFullscreenIndex,
+        .label = kFullscreenLabel,
+        .value_count = 2,
+        .values = kOffOnTexts,
+        .get = &GetCvarBool,
+        .commit = &CommitCvarBool,
+        .cvar = "fullscreen",
+        .live = true,
+    },
+    {
+        .list_row = kVsyncRow,
+        .label = kVsyncLabel,
+        .value_count = 2,
+        .values = kOffOnTexts,
+        .get = &GetCvarBool,
+        .commit = &CommitCvarBool,
+        .cvar = "vsync",
         .live = true,
     },
     {
         // `live`: each left/right switches the whole game's language on the
         // next frame, and B puts the original back the same way.
         .list_row = kLanguageRow,
-        .label = &LanguageRowLabel,
-        .values = g_language_values.data(),
+        .label = kLanguageLabel,
         .value_count = kMaxLanguageOptions,
+        .value_text = &LanguageText,
         .live_value_count = &LanguageOptionCount,
         .get = &GetLanguageIndex,
         .commit = &CommitLanguageIndex,
         .live = true,
     },
-    {
-        .list_row = kVsyncRow,
-        .label = &VsyncLabel,
-        .values = g_fullscreen_values.data(),
-        .value_count = static_cast<uint32_t>(g_fullscreen_values.size()),
-        .get = &GetVsyncIndex,
-        .commit = &CommitVsyncIndex,
-        .live = true,
-    },
 };
 
-constexpr uint32_t kCustomRowCount = static_cast<uint32_t>(std::size(kCustomRows));
+static_assert(RowsAreWellFormed(kSettingsRows, kSettingsRowCount, /*owns_all_rows=*/false),
+              "every settings row needs a unique in-range list_row; appended rows must run "
+              "contiguously up from kVanillaRowCount; a row without `get` is label-only and "
+              "must supply a `label` and target a stock row");
 
-consteval uint32_t CountAppendedRows() {
-  uint32_t count = 0;
-  for (const CustomRow& row : kCustomRows) {
-    if (row.list_row >= kVanillaRowCount) {
-      ++count;
-    }
-  }
-  return count;
+constexpr OptionsPage kSettingsPage = {
+    .rows = kSettingsRows,
+    .row_count = static_cast<uint32_t>(std::size(kSettingsRows)),
+    .total_rows = kSettingsRowCount,
+    .visible_rows = kSettingsRowCount,
+    .stretch_prompt = true,
+};
+
+// ---------------------------------------------------------------------------
+// The current page
+// ---------------------------------------------------------------------------
+
+// The page the screen shows, picked by Help & Options (SelectSettingsPage)
+// before it opens the screen, and the page the list was last bound with. The
+// two differ for exactly the bind that switches pages.
+const OptionsPage* g_page = &kSettingsPage;
+const OptionsPage* g_bound_page = nullptr;
+
+// How many of the page's rows are scrolled off the top of the list. Always 0
+// on a page whose rows all fit.
+uint32_t g_scroll = 0;
+
+const OptionsPage& Page() { return *g_page; }
+
+uint32_t VisibleRowCount(const OptionsPage& page) {
+  return std::min({page.visible_rows, page.total_rows, kListMaxRows});
 }
 
-constexpr uint32_t kTotalRowCount = kVanillaRowCount + CountAppendedRows();
+uint32_t VisibleRowCount() { return VisibleRowCount(Page()); }
 
-static_assert(kTotalRowCount <= kListMaxRows,
-              "the option list only has room for 16 rows (sub_825D3200)");
-
-consteval bool RowsAreWellFormed() {
-  for (uint32_t i = 0; i < kCustomRowCount; ++i) {
-    if (kCustomRows[i].list_row >= kTotalRowCount) {
-      return false;
-    }
-    if (kCustomRows[i].get == nullptr) {
-      // Label-only: must actually supply a label, and can only ever apply to
-      // a stock row (an appended one would have no value behind it at all).
-      if (kCustomRows[i].label == nullptr || kCustomRows[i].list_row >= kVanillaRowCount) {
-        return false;
-      }
-    }
-    for (uint32_t j = i + 1; j < kCustomRowCount; ++j) {
-      if (kCustomRows[i].list_row == kCustomRows[j].list_row) {
-        return false;
-      }
-    }
-  }
-  return true;
+// How many rows the list is built with: enough for whichever page shows the
+// most. A page with fewer binds fewer, and the list hides the rest.
+uint32_t ListCapacity() {
+  return std::max(VisibleRowCount(kSettingsPage), VisibleRowCount(EnhancementsOptionsPage()));
 }
 
-static_assert(RowsAreWellFormed(),
-              "every kCustomRows entry needs a unique in-range list_row; appended rows must run "
-              "contiguously up from kVanillaRowCount and supply a `get`; a row without `get` is "
-              "label-only and must supply a `label` and target a stock row");
-
-bool IsEnumRow(const CustomRow& row) { return row.values != nullptr && row.value_count > 0; }
+bool IsEnumRow(const OptionRow& row) { return row.value_count > 0; }
 
 // A row that only replaces a stock row's text, leaving its value alone.
-bool IsLabelOnly(const CustomRow& row) { return row.get == nullptr; }
+bool IsLabelOnly(const OptionRow& row) { return row.get == nullptr; }
 
 // An override row whose `available` says no is inert: the stock row keeps its
 // vanilla behaviour, model copy-back included.
-bool IsRowActive(const CustomRow& row) { return row.available == nullptr || row.available(); }
+bool IsRowActive(const OptionRow& row) { return row.available == nullptr || row.available(); }
 
-// Index into kCustomRows for a given list row, or -1 if that row is stock (or
-// an override that has opted out).
-int32_t FindActiveCustomRow(uint32_t list_row) {
-  for (uint32_t i = 0; i < kCustomRowCount; ++i) {
-    if (kCustomRows[i].list_row == list_row && IsRowActive(kCustomRows[i])) {
+// Whether a row is scrolled into view, and which list row shows it if so.
+bool OnScreen(const OptionRow& row) {
+  return row.list_row >= g_scroll && row.list_row < g_scroll + VisibleRowCount();
+}
+
+uint32_t ScreenRow(const OptionRow& row) { return row.list_row - g_scroll; }
+
+// Index into the page's rows for the row on `list_row` of the page, or -1 if
+// that row is stock (or an override that has opted out).
+int32_t FindActiveRow(uint32_t list_row) {
+  for (uint32_t i = 0; i < Page().row_count; ++i) {
+    if (Page().rows[i].list_row == list_row && IsRowActive(Page().rows[i])) {
       return static_cast<int32_t>(i);
     }
   }
@@ -813,13 +722,13 @@ int32_t FindActiveCustomRow(uint32_t list_row) {
 // As above, but ignoring label-only rows -- for the paths that care about who
 // *owns a value* (model copy-back, cycling) rather than who paints text.
 int32_t FindActiveValueRow(uint32_t list_row) {
-  const int32_t index = FindActiveCustomRow(list_row);
-  return (index >= 0 && IsLabelOnly(kCustomRows[index])) ? -1 : index;
+  const int32_t index = FindActiveRow(list_row);
+  return (index >= 0 && IsLabelOnly(Page().rows[index])) ? -1 : index;
 }
 
-int32_t RowMin(const CustomRow& row) { return IsEnumRow(row) ? 0 : row.min; }
+int32_t RowMin(const OptionRow& row) { return IsEnumRow(row) ? 0 : row.min; }
 
-int32_t RowMax(const CustomRow& row) {
+int32_t RowMax(const OptionRow& row) {
   if (!IsEnumRow(row)) {
     return row.max;
   }
@@ -830,9 +739,16 @@ int32_t RowMax(const CustomRow& row) {
   return static_cast<int32_t>(count) - 1;
 }
 
-int32_t RowStep(const CustomRow& row) { return IsEnumRow(row) ? 1 : row.step; }
+int32_t RowStep(const OptionRow& row) { return IsEnumRow(row) ? 1 : row.step; }
 
-int32_t RowMultiplier(const CustomRow& row) { return IsEnumRow(row) ? 1 : row.multiplier; }
+int32_t RowMultiplier(const OptionRow& row) { return IsEnumRow(row) ? 1 : row.multiplier; }
+
+const char16_t* RowValueText(const OptionRow& row, int32_t value) {
+  if (value < 0 || static_cast<uint32_t>(value) >= row.value_count) {
+    return nullptr;
+  }
+  return row.values ? row.values[value].Get() : row.value_text(value);
+}
 
 // ---------------------------------------------------------------------------
 // State
@@ -841,10 +757,9 @@ int32_t RowMultiplier(const CustomRow& row) { return IsEnumRow(row) ? 1 : row.mu
 PPCFunc* g_original_list_setup_fn = NOCTURNE_ORIGINAL_FN(kListSetupFnAddr);
 PPCFunc* g_original_bind_rows_fn = NOCTURNE_ORIGINAL_FN(kBindRowsFnAddr);
 PPCFunc* g_original_cycle_row_fn = NOCTURNE_ORIGINAL_FN(kCycleRowFnAddr);
+PPCFunc* g_original_move_selection_fn = NOCTURNE_ORIGINAL_FN(kMoveSelectionFnAddr);
 PPCFunc* g_original_settings_event_fn = NOCTURNE_ORIGINAL_FN(kSettingsEventFnAddr);
 PPCFunc* g_original_settings_activate_fn = NOCTURNE_ORIGINAL_FN(kSettingsActivateFnAddr);
-PPCFunc* g_set_widget_text_fn = nullptr;
-PPCFunc* g_set_text_scale_fn = nullptr;
 PPCFunc* g_enable_row_fn = nullptr;
 PPCFunc* g_original_list_update_fn = NOCTURNE_ORIGINAL_FN(kListUpdateFnAddr);
 PPCFunc* g_set_widget_colour_fn = nullptr;
@@ -889,9 +804,8 @@ uint32_t g_value_scratch = 0;
 // the stretch screen's does. EnterPregameScreen is how that file arms this.
 uint32_t g_pregame_screen_page = 0;
 
-// Needed to resolve a widget's virtual "show" through its vtable at runtime
-// (see ShowWidget) -- the guest does the same dispatch, and there is no
-// static address to hardcode.
+// Needed to resolve the app object's virtual "signed in" through its vtable at
+// runtime (see RefreshSettingsTitle): there is no static address to hardcode.
 rex::runtime::FunctionDispatcher* g_dispatcher = nullptr;
 
 // Needed to close this process's window after a successful
@@ -907,70 +821,31 @@ rex::Runtime* g_runtime = nullptr;
 // the front-end, so no synchronisation is needed.
 uint32_t g_list = 0;
 
-// The number of rows the list is actually built with this run -- kTotalRowCount
-// (the table's compile-time maximum) minus any appended row whose `available`
-// came back false. Set once by NativeOptions::Bind, before the settings screen can
-// possibly open, and used everywhere that needs the *real* row count: how
-// many rows ListSetup asks the game to create, how many entries BindRows
-// hands over, and the upper bound CycleRow/ListUpdate iterate to. This is
-// what lets an appended row (GPU Backend) opt out via `available` without
-// leaving a widget behind that nothing ever fills in -- the widget for it is
-// simply never created, because it's the last row in the table.
-uint32_t g_active_row_count = kTotalRowCount;
-
-// Our extended entry table, plus a scratch buffer for UTF-16 text, in one
-// allocation from the game's own heap. Allocated once, on the first bind.
+// The entry table the list is bound with: one entry per list row, so the
+// visible window of the page. Allocated once, on the first bind, from the
+// game's own heap.
 uint32_t g_entries = 0;
-uint32_t g_text_scratch = 0;
-constexpr uint32_t kTextScratchChars = 64;
-constexpr uint32_t kArenaSize = kTotalRowCount * kEntryStride + kTextScratchChars * 2;
+constexpr uint32_t kArenaSize = kListMaxRows * kEntryStride;
 
 // The game's own 3-entry table (model+12). The stock rows of our copy are
 // mirrored back into it whenever they change, because the screen's "apply"
 // path (sub_8257F9E0 on A) reads the model, not the list -- without the
-// copy-back, cycling Graphics or Volume would render correctly and then apply
-// nothing.
+// copy-back, cycling Graphics would render correctly and then apply nothing.
 uint32_t g_vanilla_entries = 0;
 
-// Each custom row's value as of the last bind, so B can undo a live row's
-// running changes.
-int32_t g_seeded_values[kCustomRowCount] = {};
+// Each page row's current value, kept here rather than in the entry table
+// because a scrolling page only has entries for the rows in view; and its
+// value as of the last bind, so B can undo a live row's running changes.
+int32_t g_values[kMaxPageRows] = {};
+int32_t g_seeded_values[kMaxPageRows] = {};
 
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
 
-uint32_t Read32BE(const uint8_t* base, uint32_t guest_address) {
-  return rex::memory::load_and_swap<uint32_t>(base + guest_address);
-}
-
-void Write32BE(uint8_t* base, uint32_t guest_address, uint32_t value) {
-  rex::memory::store_and_swap<uint32_t>(base + guest_address, value);
-}
-
-void Write16BE(uint8_t* base, uint32_t guest_address, uint16_t value) {
-  rex::memory::store_and_swap<uint16_t>(base + guest_address, value);
-}
-
 uint8_t Read8(const uint8_t* base, uint32_t guest_address) { return base[guest_address]; }
 
 void Write8(uint8_t* base, uint32_t guest_address, uint8_t value) { base[guest_address] = value; }
-
-// Calls a guest function with a scratch register set, restoring the caller's
-// context afterwards -- same pattern graphics_settings.cpp uses to reuse the
-// live context for its own guest calls.
-uint32_t CallGuest(PPCContext& ctx, uint8_t* base, PPCFunc* fn, uint32_t r3, uint32_t r4) {
-  if (!fn) {
-    return 0;
-  }
-  PPCContext saved = ctx;
-  ctx.r3.u32 = r3;
-  ctx.r4.u32 = r4;
-  fn(ctx, base);
-  const uint32_t result = ctx.r3.u32;
-  ctx = saved;
-  return result;
-}
 
 // Queues a front-end page switch, exactly as the screens themselves do.
 //
@@ -979,68 +854,31 @@ uint32_t CallGuest(PPCContext& ctx, uint8_t* base, PPCFunc* fn, uint32_t r3, uin
 // this context belongs to whatever guest call we are wrapping, not to a real
 // call site.
 void CallGuestPageSwitch(PPCContext& ctx, uint8_t* base, uint32_t page, uint32_t controller) {
-  if (!g_original_post_event_fn) {
-    return;
-  }
-  PPCContext saved = ctx;
-  ctx.r3.u32 = kEventClassPageSwitch;
-  ctx.r4.u32 = 0;
-  ctx.r5.u32 = page;
-  ctx.r6.u32 = controller;
-  g_original_post_event_fn(ctx, base);
-  ctx = saved;
+  CallGuest(ctx, base, g_original_post_event_fn, kEventClassPageSwitch, 0, page, controller);
 }
 
-// Allocates the shared entry table + text scratch from the game's own heap,
-// once. Both the row binding and the prompt-bar builder need the scratch, and
-// either can run first (the builder runs when the screen object is created,
-// the bind when it opens), so neither owns the allocation.
+// Allocates the entry table from the game's own heap, once. Both the row
+// binding and the prompt-bar builder need it to exist (the builder runs when
+// the screen object is created, the bind when it opens), so neither owns the
+// allocation.
 bool EnsureArena(PPCContext& ctx, uint8_t* base) {
   if (g_entries) {
     return true;
   }
-  const uint32_t arena = CallGuest(ctx, base, g_alloc_fn, kArenaSize, 0);
-  if (!arena) {
+  g_entries = CallGuest(ctx, base, g_alloc_fn, kArenaSize);
+  if (!g_entries) {
     REXLOG_WARN("[native_options] guest allocation failed; no extra rows");
     return false;
   }
-  g_entries = arena;
-  g_text_scratch = arena + kTotalRowCount * kEntryStride;
   return true;
 }
 
-// Copies UTF-16 text into the shared guest scratch buffer and returns its
-// guest address, or 0 if there is no scratch. The guest text setters copy out
-// of it immediately, so one buffer serves every caller.
-uint32_t StageText(uint8_t* base, const char16_t* text) {
-  if (!g_text_scratch || !text) {
-    return 0;
-  }
-  uint32_t length = 0;
-  while (text[length] != u'\0' && length < kTextScratchChars - 1) {
-    Write16BE(base, g_text_scratch + length * 2, static_cast<uint16_t>(text[length]));
-    ++length;
-  }
-  Write16BE(base, g_text_scratch + length * 2, 0);
-  return g_text_scratch;
+uint32_t RowLabelWidget(const uint8_t* base, uint32_t screen_row) {
+  return Read32BE(base, g_list + kListRowLabels + 4 * screen_row);
 }
 
-// Makes a widget visible through its own vtable, the same virtual the stock
-// screen update calls. Resolved per call because the target depends on the
-// widget's class -- there is no one address to hook.
-void ShowWidget(PPCContext& ctx, uint8_t* base, uint32_t widget) {
-  if (!widget || !g_dispatcher) {
-    return;
-  }
-  const uint32_t vtable = Read32BE(base, widget);
-  if (!vtable) {
-    return;
-  }
-  const uint32_t show_addr = Read32BE(base, vtable + kWidgetVtableShow);
-  if (!show_addr) {
-    return;
-  }
-  CallGuest(ctx, base, g_dispatcher->GetFunction(show_addr), widget, 0);
+uint32_t RowValueWidget(const uint8_t* base, uint32_t screen_row) {
+  return Read32BE(base, g_list + kListRowValues + 4 * screen_row);
 }
 
 // The list's normal row text scale, read live rather than hardcoded.
@@ -1052,7 +890,7 @@ float ListTextScale(const uint8_t* base) {
   return (scale > 0.0f && scale <= 4.0f) ? scale : kFallbackTextScale;
 }
 
-// Replaces a widget's text outright, then reasserts the row text scale.
+// Replaces a row widget's text outright, then reasserts the row text scale.
 //
 // The scale matters because the two text setters are not equivalent. The
 // stock rows go through sub_825D1EE8 -> sub_825CFC68, which looks the string
@@ -1062,22 +900,19 @@ float ListTextScale(const uint8_t* base) {
 // scale at the widget's construction default -- noticeably larger than every
 // stock row. So anything setting literal text here has to supply the scale
 // itself; sub_825D20C0 is the same setter sub_825D36B8 uses to re-scale the
-// highlighted row (it takes the scale in f1, not a GPR).
-//
-// sub_825D1EE0 copies the string into the widget's own buffer (the same
-// copy-in-not-point-at behaviour noted in graphics_settings.cpp), so the
-// scratch buffer can be reused immediately.
-void SetWidgetText(PPCContext& ctx, uint8_t* base, uint32_t widget, const char16_t* text,
-                   bool preserve_scale = false) {
-  if (!widget || !text || !g_set_widget_text_fn || !g_text_scratch) {
+// highlighted row.
+void SetRowText(PPCContext& ctx, uint8_t* base, uint32_t widget, const char16_t* text,
+                bool preserve_scale = false) {
+  if (!widget || !text) {
     return;
   }
 
   // Relabelling a stock row means the widget already carries the scale
   // sub_825CFC68 copied out of the string table for its original text --
-  // which is the scale it should keep. Appended rows have no such history:
-  // theirs is the widget's construction default (visibly oversized), so they
-  // take the list's normal scale instead.
+  // which is the scale it should keep. Our own rows have no such history:
+  // theirs is the widget's construction default (visibly oversized), or
+  // whatever the row it last showed left behind, so they take the list's
+  // normal scale instead.
   float scale = ListTextScale(base);
   if (preserve_scale) {
     const uint32_t inner = Read32BE(base, widget + kWidgetInnerTextOffset);
@@ -1089,23 +924,29 @@ void SetWidgetText(PPCContext& ctx, uint8_t* base, uint32_t widget, const char16
     }
   }
 
-  CallGuest(ctx, base, g_set_widget_text_fn, widget, StageText(base, text));
-
-  if (g_set_text_scale_fn) {
-    PPCContext saved = ctx;
-    ctx.r3.u32 = widget;
-    ctx.f1.f64 = static_cast<double>(scale);
-    g_set_text_scale_fn(ctx, base);
-    ctx = saved;
-  }
+  SetWidgetText(ctx, base, widget, text);
+  SetWidgetScale(ctx, base, widget, scale);
 }
 
-// Lays a row out as a stock spinner entry. Enumerated rows carry no inline
-// value string ids, so the vanilla renderer prints the raw number -- which
-// RenderCustomRow then paints over with the row's own text.
-void WriteCustomEntry(uint8_t* base, uint32_t custom_index) {
-  const CustomRow& row = kCustomRows[custom_index];
-  const uint32_t entry = g_entries + row.list_row * kEntryStride;
+// Seeds a row's value from its `get`, as of the screen opening.
+void SeedRow(uint32_t index) {
+  const OptionRow& row = Page().rows[index];
+  const int32_t value = row.get ? row.get(row) : RowMin(row);
+  g_values[index] = std::clamp(value, RowMin(row), RowMax(row));
+  // Remembered so B (cancel) can put a live row's real value back: see
+  // NativeOptions_SettingsEvent.
+  g_seeded_values[index] = g_values[index];
+}
+
+// Lays a row in view out as a stock spinner entry. Enumerated rows carry no
+// inline value string ids, so the vanilla renderer prints the raw number,
+// which RenderRow then paints over with the row's own text.
+void WriteEntry(uint8_t* base, uint32_t index) {
+  const OptionRow& row = Page().rows[index];
+  if (!OnScreen(row)) {
+    return;
+  }
+  const uint32_t entry = g_entries + ScreenRow(row) * kEntryStride;
 
   // A row with no `label` of its own keeps the game's, which means keeping
   // the entry's label string id: sub_825D36B8 feeds that field straight to
@@ -1118,53 +959,55 @@ void WriteCustomEntry(uint8_t* base, uint32_t custom_index) {
   for (uint32_t offset = 0; offset < kEntryStride; offset += 4) {
     Write32BE(base, entry + offset, 0);
   }
-  if (!row.label) {
+  if (!row.label.key) {
     Write32BE(base, entry + kEntryLabelId, inherited_label_id);
   }
 
-  const int32_t min = RowMin(row);
-  const int32_t max = RowMax(row);
-  int32_t value = row.get ? row.get() : min;
-  value = std::clamp(value, min, max);
-
-  Write32BE(base, entry + kEntryValue, static_cast<uint32_t>(value));
-  Write32BE(base, entry + kEntryMin, static_cast<uint32_t>(min));
-  Write32BE(base, entry + kEntryMax, static_cast<uint32_t>(max));
+  Write32BE(base, entry + kEntryValue, static_cast<uint32_t>(g_values[index]));
+  Write32BE(base, entry + kEntryMin, static_cast<uint32_t>(RowMin(row)));
+  Write32BE(base, entry + kEntryMax, static_cast<uint32_t>(RowMax(row)));
   Write32BE(base, entry + kEntryStep, static_cast<uint32_t>(RowStep(row)));
   Write32BE(base, entry + kEntryMultiplier, static_cast<uint32_t>(RowMultiplier(row)));
-
-  // Remembered so B (cancel) can put a live row's real value back -- see
-  // NativeOptions_SettingsEvent.
-  g_seeded_values[custom_index] = value;
 }
 
-int32_t CustomEntryValue(const uint8_t* base, uint32_t custom_index) {
-  if (!g_entries) {
-    return 0;
+// Writes the entries of every row of ours in view.
+void WriteEntries(uint8_t* base) {
+  for (uint32_t i = 0; i < Page().row_count; ++i) {
+    if (IsRowActive(Page().rows[i]) && !IsLabelOnly(Page().rows[i])) {
+      WriteEntry(base, i);
+    }
   }
+}
+
+// The value the list itself holds for a row in view, i.e. after a left/right.
+int32_t EntryValue(const uint8_t* base, const OptionRow& row) {
   return static_cast<int32_t>(
-      Read32BE(base, g_entries + kCustomRows[custom_index].list_row * kEntryStride + kEntryValue));
+      Read32BE(base, g_entries + ScreenRow(row) * kEntryStride + kEntryValue));
 }
 
 // Paints a row's label, and its value too when the row is enumerated. Numeric
 // rows keep the number the game itself just rendered, and a row with no
 // `label` keeps the game's own.
-void RenderCustomRow(PPCContext& ctx, uint8_t* base, uint32_t custom_index) {
-  if (!g_list) {
+void RenderRow(PPCContext& ctx, uint8_t* base, uint32_t index) {
+  const OptionRow& row = Page().rows[index];
+  if (!g_list || !OnScreen(row)) {
     return;
   }
-  const CustomRow& row = kCustomRows[custom_index];
-  const uint32_t list_row = row.list_row;
+  const uint32_t screen_row = ScreenRow(row);
 
-  if (row.label) {
-    SetWidgetText(ctx, base, Read32BE(base, g_list + kListRowLabels + 4 * list_row), row.label(),
-                  /*preserve_scale=*/IsLabelOnly(row));
+  if (row.label.key) {
+    SetRowText(ctx, base, RowLabelWidget(base, screen_row), row.label.Get(),
+               /*preserve_scale=*/IsLabelOnly(row));
   }
   if (IsEnumRow(row)) {
-    const int32_t value = CustomEntryValue(base, custom_index);
-    if (value >= 0 && value < static_cast<int32_t>(row.value_count)) {
-      SetWidgetText(ctx, base, Read32BE(base, g_list + kListRowValues + 4 * list_row),
-                    row.values[value]);
+    SetRowText(ctx, base, RowValueWidget(base, screen_row), RowValueText(row, g_values[index]));
+  }
+}
+
+void RenderRows(PPCContext& ctx, uint8_t* base) {
+  for (uint32_t i = 0; i < Page().row_count; ++i) {
+    if (IsRowActive(Page().rows[i])) {
+      RenderRow(ctx, base, i);
     }
   }
 }
@@ -1172,9 +1015,10 @@ void RenderCustomRow(PPCContext& ctx, uint8_t* base, uint32_t custom_index) {
 // Mirrors one stock row back into the game's own table. See g_vanilla_entries.
 // Rows an active override has taken over are deliberately *not* mirrored:
 // leaving the model's original entry alone is what keeps whatever that stock
-// row used to drive from following our value around.
+// row used to drive from following our value around. A page that owns all its
+// rows never shows a stock row, so it never mirrors anything.
 void CopyEntryToVanilla(uint8_t* base, uint32_t row) {
-  if (!g_vanilla_entries || !g_entries || row >= kVanillaRowCount) {
+  if (!g_vanilla_entries || !g_entries || row >= kVanillaRowCount || Page().owns_all_rows) {
     return;
   }
   if (FindActiveValueRow(row) >= 0) {
@@ -1186,64 +1030,92 @@ void CopyEntryToVanilla(uint8_t* base, uint32_t row) {
   }
 }
 
+// Rebinds the list to the rows in view after a scroll: the same bind the
+// screen does, minus the re-seeding our bind hook adds, since the values have
+// to survive scrolling out of view and back.
+void BindVisibleRows(PPCContext& ctx, uint8_t* base) {
+  WriteEntries(base);
+  CallGuest(ctx, base, g_original_bind_rows_fn, g_list, g_entries, VisibleRowCount());
+  RenderRows(ctx, base);
+}
+
 // ---------------------------------------------------------------------------
 // Hooks
 // ---------------------------------------------------------------------------
 
-// Claims the settings screen's option list and grows it by kCustomRowCount.
+// Claims the settings screen's option list and grows it to ListCapacity().
 // Doing it here rather than after the fact means the list creates each extra
 // row's label widget, value widget, cyclable flag and layout slot itself,
-// exactly like the three it already makes.
+// exactly like the three it already makes. A page with fewer rows binds fewer
+// and the list hides the rest (see NativeOptions_BindRows).
 extern "C" void NativeOptions_ListSetup(PPCContext& ctx, uint8_t* base) {
   const uint32_t lr = static_cast<uint32_t>(ctx.lr);
   const bool from_settings_screen =
       lr > kSettingsBuildFnAddr && lr <= kSettingsBuildFnAddr + kSettingsBuildFnSize;
   if (from_settings_screen && ctx.r6.u32 == kVanillaRowCount) {
     g_list = ctx.r3.u32;
-    ctx.r6.u32 = g_active_row_count;
+    ctx.r6.u32 = ListCapacity();
   }
   if (g_original_list_setup_fn) {
     g_original_list_setup_fn(ctx, base);
   }
 }
 
-// Substitutes our extended table for the game's 3-entry one, then paints the
-// extra rows. Runs again on every re-entry to the screen (its activate and
-// its B/X paths all re-bind), which is also what re-seeds each row from its
-// `get` -- so cancelling out of the screen discards an uncommitted change for
-// free, the same way it does for the stock rows.
+// Substitutes our table for the game's 3-entry one, then paints our rows.
+// Runs again on every re-entry to the screen (its activate and its B/X paths
+// all re-bind), which is also what re-seeds each row from its `get`: so
+// cancelling out of the screen discards an uncommitted change for free, the
+// same way it does for the stock rows.
+//
+// The first bind after SelectSettingsPage picked another page is where the
+// screen switches pages: back to the top of the new page, with its own row
+// count. The list only ever hides rows past the count it is bound with, so
+// the rows a shorter page hid are shown again here.
 extern "C" void NativeOptions_BindRows(PPCContext& ctx, uint8_t* base) {
   bool ours = g_list != 0 && ctx.r3.u32 == g_list && ctx.r5.u32 == kVanillaRowCount;
 
   if (ours) {
     EnsureArena(ctx, base);
     if (g_entries) {
-      g_vanilla_entries = ctx.r4.u32;
-      for (uint32_t i = 0; i < kVanillaRowCount * kEntryStride; i += 4) {
-        Write32BE(base, g_entries + i, Read32BE(base, g_vanilla_entries + i));
-      }
-      for (uint32_t i = 0; i < kCustomRowCount; ++i) {
-        if (IsRowActive(kCustomRows[i]) && !IsLabelOnly(kCustomRows[i])) {
-          WriteCustomEntry(base, i);
+      if (g_bound_page != g_page) {
+        g_bound_page = g_page;
+        g_scroll = 0;
+        Write32BE(base, g_list + kListSelectedRow, 0);
+        // Whichever row was selected on the old page still has the list's
+        // larger selected scale on its value.
+        for (uint32_t row = 0; row < ListCapacity(); ++row) {
+          SetWidgetScale(ctx, base, RowValueWidget(base, row), ListTextScale(base));
         }
       }
+
+      g_vanilla_entries = ctx.r4.u32;
+      if (!Page().owns_all_rows) {
+        for (uint32_t i = 0; i < kVanillaRowCount * kEntryStride; i += 4) {
+          Write32BE(base, g_entries + i, Read32BE(base, g_vanilla_entries + i));
+        }
+      }
+      for (uint32_t i = 0; i < Page().row_count; ++i) {
+        if (IsRowActive(Page().rows[i]) && !IsLabelOnly(Page().rows[i])) {
+          SeedRow(i);
+        }
+      }
+      WriteEntries(base);
 
       // Pin displaced stock settings to their maximum, in the game's *own*
       // table -- that is the copy its apply path (sub_8257F9E0) and its live
       // on-change apply both read, and the one we otherwise leave frozen at
       // whatever the row held before it was taken over.
-      for (uint32_t i = 0; i < kCustomRowCount; ++i) {
-        const CustomRow& custom = kCustomRows[i];
-        if (!IsRowActive(custom) || !custom.pin_stock_to_max ||
-            custom.list_row >= kVanillaRowCount) {
+      for (uint32_t i = 0; i < Page().row_count; ++i) {
+        const OptionRow& row = Page().rows[i];
+        if (!IsRowActive(row) || !row.pin_stock_to_max || row.list_row >= kVanillaRowCount) {
           continue;
         }
-        const uint32_t stock = g_vanilla_entries + custom.list_row * kEntryStride;
+        const uint32_t stock = g_vanilla_entries + row.list_row * kEntryStride;
         Write32BE(base, stock + kEntryValue, Read32BE(base, stock + kEntryMax));
       }
 
       ctx.r4.u32 = g_entries;
-      ctx.r5.u32 = g_active_row_count;
+      ctx.r5.u32 = VisibleRowCount();
     } else {
       ours = false;
     }
@@ -1254,43 +1126,87 @@ extern "C" void NativeOptions_BindRows(PPCContext& ctx, uint8_t* base) {
   }
 
   if (ours) {
-    for (uint32_t i = 0; i < kCustomRowCount; ++i) {
-      if (IsRowActive(kCustomRows[i])) {
-        RenderCustomRow(ctx, base, i);
-      }
+    for (uint32_t row = 0; row < VisibleRowCount(); ++row) {
+      SetWidgetVisible(ctx, base, RowLabelWidget(base, row), true);
+      SetWidgetVisible(ctx, base, RowValueWidget(base, row), true);
     }
+    RenderRows(ctx, base);
   }
 }
 
 // Left/right on a row. The vanilla path already advances and wraps every row
-// correctly (ours are stock spinner entries), so all this adds is repainting
-// an enumerated row with its own text instead of the raw number, and keeping
-// the stock rows mirrored back into the game's own table.
+// correctly (ours are stock spinner entries), so all this adds is taking the
+// new value, repainting an enumerated row with its own text instead of the raw
+// number, and keeping the stock rows mirrored back into the game's own table.
 extern "C" void NativeOptions_CycleRow(PPCContext& ctx, uint8_t* base) {
   const bool ours = g_list != 0 && ctx.r3.u32 == g_list && g_entries != 0;
-  const uint32_t row = ours ? Read32BE(base, g_list + kListSelectedRow) : 0;
+  const uint32_t screen_row = ours ? Read32BE(base, g_list + kListSelectedRow) : 0;
 
   if (g_original_cycle_row_fn) {
     g_original_cycle_row_fn(ctx, base);
   }
 
-  if (!ours || row >= g_active_row_count) {
+  if (!ours || screen_row >= VisibleRowCount()) {
     return;
   }
 
-  const int32_t custom_index = FindActiveValueRow(row);
-  if (custom_index < 0) {
-    CopyEntryToVanilla(base, row);
+  const int32_t index = FindActiveValueRow(screen_row + g_scroll);
+  if (index < 0) {
+    CopyEntryToVanilla(base, screen_row);
     return;
   }
 
-  const CustomRow& custom = kCustomRows[custom_index];
+  const OptionRow& row = Page().rows[index];
+  g_values[index] = EntryValue(base, row);
   // Commit before painting, so the paint sees this keypress's change rather
   // than the previous one.
-  if (custom.live && custom.commit) {
-    custom.commit(CustomEntryValue(base, static_cast<uint32_t>(custom_index)));
+  if (row.live && row.commit) {
+    row.commit(row, g_values[index]);
   }
-  RenderCustomRow(ctx, base, static_cast<uint32_t>(custom_index));
+  RenderRow(ctx, base, static_cast<uint32_t>(index));
+}
+
+// Up/down past the first or last row in view of a page that doesn't fit.
+//
+// The list itself only knows the rows it was bound with, so at its edges it
+// would stop or wrap. Where the page has more rows past that edge, this
+// scrolls them in instead: the selection stays on the same list row and the
+// list is rebound one page row further along. The caller (sub_825D48D0)
+// still plays the move sound. Wrapping, where the list does it, takes the
+// page along: from the bottom back to the top of the page and the other way.
+extern "C" void NativeOptions_MoveSelection(PPCContext& ctx, uint8_t* base) {
+  const auto direction = static_cast<int32_t>(ctx.r4.u32);
+  const uint32_t visible = VisibleRowCount();
+  const uint32_t total = Page().total_rows;
+  const bool ours = g_list != 0 && ctx.r3.u32 == g_list && g_entries != 0 && total > visible;
+  const uint32_t selected = ours ? Read32BE(base, g_list + kListSelectedRow) : 0;
+
+  if (ours && direction > 0 && selected + 1 >= visible && g_scroll + visible < total) {
+    ++g_scroll;
+    BindVisibleRows(ctx, base);
+    return;
+  }
+  if (ours && direction < 0 && selected == 0 && g_scroll > 0) {
+    --g_scroll;
+    BindVisibleRows(ctx, base);
+    return;
+  }
+
+  if (g_original_move_selection_fn) {
+    g_original_move_selection_fn(ctx, base);
+  }
+
+  if (!ours) {
+    return;
+  }
+  const uint32_t moved_to = Read32BE(base, g_list + kListSelectedRow);
+  if (direction > 0 && moved_to < selected && g_scroll != 0) {
+    g_scroll = 0;
+    BindVisibleRows(ctx, base);
+  } else if (direction < 0 && moved_to > selected && g_scroll != total - visible) {
+    g_scroll = total - visible;
+    BindVisibleRows(ctx, base);
+  }
 }
 
 // Extends the list Update's highlight reset to the appended rows.
@@ -1312,8 +1228,8 @@ extern "C" void NativeOptions_ListUpdate(PPCContext& ctx, uint8_t* base) {
 
   if (g_list != 0 && list == g_list && g_set_widget_colour_fn) {
     const uint32_t colour = Read32BE(base, list + kListNormalColour);
-    for (uint32_t row = kStockLabelResetCount; row < g_active_row_count; ++row) {
-      const uint32_t label = Read32BE(base, list + kListRowLabels + 4 * row);
+    for (uint32_t row = kStockLabelResetCount; row < VisibleRowCount(); ++row) {
+      const uint32_t label = RowLabelWidget(base, row);
       if (label) {
         CallGuest(ctx, base, g_set_widget_colour_fn, label, colour);
       }
@@ -1324,7 +1240,7 @@ extern "C" void NativeOptions_ListUpdate(PPCContext& ctx, uint8_t* base) {
     g_original_list_update_fn(ctx, base);
   }
 
-  // Repaint the Preset row's value, which that same Update just blanked.
+  // Repaint list row 2's value, which that same Update just blanked.
   //
   // It opens with `set_text(list+768, "")` -- value widget 2, hardcoded, no
   // condition -- because the row it was written for ("Change Screen Size...")
@@ -1336,23 +1252,15 @@ extern "C" void NativeOptions_ListUpdate(PPCContext& ctx, uint8_t* base) {
   // The scale is preserved rather than reasserted: the blanking doesn't touch
   // it, so whatever the widget carries is already right, including the larger
   // scale the list gives the selected row.
-  if (g_list == 0 || list != g_list) {
+  if (g_list == 0 || list != g_list || !g_entries) {
     return;
   }
-  const int32_t custom_index = FindActiveValueRow(kPresetRow);
-  if (custom_index < 0) {
+  const int32_t index = FindActiveValueRow(kSubmenuRow + g_scroll);
+  if (index < 0 || !IsEnumRow(Page().rows[index])) {
     return;
   }
-  const CustomRow& row = kCustomRows[custom_index];
-  if (!IsEnumRow(row)) {
-    return;
-  }
-  const int32_t value = CustomEntryValue(base, static_cast<uint32_t>(custom_index));
-  if (value < 0 || value >= static_cast<int32_t>(row.value_count)) {
-    return;
-  }
-  SetWidgetText(ctx, base, Read32BE(base, g_list + kListRowValues + 4 * kPresetRow),
-                row.values[value], /*preserve_scale=*/true);
+  SetRowText(ctx, base, RowValueWidget(base, kSubmenuRow),
+             RowValueText(Page().rows[index], g_values[index]), /*preserve_scale=*/true);
 }
 
 // Keeps every stock row usable regardless of whether a save is loaded.
@@ -1370,6 +1278,8 @@ extern "C" void NativeOptions_ListUpdate(PPCContext& ctx, uint8_t* base) {
 // Ordering: Activate disables near its top and re-binds the rows further
 // down, and nothing after that point re-disables, so running this once the
 // original has returned is enough.
+void ApplyPageChrome(PPCContext& ctx, uint8_t* base);
+
 extern "C" void NativeOptions_SettingsActivate(PPCContext& ctx, uint8_t* base) {
   const uint32_t screen = ctx.r3.u32;
   g_settings_screen = screen;
@@ -1389,6 +1299,7 @@ extern "C" void NativeOptions_SettingsActivate(PPCContext& ctx, uint8_t* base) {
   for (uint32_t row = kGatedFirstRow; row <= kGatedLastRow; ++row) {
     CallGuest(ctx, base, g_enable_row_fn, list, row);
   }
+  ApplyPageChrome(ctx, base);
 }
 
 // Captures the settings screen's three prompt widgets.
@@ -1432,7 +1343,7 @@ uint32_t PromptWidth(PPCContext& ctx, uint8_t* base, uint32_t prompt) {
 // no id for this -- so it goes in as literal UTF-16 and the text scale is
 // copied off a stock prompt, which the by-id setter would have supplied.
 uint32_t CreateCustomPrompt(PPCContext& ctx, uint8_t* base, uint32_t screen) {
-  if (!g_alloc_fn || !g_prompt_ctor_fn || !g_find_image_fn || !g_set_widget_text_fn) {
+  if (!g_alloc_fn || !g_prompt_ctor_fn || !g_find_image_fn) {
     return 0;
   }
   const uint32_t memory = CallGuest(ctx, base, g_alloc_fn, kPromptSize, 0);
@@ -1460,7 +1371,7 @@ uint32_t CreateCustomPrompt(PPCContext& ctx, uint8_t* base, uint32_t screen) {
     CallGuest(ctx, base, g_prompt_show_glyph_fn, prompt, 0);
   }
 
-  CallGuest(ctx, base, g_set_widget_text_fn, prompt, StageText(base, CustomPromptLabel()));
+  SetWidgetText(ctx, base, prompt, kCustomPromptLabel.Get());
 
   if (g_prompt_text_offset_fn) {
     saved = ctx;
@@ -1473,14 +1384,10 @@ uint32_t CreateCustomPrompt(PPCContext& ctx, uint8_t* base, uint32_t screen) {
 
   // Match a stock prompt's text scale, which its string-table lookup set.
   const uint32_t stock_text = Read32BE(base, g_stock_prompts[0] + kPromptTextOffset);
-  if (stock_text && g_set_text_scale_fn) {
+  if (stock_text) {
     const float scale = std::bit_cast<float>(Read32BE(base, stock_text + kWidgetTextScaleOffset));
     if (scale > 0.0f && scale <= 4.0f) {
-      saved = ctx;
-      ctx.r3.u32 = prompt;
-      ctx.f1.f64 = static_cast<double>(scale);
-      g_set_text_scale_fn(ctx, base);
-      ctx = saved;
+      SetWidgetScale(ctx, base, prompt, scale);
     }
   }
 
@@ -1490,21 +1397,25 @@ uint32_t CreateCustomPrompt(PPCContext& ctx, uint8_t* base, uint32_t screen) {
   return prompt;
 }
 
-// Spreads the three stock prompts and "Custom" evenly across the bar. The
-// spacing mirrors the stock layout's own formula with one more item: n+1
-// equal gaps around n prompts. Runs again after a language switch, which
-// changes every prompt's width.
+// Spreads the three stock prompts, and "Custom" on a page with a stretch
+// prompt, evenly across the bar, hiding "Custom" on a page without. The
+// spacing is the stock layout's own formula for any count: n+1 equal gaps
+// around n prompts. Runs again on every page switch and after a language
+// switch, which changes every prompt's width.
 void LayoutPromptBar(PPCContext& ctx, uint8_t* base) {
   if (!g_custom_prompt || !g_prompt_set_pos_fn || g_stock_prompts[0] == 0 ||
       g_stock_prompts[1] == 0 || g_stock_prompts[2] == 0) {
     return;
   }
 
+  const bool with_custom = Page().stretch_prompt;
+  SetWidgetVisible(ctx, base, g_custom_prompt, with_custom);
   const std::array<uint32_t, 4> prompts = {g_stock_prompts[0], g_stock_prompts[1],
                                            g_stock_prompts[2], g_custom_prompt};
+  const size_t count = with_custom ? prompts.size() : prompts.size() - 1;
   std::array<uint32_t, 4> widths = {};
   uint32_t total = 0;
-  for (size_t i = 0; i < prompts.size(); ++i) {
+  for (size_t i = 0; i < count; ++i) {
     widths[i] = PromptWidth(ctx, base, prompts[i]);
     total += widths[i];
   }
@@ -1512,9 +1423,9 @@ void LayoutPromptBar(PPCContext& ctx, uint8_t* base) {
     return;  // nothing sensible to space; leave the stock three where they are
   }
 
-  const uint32_t gap = (kPromptBarWidth - total) / (static_cast<uint32_t>(prompts.size()) + 1);
+  const uint32_t gap = (kPromptBarWidth - total) / (static_cast<uint32_t>(count) + 1);
   uint32_t x = kPromptBarX + gap;
-  for (size_t i = 0; i < prompts.size(); ++i) {
+  for (size_t i = 0; i < count; ++i) {
     PPCContext saved = ctx;
     ctx.r3.u32 = prompts[i];
     ctx.r4.u32 = x;
@@ -1603,7 +1514,7 @@ extern "C" void NativeOptions_PostEvent(PPCContext& ctx, uint8_t* base) {
   }
 }
 
-// Gives the Preset row the left/right arrows every other row gets.
+// Gives list row 2 the left/right arrows every other row gets.
 //
 // The screen's per-frame update (sub_825B4CC0) hides both arrow widgets
 // whenever row 2 is selected -- correct when that row opened a submenu, wrong
@@ -1615,18 +1526,19 @@ extern "C" void NativeOptions_PostEvent(PPCContext& ctx, uint8_t* base) {
 extern "C" void NativeOptions_SettingsUpdate(PPCContext& ctx, uint8_t* base) {
   const uint32_t screen = ctx.r3.u32;
   const bool ours = screen != 0 && g_list != 0 && Read32BE(base, screen + kScreenListOffset) == g_list;
-  const bool preset_row_selected =
-      ours && Read32BE(base, g_list + kListSelectedRow) == kPresetRow;
+  const bool submenu_row_selected = ours &&
+                                    Read32BE(base, g_list + kListSelectedRow) == kSubmenuRow &&
+                                    FindActiveValueRow(kSubmenuRow + g_scroll) >= 0;
 
   if (g_original_settings_update_fn) {
     g_original_settings_update_fn(ctx, base);
   }
 
-  if (!preset_row_selected) {
+  if (!submenu_row_selected) {
     return;
   }
 
-  const uint32_t value_widget = Read32BE(base, g_list + kListRowValues + 4 * kPresetRow);
+  const uint32_t value_widget = RowValueWidget(base, kSubmenuRow);
   if (!value_widget) {
     return;
   }
@@ -1639,16 +1551,43 @@ extern "C" void NativeOptions_SettingsUpdate(PPCContext& ctx, uint8_t* base) {
     if (!arrows[i]) {
       continue;
     }
-    ShowWidget(ctx, base, arrows[i]);
+    SetWidgetVisible(ctx, base, arrows[i], true);
     Write32BE(base, arrows[i] + kWidgetXOffset, xs[i]);
     Write32BE(base, arrows[i] + kWidgetYOffset, y);
   }
 }
 
-// A commits every custom row. B rolls back the live ones -- they have been
+// Puts every live row back to the value the screen opened with.
+void RollBackLiveRows() {
+  for (uint32_t i = 0; i < Page().row_count; ++i) {
+    const OptionRow& row = Page().rows[i];
+    if (IsRowActive(row) && row.live && row.commit) {
+      row.commit(row, g_seeded_values[i]);
+    }
+  }
+}
+
+// X on a page that owns all its rows: every row back to its default, shown
+// but not applied until A, like any other change. The stock handler would
+// reset the game's own Graphics/Volume model instead, which this page doesn't
+// show, so it never sees the press.
+void ResetPageToDefaults(PPCContext& ctx, uint8_t* base) {
+  for (uint32_t i = 0; i < Page().row_count; ++i) {
+    const OptionRow& row = Page().rows[i];
+    const int32_t value = row.reset ? row.reset(row) : g_seeded_values[i];
+    g_values[i] = std::clamp(value, RowMin(row), RowMax(row));
+    if (row.live && row.commit) {
+      row.commit(row, g_values[i]);
+    }
+  }
+  BindVisibleRows(ctx, base);
+}
+
+// A commits every row of ours. B rolls back the live ones: they have been
 // applying as the player cycled, so cancelling has to undo that; the non-live
 // ones need nothing, since the re-bind on the way out reloads them from their
-// own `get`. X ("defaults") does the same rollback and repaints.
+// own `get`. X ("defaults") does the same rollback and repaints, or on a page
+// that owns all its rows, resets them (ResetPageToDefaults).
 extern "C" void NativeOptions_SettingsEvent(PPCContext& ctx, uint8_t* base) {
   const uint32_t screen = ctx.r3.u32;
   const uint32_t message = ctx.r4.u32;
@@ -1659,7 +1598,7 @@ extern "C" void NativeOptions_SettingsEvent(PPCContext& ctx, uint8_t* base) {
     const uint32_t message_class = Read32BE(base, message + kMsgClass);
     const uint32_t button = Read32BE(base, message + kMsgButton);
 
-    // Stop A on the Preset row from opening the old resolution screen.
+    // Stop A on list row 2 from opening the old resolution screen.
     //
     // The handler navigates on `selected_row == 2 && save_loaded`, so with a
     // save loaded A on this row would leave the settings screen entirely
@@ -1675,7 +1614,8 @@ extern "C" void NativeOptions_SettingsEvent(PPCContext& ctx, uint8_t* base) {
     // ordinary row) -- but only for this one message, hence the unconditional
     // correction further down.
     if (message_class == kMsgClassButton && button == kButtonAccept &&
-        Read32BE(base, g_list + kListSelectedRow) == kPresetRow) {
+        Read32BE(base, g_list + kListSelectedRow) == kSubmenuRow &&
+        FindActiveValueRow(kSubmenuRow + g_scroll) >= 0) {
       Write32BE(base, g_list + kListSelectedRow, 0);
       restore_selected_row = true;
     }
@@ -1683,14 +1623,11 @@ extern "C" void NativeOptions_SettingsEvent(PPCContext& ctx, uint8_t* base) {
     // Y opens the stretch screen the Preset row displaced, for the finer
     // control it offers (arbitrary percentages rather than the 7 presets).
     //
-    // The screen has no prompt for it -- its bar only fits A/B/X, all three
-    // already taken -- so this is deliberately undocumented in-game rather
-    // than something a player is expected to discover. Posting the page
-    // switch here, instead of letting the handler do it, means not having to
-    // borrow the save-loaded latch to reach the branch that would: the only
-    // thing the latch is still needed for is the pre-game watchdog (see
-    // NativeOptions_PostEvent). Returning 1 without running the original is
-    // what the stock navigation path does too.
+    // Posting the page switch here, instead of letting the handler do it,
+    // means not having to borrow the save-loaded latch to reach the branch
+    // that would: the only thing the latch is still needed for is the
+    // pre-game watchdog (see NativeOptions_PostEvent). Returning 1 without
+    // running the original is what the stock navigation path does too.
     // kButtonStretchScreen is Y by the same A=4/B=5/X=6 ordering the screen's
     // own prompts confirm, which is as far as static RE got: the code that
     // turns pad bits into these ids couldn't be pinned down (the button tests
@@ -1700,7 +1637,8 @@ extern "C" void NativeOptions_SettingsEvent(PPCContext& ctx, uint8_t* base) {
       REXLOG_DEBUG("[native_options] settings screen: unhandled button id {}", button);
     }
 
-    if (message_class == kMsgClassButton && button == kButtonStretchScreen) {
+    if (message_class == kMsgClassButton && button == kButtonStretchScreen &&
+        Page().stretch_prompt) {
       const uint32_t controller = Read32BE(base, message + kMsgController);
       const uint32_t latch = InGameLatchAddress(base);
       g_pregame_screen_page = (latch != 0 && Read8(base, latch) == 0) ? kResolutionPage : 0;
@@ -1709,11 +1647,19 @@ extern "C" void NativeOptions_SettingsEvent(PPCContext& ctx, uint8_t* base) {
       return;
     }
 
+    if (message_class == kMsgClassButton && button == kButtonDefaults && g_entries &&
+        Page().owns_all_rows) {
+      ResetPageToDefaults(ctx, base);
+      ctx.r3.u32 = 1;
+      return;
+    }
+
     if (message_class == kMsgClassButton && g_entries) {
       if (button == kButtonAccept) {
-        for (uint32_t i = 0; i < kCustomRowCount; ++i) {
-          if (IsRowActive(kCustomRows[i]) && kCustomRows[i].commit) {
-            kCustomRows[i].commit(CustomEntryValue(base, i));
+        for (uint32_t i = 0; i < Page().row_count; ++i) {
+          const OptionRow& row = Page().rows[i];
+          if (IsRowActive(row) && row.commit) {
+            row.commit(row, g_values[i]);
           }
         }
 
@@ -1761,12 +1707,11 @@ extern "C" void NativeOptions_SettingsEvent(PPCContext& ctx, uint8_t* base) {
           }
         }
       } else if (button == kButtonCancel) {
-        for (uint32_t i = 0; i < kCustomRowCount; ++i) {
-          if (IsRowActive(kCustomRows[i]) && kCustomRows[i].live && kCustomRows[i].commit) {
-            kCustomRows[i].commit(g_seeded_values[i]);
-          }
-        }
+        RollBackLiveRows();
       } else if (button == kButtonDefaults) {
+        // Before the original, whose re-bind then seeds from the rolled-back
+        // values.
+        RollBackLiveRows();
         reset_rows = true;
       }
     }
@@ -1777,7 +1722,7 @@ extern "C" void NativeOptions_SettingsEvent(PPCContext& ctx, uint8_t* base) {
   }
 
   if (restore_selected_row) {
-    Write32BE(base, g_list + kListSelectedRow, kPresetRow);
+    Write32BE(base, g_list + kListSelectedRow, kSubmenuRow);
   }
 
   // Every message repaints the prompt bar from `selected == 2 ? 9 : 4`, so
@@ -1786,7 +1731,8 @@ extern "C" void NativeOptions_SettingsEvent(PPCContext& ctx, uint8_t* base) {
   // just called, with the id every other row gets.
   if (screen && g_list && g_set_widget_text_by_id_fn &&
       Read32BE(base, screen + kScreenListOffset) == g_list &&
-      Read32BE(base, g_list + kListSelectedRow) == kPresetRow) {
+      Read32BE(base, g_list + kListSelectedRow) == kSubmenuRow &&
+      FindActiveValueRow(kSubmenuRow + g_scroll) >= 0) {
     const uint32_t prompt = Read32BE(base, screen + kScreenPromptOffset);
     if (prompt) {
       CallGuest(ctx, base, g_set_widget_text_by_id_fn, prompt, kPromptOrdinaryRowStringId);
@@ -1794,18 +1740,13 @@ extern "C" void NativeOptions_SettingsEvent(PPCContext& ctx, uint8_t* base) {
   }
 
   if (reset_rows) {
-    for (uint32_t i = 0; i < kCustomRowCount; ++i) {
-      if (!IsRowActive(kCustomRows[i])) {
-        continue;
+    for (uint32_t i = 0; i < Page().row_count; ++i) {
+      if (IsRowActive(Page().rows[i]) && !IsLabelOnly(Page().rows[i])) {
+        SeedRow(i);
       }
-      if (kCustomRows[i].live && kCustomRows[i].commit) {
-        kCustomRows[i].commit(g_seeded_values[i]);
-      }
-      if (!IsLabelOnly(kCustomRows[i])) {
-        WriteCustomEntry(base, i);
-      }
-      RenderCustomRow(ctx, base, i);
     }
+    WriteEntries(base);
+    RenderRows(ctx, base);
   }
 }
 
@@ -1813,29 +1754,23 @@ extern "C" void NativeOptions_SettingsEvent(PPCContext& ctx, uint8_t* base) {
 
 void EnterPregameScreen(uint32_t page) { g_pregame_screen_page = page; }
 
+void SelectSettingsPage(SettingsPage page) {
+  g_page = page == SettingsPage::kEnhancements ? &EnhancementsOptionsPage() : &kSettingsPage;
+}
+
 namespace {
 
-// Calls a guest function with up to five arguments and returns r3.
-uint32_t CallGuest5(PPCContext& ctx, uint8_t* base, PPCFunc* fn, uint32_t r3, uint32_t r4,
-                    uint32_t r5, uint32_t r6, uint32_t r7) {
-  if (!fn) {
-    return 0;
-  }
-  PPCContext saved = ctx;
-  ctx.r3.u32 = r3;
-  ctx.r4.u32 = r4;
-  ctx.r5.u32 = r5;
-  ctx.r6.u32 = r6;
-  ctx.r7.u32 = r7;
-  fn(ctx, base);
-  const uint32_t result = ctx.r3.u32;
-  ctx = saved;
-  return result;
+// Centres a title widget on x=320 by its measured width, as every screen's
+// Activate does.
+void CentreTitle(PPCContext& ctx, uint8_t* base, uint32_t title) {
+  const auto width = static_cast<int32_t>(CallGuest(ctx, base, g_text_width_fn, title));
+  Write32BE(base, title + kWidgetXOffset, static_cast<uint32_t>(kTitleCenterX - width / 2));
 }
 
 // Redoes the tail of the screen's Activate (sub_825B43E0) that sets and
-// centres the title. Needed because the signed-in title is formatted text, so
-// the by-id re-texting in language_switch.cpp never sees it.
+// centres the title, or sets the page's own. Needed after a language switch
+// because the signed-in title is formatted text and a page's title literal
+// text, so the by-id re-texting in language_switch.cpp never sees either.
 void RefreshSettingsTitle(PPCContext& ctx, uint8_t* base) {
   if (!g_settings_screen || !g_dispatcher || !g_alloc_fn) {
     return;
@@ -1845,8 +1780,13 @@ void RefreshSettingsTitle(PPCContext& ctx, uint8_t* base) {
   if (!title || !app) {
     return;
   }
+  if (Page().title.key) {
+    SetTextWidgetText(ctx, base, title, Page().title.Get());
+    CentreTitle(ctx, base, title);
+    return;
+  }
   if (!g_title_scratch) {
-    g_title_scratch = CallGuest(ctx, base, g_alloc_fn, kTitleChars * 2 + kUserNameBytes, 0);
+    g_title_scratch = CallGuest(ctx, base, g_alloc_fn, kTitleChars * 2 + kUserNameBytes);
     if (!g_title_scratch) {
       return;
     }
@@ -1859,51 +1799,60 @@ void RefreshSettingsTitle(PPCContext& ctx, uint8_t* base) {
   if (signed_in) {
     const uint32_t text = g_title_scratch;
     const uint32_t name = g_title_scratch + kTitleChars * 2;
-    CallGuest5(ctx, base, g_dispatcher->GetFunction(kGetUserNameFnAddr), g_settings_user, name,
-               kUserNameBytes, 0, 0);
-    CallGuest5(ctx, base, g_dispatcher->GetFunction(kFormatStringFnAddr), text, kTitleChars,
-               kTitleWithNameStringId, name, 0);
-    CallGuest(ctx, base, g_dispatcher->GetFunction(kSetTextFnAddr), title, text);
+    CallGuest(ctx, base, kGetUserNameFnAddr, g_settings_user, name, kUserNameBytes);
+    CallGuest(ctx, base, kFormatStringFnAddr, text, kTitleChars, kTitleWithNameStringId, name);
+    CallGuest(ctx, base, kSetTextFnAddr, title, text);
   } else {
-    CallGuest(ctx, base, g_dispatcher->GetFunction(kSetTextByIdFnAddr), title, kTitleStringId);
+    CallGuest(ctx, base, kSetTextByIdFnAddr, title, kTitleStringId);
   }
+  CentreTitle(ctx, base, title);
+}
 
-  const auto width = static_cast<int32_t>(CallGuest(ctx, base, g_text_width_fn, title, 0));
-  Write32BE(base, title + kWidgetXOffset, static_cast<uint32_t>(kTitleCenterX - width / 2));
+// What the current page changes about the screen around its rows: the title,
+// when the page has its own (the stock one has just been set by Activate), and
+// which prompts the bar shows.
+void ApplyPageChrome(PPCContext& ctx, uint8_t* base) {
+  if (Page().title.key && g_settings_screen) {
+    const uint32_t title = Read32BE(base, g_settings_screen + kScreenTitleOffset);
+    if (title) {
+      SetTextWidgetText(ctx, base, title, Page().title.Get());
+      CentreTitle(ctx, base, title);
+    }
+  }
+  LayoutPromptBar(ctx, base);
 }
 
 // Repaints the value of every row the game renders itself (stock Graphics,
 // and any numeric row). The list's bind and cycle both format the entry into a
 // buffer and set that as literal text, so the by-id re-texting in
 // language_switch.cpp never sees it: after a switch Graphics kept its value
-// in the old language, drawn with the new font. Enumerated custom
-// rows are left out, since RenderCustomRow paints those.
+// in the old language, drawn with the new font. Enumerated rows of ours are
+// left out, since RenderRow paints those.
 //
 // The literal setter leaves the widget's scale alone, so the selected row
 // keeps its larger one.
 void RefreshStockRowValues(PPCContext& ctx, uint8_t* base) {
-  if (!g_dispatcher || !g_alloc_fn || !g_set_widget_text_fn) {
+  if (!g_alloc_fn) {
     return;
   }
   if (!g_value_scratch) {
-    g_value_scratch = CallGuest(ctx, base, g_alloc_fn, kEntryValueChars * 2, 0);
+    g_value_scratch = CallGuest(ctx, base, g_alloc_fn, kEntryValueChars * 2);
     if (!g_value_scratch) {
       return;
     }
   }
-  PPCFunc* format_fn = g_dispatcher->GetFunction(kFormatEntryValueFnAddr);
-  for (uint32_t row = 0; row < g_active_row_count; ++row) {
-    const int32_t custom_index = FindActiveValueRow(row);
-    if (custom_index >= 0 && IsEnumRow(kCustomRows[custom_index])) {
+  for (uint32_t row = 0; row < VisibleRowCount(); ++row) {
+    const int32_t index = FindActiveValueRow(row + g_scroll);
+    if (index >= 0 && IsEnumRow(Page().rows[index])) {
       continue;
     }
-    const uint32_t widget = Read32BE(base, g_list + kListRowValues + 4 * row);
+    const uint32_t widget = RowValueWidget(base, row);
     if (!widget) {
       continue;
     }
-    CallGuest5(ctx, base, format_fn, g_entries + row * kEntryStride, g_value_scratch,
-               kEntryValueChars, 0, 0);
-    CallGuest(ctx, base, g_set_widget_text_fn, widget, g_value_scratch);
+    CallGuest(ctx, base, kFormatEntryValueFnAddr, g_entries + row * kEntryStride,
+              g_value_scratch, kEntryValueChars);
+    CallGuest(ctx, base, kSetWidgetTextFnAddr, widget, g_value_scratch);
   }
 }
 
@@ -1915,36 +1864,29 @@ void RefreshNativeOptionsText(PPCContext& ctx, uint8_t* base) {
     return;
   }
   RefreshStockRowValues(ctx, base);
-  for (uint32_t i = 0; i < kCustomRowCount; ++i) {
-    const CustomRow& row = kCustomRows[i];
+  for (uint32_t i = 0; i < Page().row_count; ++i) {
+    const OptionRow& row = Page().rows[i];
     if (!IsRowActive(row)) {
       continue;
     }
     // A label-only row with nothing to say in this language (Graphics outside
     // Italian) goes back to the game's own label, keeping the widget's scale,
     // which is larger on the selected row.
-    if (IsLabelOnly(row) && row.label && !row.label() && g_set_widget_text_by_id_fn) {
-      const uint32_t widget = Read32BE(base, g_list + kListRowLabels + 4 * row.list_row);
+    if (IsLabelOnly(row) && row.label.key && !row.label.Get() && g_set_widget_text_by_id_fn) {
+      const uint32_t widget = RowLabelWidget(base, row.list_row);
       const uint32_t inner = widget ? Read32BE(base, widget + kWidgetInnerTextOffset) : 0;
       if (inner) {
         const uint32_t scale = Read32BE(base, inner + kWidgetTextScaleOffset);
         CallGuest(ctx, base, g_set_widget_text_by_id_fn, widget,
                   Read32BE(base, g_entries + row.list_row * kEntryStride + kEntryLabelId));
-        if (g_set_text_scale_fn) {
-          PPCContext saved = ctx;
-          ctx.r3.u32 = widget;
-          ctx.f1.f64 = static_cast<double>(std::bit_cast<float>(scale));
-          g_set_text_scale_fn(ctx, base);
-          ctx = saved;
-        }
+        SetWidgetScale(ctx, base, widget, std::bit_cast<float>(scale));
       }
     }
-    RenderCustomRow(ctx, base, i);
+    RenderRow(ctx, base, i);
   }
 
   if (g_custom_prompt) {
-    CallGuest(ctx, base, g_set_widget_text_fn, g_custom_prompt,
-              StageText(base, CustomPromptLabel()));
+    SetWidgetText(ctx, base, g_custom_prompt, kCustomPromptLabel.Get());
     LayoutPromptBar(ctx, base);
   }
 }
@@ -1962,8 +1904,6 @@ void NativeOptions::Bind(rex::Runtime* runtime) {
     g_user_settings_path = runtime_->user_data_root() / "settings.toml";
   }
 
-  g_set_widget_text_fn = dispatcher->GetFunction(kSetWidgetTextFnAddr);
-  g_set_text_scale_fn = dispatcher->GetFunction(kSetTextScaleFnAddr);
   g_enable_row_fn = dispatcher->GetFunction(kEnableRowFnAddr);
   g_set_widget_colour_fn = dispatcher->GetFunction(kSetWidgetColourFnAddr);
   g_set_widget_text_by_id_fn = dispatcher->GetFunction(kSetWidgetTextByIdFnAddr);
@@ -1975,12 +1915,13 @@ void NativeOptions::Bind(rex::Runtime* runtime) {
   g_text_width_fn = dispatcher->GetFunction(kTextWidthFnAddr);
   g_find_image_fn = dispatcher->GetFunction(kFindImageFnAddr);
   g_alloc_fn = dispatcher->GetFunction(kAllocFnAddr);
-  if (!g_set_widget_text_fn || !g_alloc_fn) {
-    REXLOG_WARN("[native_options] set-widget-text/alloc unavailable; extra rows will misbehave");
+  if (!g_alloc_fn) {
+    REXLOG_WARN("[native_options] guest alloc unavailable; extra rows will misbehave");
   }
 
   // The screen's functions are hooked at codegen time (nocturnerecomp_config.toml).
-  REXLOG_INFO("[native_options] hooks installed ({} row(s) in table)", kCustomRowCount);
+  REXLOG_INFO("[native_options] hooks installed ({} settings row(s), {} enhancements row(s))",
+              kSettingsPage.row_count, EnhancementsOptionsPage().row_count);
 }
 
 NativeOptions& GetNativeOptions() {
@@ -1999,6 +1940,9 @@ bool NativeOptions_BindRowsHook(PPCRegister& r3) {
 }
 bool NativeOptions_CycleRowHook(PPCRegister& r3) {
   return nocturne::fnhook::Enter(r3, nocturne::kCycleRowFnAddr, &nocturne::NativeOptions_CycleRow);
+}
+bool NativeOptions_MoveSelectionHook(PPCRegister& r3) {
+  return nocturne::fnhook::Enter(r3, nocturne::kMoveSelectionFnAddr, &nocturne::NativeOptions_MoveSelection);
 }
 bool NativeOptions_ListUpdateHook(PPCRegister& r3) {
   return nocturne::fnhook::Enter(r3, nocturne::kListUpdateFnAddr, &nocturne::NativeOptions_ListUpdate);

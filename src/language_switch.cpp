@@ -26,6 +26,7 @@
 #include <rex/system/function_dispatcher.h>
 
 #include "function_hooks.h"
+#include "help_options_menu.h"
 #include "native_options.h"
 #include "settings.h"
 
@@ -440,8 +441,10 @@ void SwitchLanguage(PPCContext& ctx, uint8_t* base, uint32_t language) {
     ctx = saved;
   }
 
-  // Our own rows on the settings screen are literal text, not ids.
+  // Our own rows on the settings screen, and our Help & Options items, are
+  // literal text, not ids.
   RefreshNativeOptionsText(ctx, base);
+  RefreshHelpOptionsText(ctx, base);
 
   REXLOG_INFO("[language] switched to {} ({} widget(s) and {} list item(s) retexted, {} stale)",
               files.code, retext.size(), lists.size(), stale);

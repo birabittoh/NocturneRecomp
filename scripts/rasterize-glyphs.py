@@ -86,6 +86,9 @@ TARGETS = {
     0x30AC: (17, "modelled on カ KA, box 16 advance 17"),
     0x30AE: (19, "modelled on キ KI, box 19 advance 19"),
     0x30D2: (18, "modelled on ビ BI, box 17 advance 18"),
+    0x30B6: (19, "modelled on サ SA, box 19 advance 19"),
+    0x30BC: (19, "modelled on セ SE, box 18 advance 19"),
+    0x30EF: (17, "modelled on ク KU, box 16 advance 16"),
 }
 
 # No fullwidth forms are listed: font_patch.cpp aliases U+FF01..U+FF5E onto the
