@@ -6,6 +6,7 @@
 #include <fstream>
 #include <memory>
 #include <string>
+#include <string_view>
 #include <vector>
 
 #include <rex/filesystem.h>
@@ -19,6 +20,7 @@
 
 #include "font_patch.h"
 #include "glyph_pack.generated.h"
+#include "target.h"
 
 namespace nocturne {
 namespace {
@@ -29,6 +31,7 @@ using rex::X_STATUS;
 
 constexpr const char* kGuestFontPath = "game:\\MEDIA\\font_ja.xpr";
 constexpr const char* kFontFileName = "font_ja.xpr";
+constexpr const char* kStringsFileName = "strings_ja.bin";
 constexpr const char* kOverlayMount = "\\Device\\NocturneMediaOverlay";
 
 // Serves a byte buffer we own.
@@ -187,6 +190,124 @@ class MediaOverlayDevice : public rex::filesystem::Device {
   std::unique_ptr<MediaDirEntry> root_;
 };
 
+// The file's real name in dir, matched without case (the folder comes from an
+// extraction, and the host file system may be case sensitive).
+std::filesystem::path FindFile(const std::filesystem::path& dir, std::string_view name) {
+  std::error_code ec;
+  for (const auto& item : std::filesystem::directory_iterator(dir, ec)) {
+    if (item.is_regular_file(ec) &&
+        rex::string::utf8_equal_case(item.path().filename().string(), name))
+      return item.path();
+  }
+  return {};
+}
+
+std::vector<uint8_t> ReadHostFile(const std::filesystem::path& path) {
+  std::ifstream in(path, std::ios::binary | std::ios::ate);
+  if (!in)
+    return {};
+  std::vector<uint8_t> data(static_cast<size_t>(in.tellg()));
+  in.seekg(0);
+  in.read(reinterpret_cast<char*>(data.data()), static_cast<std::streamsize>(data.size()));
+  return in ? data : std::vector<uint8_t>{};
+}
+
+uint32_t Be32(const std::vector<uint8_t>& d, size_t at) {
+  return static_cast<uint32_t>(d[at]) << 24 | d[at + 1] << 16 | d[at + 2] << 8 | d[at + 3];
+}
+
+void PutBe32(std::vector<uint8_t>& d, size_t at, uint32_t v) {
+  d[at] = static_cast<uint8_t>(v >> 24);
+  d[at + 1] = static_cast<uint8_t>(v >> 16);
+  d[at + 2] = static_cast<uint8_t>(v >> 8);
+  d[at + 3] = static_cast<uint8_t>(v);
+}
+
+// strings_<code>.bin: an entry count, then 12-byte entries {text, font name,
+// scale in thousandths}, offsets from the file start; the text is
+// NUL-terminated UTF-16BE.
+constexpr size_t kStringEntrySize = 12;
+
+struct StringEntry {
+  std::vector<uint8_t> text;  // without the terminator
+  uint32_t scale;
+  bool operator==(const StringEntry&) const = default;
+};
+
+bool ParseStrings(const std::vector<uint8_t>& d, std::vector<StringEntry>& out) {
+  if (d.size() < 4)
+    return false;
+  const uint32_t count = Be32(d, 0);
+  if (count == 0 || count > (d.size() - 4) / kStringEntrySize)
+    return false;
+  out.clear();
+  for (uint32_t i = 0; i < count; ++i) {
+    const size_t entry = 4 + i * kStringEntrySize;
+    size_t at = Be32(d, entry);
+    const size_t start = at;
+    while (at + 1 < d.size() && (d[at] | d[at + 1]))
+      at += 2;
+    if (at + 1 >= d.size())
+      return false;
+    out.push_back({{d.begin() + start, d.begin() + at}, Be32(d, entry + 8)});
+  }
+  return true;
+}
+
+// World's strings_ja.bin with JP's wording. The code is World's, so the ids
+// must stay World's: JP's file splits one entry in two and adds others, which
+// shifts every later id. The two lists are aligned (longest common
+// subsequence); an entry in a run that differs on both sides takes JP's text
+// and scale only when the runs are the same length, i.e. it is the same entry
+// reworded. Everything else keeps World's. Empty on failure.
+std::vector<uint8_t> MergeJapaneseStrings(const std::vector<uint8_t>& world_file,
+                                          const std::vector<uint8_t>& jp_file,
+                                          size_t& reworded) {
+  std::vector<StringEntry> w, j;
+  if (!ParseStrings(world_file, w) || !ParseStrings(jp_file, j))
+    return {};
+
+  // lcs[a][b]: the common subsequence length of w[a:] and j[b:].
+  const size_t n = w.size(), m = j.size();
+  std::vector<std::vector<uint16_t>> lcs(n + 1, std::vector<uint16_t>(m + 1, 0));
+  for (size_t a = n; a-- > 0;)
+    for (size_t b = m; b-- > 0;)
+      lcs[a][b] = w[a] == j[b] ? lcs[a + 1][b + 1] + 1
+                               : std::max(lcs[a + 1][b], lcs[a][b + 1]);
+
+  std::vector<uint8_t> out = world_file;
+  reworded = 0;
+  auto take_run = [&](size_t a0, size_t a1, size_t b0, size_t b1) {
+    if (a1 - a0 != b1 - b0)
+      return;
+    for (size_t k = 0; k < a1 - a0; ++k) {
+      const StringEntry& e = j[b0 + k];
+      const size_t entry = 4 + (a0 + k) * kStringEntrySize;
+      if (out.size() & 1)
+        out.push_back(0);
+      PutBe32(out, entry, static_cast<uint32_t>(out.size()));
+      PutBe32(out, entry + 8, e.scale);
+      out.insert(out.end(), e.text.begin(), e.text.end());
+      out.insert(out.end(), {0, 0});
+      ++reworded;
+    }
+  };
+  size_t a = 0, b = 0, run_a = 0, run_b = 0;
+  while (a < n && b < m) {
+    if (w[a] == j[b]) {
+      take_run(run_a, a, run_b, b);
+      run_a = ++a;
+      run_b = ++b;
+    } else if (lcs[a + 1][b] >= lcs[a][b + 1]) {
+      ++a;
+    } else {
+      ++b;
+    }
+  }
+  take_run(run_a, n, run_b, m);
+  return out;
+}
+
 }  // namespace
 
 unsigned InstallJapaneseFontOverlay(rex::Runtime* runtime) {
@@ -222,17 +343,38 @@ unsigned InstallJapaneseFontOverlay(rex::Runtime* runtime) {
   }
   const std::string media_device_path = media_entry->absolute_path();
 
+  // With JP installed, Japanese is JP's: its strings_ja.bin (merged onto
+  // World's ids) and the font built for it. The two are a pair, since each
+  // release's font is a subset made for its own strings; JP's covers all of
+  // World's characters too.
+  std::vector<uint8_t> jp_strings;
   std::vector<uint8_t> original;
-  {
-    std::ifstream in(font_host_path, std::ios::binary | std::ios::ate);
-    if (!in) {
+  if (JpOverlaysAvailable()) {
+    const std::filesystem::path jp_media = JpDir() / "MEDIA";
+    const std::filesystem::path jp_font_path = FindFile(jp_media, kFontFileName);
+    const std::filesystem::path jp_strings_path = FindFile(jp_media, kStringsFileName);
+    const std::filesystem::path world_strings_path = FindFile(media_dir, kStringsFileName);
+    if (!jp_font_path.empty() && !jp_strings_path.empty() && !world_strings_path.empty()) {
+      size_t reworded = 0;
+      jp_strings = MergeJapaneseStrings(ReadHostFile(world_strings_path),
+                                        ReadHostFile(jp_strings_path), reworded);
+      if (!jp_strings.empty())
+        original = ReadHostFile(jp_font_path);
+      if (jp_strings.empty() || original.empty()) {
+        jp_strings.clear();
+        REXLOG_WARN("font overlay: could not read JP's {} and {}; Japanese stays World's",
+                    kStringsFileName, kFontFileName);
+      } else {
+        REXLOG_INFO("font overlay: Japanese uses JP's font and {} reworded string(s)", reworded);
+      }
+    }
+  }
+  if (original.empty()) {
+    original = ReadHostFile(font_host_path);
+    if (original.empty()) {
       REXLOG_DEBUG("font overlay: cannot read {}", font_host_path.string());
       return 0;
     }
-    original.resize(static_cast<size_t>(in.tellg()));
-    in.seekg(0);
-    in.read(reinterpret_cast<char*>(original.data()),
-            static_cast<std::streamsize>(original.size()));
   }
 
   FontPatchResult patched = PatchFont(original, kSupplementalGlyphs);
@@ -242,7 +384,10 @@ unsigned InstallJapaneseFontOverlay(rex::Runtime* runtime) {
   if (patched.image.empty()) {
     REXLOG_DEBUG("font overlay: not patching font_ja.xpr ({})",
                  patched.error ? patched.error : "unknown");
-    return 0;
+    if (jp_strings.empty()) {
+      return 0;
+    }
+    patched.image = std::move(original);  // JP's font still goes with JP's strings
   }
   const size_t patched_size = patched.image.size();
 
@@ -266,7 +411,8 @@ unsigned InstallJapaneseFontOverlay(rex::Runtime* runtime) {
       return 0;
     }
     const std::string name = item.path().filename().string();
-    if (rex::string::utf8_equal_case(name, kFontFileName)) {
+    if (rex::string::utf8_equal_case(name, kFontFileName) ||
+        (!jp_strings.empty() && rex::string::utf8_equal_case(name, kStringsFileName))) {
       continue;
     }
     root->Add(std::make_unique<HostEntry>(device_raw, root, name, item.path(),
@@ -279,6 +425,10 @@ unsigned InstallJapaneseFontOverlay(rex::Runtime* runtime) {
   }
   root->Add(std::make_unique<MemoryEntry>(device_raw, root, kFontFileName,
                                           std::move(patched.image)));
+  if (!jp_strings.empty()) {
+    root->Add(std::make_unique<MemoryEntry>(device_raw, root, kStringsFileName,
+                                            std::move(jp_strings)));
+  }
 
   if (!vfs->RegisterDevice(std::move(device))) {
     REXLOG_WARN("font overlay: could not register the overlay device");

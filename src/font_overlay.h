@@ -7,6 +7,10 @@
 // parks the result in memory behind a one-file VFS device, and registers a
 // symbolic link so the guest's open lands on the composed image instead.
 //
+// With JP installed over World, the font composed is JP's, and strings_ja.bin
+// is served next to it: World's ids with JP's wording (the two files are a
+// pair, see MergeJapaneseStrings).
+//
 // The link is registered on the *fully resolved* device path rather than the
 // game: alias. VirtualFileSystem::ResolveSymbolicLink loops until no prefix
 // matches, so a guest open of game:\MEDIA\font_ja.xpr first rewrites through
