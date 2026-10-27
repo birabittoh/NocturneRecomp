@@ -16,13 +16,12 @@ namespace {
 
 // IntroText order.
 constexpr std::array<const char*, size_t(IntroText::kCount)> kKeys = {
-    "start",           "extract",           "select_file",      "select_folder",
-    "quit",            "language",          "ready",            "ready_release",
-    "found",           "found_release",     "press_extract",    "need_files",
-    "select_iso_only", "copy_hint",         "selected",         "title",
-    "unsupported_language",                 "delete_files",     "cancel",
-    "confirm_delete",  "not_enough_space",  "add_version",      "delete_version",
-    "forget_version",  "confirm_forget",    "already_installed", "linked",
+    "start",           "extract",           "select_file",      "quit",
+    "language",        "ready",             "ready_release",    "found",
+    "found_release",   "press_extract",     "need_files",       "select_iso_only",
+    "copy_hint",       "selected",          "title",            "unsupported_language",
+    "delete_files",    "cancel",            "confirm_delete",   "not_enough_space",
+    "add_version",     "delete_version",    "already_installed", "linked",
     "needs_update",    "choose_version",    "hint_select",      "hint_back",
     "hint_quit",       "dialog_needs_mouse", "outdated",        "outdated_question",
     "skip",            "extract_again",     "not_supported_yet", "not_playable",

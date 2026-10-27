@@ -22,7 +22,6 @@ namespace nocturne {
 enum class GameDataChoice {
   kQuit,
   kDiscImage,
-  kFolder,
   kExtract,
   kStart,
   kDelete,
@@ -38,22 +37,19 @@ constexpr int kMaxVersions = 2;
 // One installed version, as the start screen lists it.
 struct VersionRow {
   std::string label;
-  // Under the label: linked path, update needed.
+  // Under the label: command line path, update needed.
   std::string note;
   // The text it ships (release_id.h bits); 0 offers every language.
   uint32_t languages = 0;
-  bool linked = false;
   // Release::startable: false for a release this build cannot run yet.
   bool startable = true;
-  // Its files are ours to delete; a linked one is forgotten instead.
+  // Its files are ours to delete.
   bool can_delete = false;
 };
 
 // What the prompt is asked to offer. With versions installed it lists them
 // (the library); `adding`, or an empty list, asks for a source instead.
 struct GameDataPrompt {
-  // False on Android, where SDL has no folder picker.
-  bool can_pick_folder = true;
   // Where already extracted files can be copied to be found, or empty.
   std::string copy_hint;
   // Why the previous selection failed, empty on the first call.
@@ -70,9 +66,8 @@ struct GameDataPrompt {
   // Picking a source for another version, over the library.
   bool adding = false;
   // Asking whether to delete: the question, shown with Cancel and Delete
-  // Files, or Forget for a linked version.
+  // Files.
   std::string confirm;
-  bool confirm_forget = false;
   // Asking whether to extract the selected version again, shown with Skip and
   // Extract Again.
   std::string outdated;
@@ -84,7 +79,7 @@ struct GameDataOptions {
   std::filesystem::path config_path;
   // The one launch flag file (StartScreenFlagPath).
   std::filesystem::path start_screen_flag;
-  // Where the picked version and the linked ones are saved.
+  // Where the picked version is saved.
   std::filesystem::path user_settings_path;
   // The resolved game_data_root, the library root; empty for the default.
   std::filesystem::path game_data_root;

@@ -22,9 +22,6 @@ REXCVAR_DEFINE_STRING(game_version, "", "Game",
                       "The installed game version to start: its folder name in game_data_root, "
                       "or the path of a game directory")
     .hidden();
-REXCVAR_DEFINE_STRING(game_version_links, "", "Game",
-                      "Game directories outside game_data_root used in place, separated by |")
-    .hidden();
 
 namespace nocturne {
 namespace {
@@ -82,25 +79,43 @@ void SaveSettings(const char* name) {
     rex::cvar::SaveConfigSubset(g_user_settings_path, {name});
 }
 
-std::vector<fs::path> Links() {
-  std::vector<fs::path> links;
-  const std::string value = REXCVAR_GET(game_version_links);
-  size_t at = 0;
-  while (at <= value.size()) {
-    const size_t bar = std::min(value.find('|', at), value.size());
-    if (bar > at)
-      links.push_back(FromUtf8(std::string_view(value).substr(at, bar - at)));
-    at = bar + 1;
+// Older builds kept game directories outside the library, used in place, in
+// game_version_links. They are no longer listed; the line goes, and the log
+// names the folders, which are left as they are.
+void DropLinkedVersions() {
+  if (g_user_settings_path.empty())
+    return;
+  std::istringstream in(ReadText(g_user_settings_path));
+  std::string kept;
+  bool dropped = false;
+  std::string line;
+  while (std::getline(in, line)) {
+    const size_t equals = line.find('=');
+    std::string_view key =
+        std::string_view(line).substr(0, equals == std::string::npos ? 0 : equals);
+    while (!key.empty() && (key.back() == ' ' || key.back() == '\t'))
+      key.remove_suffix(1);
+    if (key != "game_version_links") {
+      kept += line + '\n';
+      continue;
+    }
+    dropped = true;
+    std::string value;
+    try {
+      value = toml::parse(line)["game_version_links"].value_or(std::string());
+    } catch (const toml::parse_error&) {
+    }
+    size_t from = 0;
+    while (from < value.size()) {
+      const size_t bar = std::min(value.find('|', from), value.size());
+      if (bar > from)
+        REXLOG_INFO("No longer listing the linked game files in {}; they are left there",
+                    value.substr(from, bar - from));
+      from = bar + 1;
+    }
   }
-  return links;
-}
-
-void SetLinks(const std::vector<fs::path>& links) {
-  std::string value;
-  for (const fs::path& link : links)
-    value += (value.empty() ? "" : "|") + Utf8(link);
-  REXCVAR_SET(game_version_links, value);
-  SaveSettings("game_version_links");
+  if (dropped && !WriteText(g_user_settings_path, kept))
+    REXLOG_WARN("Could not rewrite {}", g_user_settings_path.string());
 }
 
 bool SamePath(const fs::path& a, const fs::path& b) {
@@ -233,12 +248,15 @@ void MigrateLibrary(const fs::path& root, const std::vector<fs::path>& candidate
       FinishMove(root, folder);
   }
 
-  // Goopie's Select Folder links the root to an extraction.
+  DropLinkedVersions();
+
+  // Goopie's Select Folder links the root to an extraction. Only the link
+  // goes: the migration below would otherwise move the files it points to.
   if (IsLinkPath(root)) {
     const fs::path target = fs::canonical(root, ec);
     if (!ec && IsGameDirectory(target)) {
-      REXLOG_INFO("Keeping the game files {} links to as a linked version", root.string());
-      AddLinkedVersion(target);
+      REXLOG_INFO("No longer using the game files {} links to ({}); they are left there",
+                  root.string(), target.string());
       if (!RemoveLink(root))
         REXLOG_ERROR("Could not remove the link {}", root.string());
     }
@@ -260,18 +278,15 @@ void MigrateLibrary(const fs::path& root, const std::vector<fs::path>& candidate
     const SourceInfo info = IdentifySource(candidate.string());
     const fs::path dest = FreeVersionDir(root, info.id);
     fs::rename(candidate, dest, ec);
-    fs::path kept = dest;
     if (ec) {
-      // Never copy gigabytes unasked: another drive's files are used in place.
-      REXLOG_INFO("Linking {} instead of moving it to {}: {}", candidate.string(), dest.string(),
-                  ec.message());
-      AddLinkedVersion(candidate);
-      kept = candidate;
-    } else {
-      REXLOG_INFO("Moved the game files in {} to {}", candidate.string(), dest.string());
+      // Never copy gigabytes unasked: another drive's files stay where they are.
+      REXLOG_INFO("Could not move {} to {}, leaving it there: {}", candidate.string(),
+                  dest.string(), ec.message());
+      continue;
     }
+    REXLOG_INFO("Moved the game files in {} to {}", candidate.string(), dest.string());
     if (!info.release.empty())
-      WriteVersionInfo(kept, info.id, info.release, info.languages);
+      WriteVersionInfo(dest, info.id, info.release, info.languages);
   }
 }
 
@@ -294,17 +309,6 @@ std::vector<GameVersion> ScanLibrary(const fs::path& root) {
   std::sort(versions.begin(), versions.end(), [](const GameVersion& a, const GameVersion& b) {
     return OrderOf(a) != OrderOf(b) ? OrderOf(a) < OrderOf(b) : a.key < b.key;
   });
-  for (const fs::path& link : Links()) {
-    // A drive that is not plugged in keeps its link for later.
-    if (!IsGameDirectory(link))
-      continue;
-    GameVersion version;
-    version.key = Utf8(link);
-    version.dir = link;
-    version.linked = true;
-    Describe(version, true);
-    versions.push_back(std::move(version));
-  }
   return versions;
 }
 
@@ -316,10 +320,6 @@ int FindVersion(std::vector<GameVersion>& versions, std::string_view key) {
       return int(i);
   }
   const fs::path path = FromUtf8(key);
-  for (size_t i = 0; i < versions.size(); ++i) {
-    if (versions[i].linked && SamePath(versions[i].dir, path))
-      return int(i);
-  }
   if (!IsGameDirectory(path))
     return -1;
   std::error_code ec;
@@ -421,23 +421,6 @@ void RefreshRootExecutable(const fs::path& root, const std::vector<GameVersion>&
   REXLOG_INFO("{} now comes from {}", xex.string(), source.string());
 }
 
-void AddLinkedVersion(const fs::path& dir) {
-  std::vector<fs::path> links = Links();
-  for (const fs::path& link : links) {
-    if (SamePath(link, dir))
-      return;
-  }
-  std::error_code ec;
-  links.push_back(fs::absolute(dir, ec));
-  SetLinks(links);
-}
-
-void ForgetLinkedVersion(const fs::path& dir) {
-  std::vector<fs::path> links = Links();
-  std::erase_if(links, [&](const fs::path& link) { return SamePath(link, dir); });
-  SetLinks(links);
-}
-
 std::string SelectedVersion() {
   return REXCVAR_GET(game_version);
 }
@@ -453,12 +436,11 @@ std::string VersionLabel(const GameVersion& version) {
   const size_t close = label.rfind(')');
   if (open != std::string::npos && close > open)
     label = label.substr(open + 1, close - open - 1);
-  const std::string folder =
-      version.linked || version.temporary ? version.dir.filename().string() : version.key;
+  const std::string folder = version.temporary ? version.dir.filename().string() : version.key;
   if (label.empty())
     return folder;
   // A second copy of a release is told apart by its folder.
-  if (!version.linked && !version.temporary && version.key != version.id)
+  if (!version.temporary && version.key != version.id)
     label += " (" + folder + ")";
   return label;
 }

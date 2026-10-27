@@ -113,14 +113,6 @@ bool IsOutdated(const fs::path&) {
   return false;
 }
 
-fs::path ExtractedSource(const std::string& picked) {
-  if (IsContentUri(picked))
-    return {};
-  std::error_code ec;
-  const fs::path path = Resolve(picked);
-  return fs::is_directory(path, ec) && IsGameDirectory(path) ? path : fs::path();
-}
-
 SourceInfo IdentifySource(const std::string& picked) {
   std::error_code ec;
   const fs::path path = Resolve(picked);
@@ -144,15 +136,6 @@ std::string InstallDirectory(const fs::path& dir, const InstallHooks& hooks) {
 
 std::string Install(const std::string& picked, const fs::path& assets, const InstallHooks& hooks,
                     fs::path& dir) {
-  std::error_code ec;
-  const fs::path path = Resolve(picked);
-  if (!IsContentUri(picked) && fs::is_directory(path, ec)) {
-    if (!IsGameDirectory(path))
-      return TrErr("err_not_extracted");
-    dir = path;
-    return InstallDirectory(dir, hooks);
-  }
-
   Report(hooks, Phase::kExtract, PhaseState::kActive);
   std::string error = ExtractPackage(picked, assets, kExecutable, hooks.progress);
   if (error.empty() && !IsGameDirectory(assets))

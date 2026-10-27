@@ -29,8 +29,8 @@ Nightly builds are available from [CI artifacts](https://nightly.link/birabittoh
 ### The start screen
 
 The game opens on a start screen. Pick your legally dumped XBLA package (the
-`LIVE`/STFS file, which has no extension) with **Select File**, or on desktop
-an already extracted folder with **Select Folder**, then **Extract**.
+`LIVE`/STFS file, which has no extension) with **Select File**, then
+**Extract**.
 
 Two releases are recognized, and each is installed into its own folder of
 the game library:

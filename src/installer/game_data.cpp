@@ -46,12 +46,6 @@ bool ConsumeStartScreenRequest(const fs::path& flag) {
   return !flag.empty() && fs::remove(flag, ec);
 }
 
-#if REX_PLATFORM_ANDROID
-constexpr bool kCanPickFolder = false;
-#else
-constexpr bool kCanPickFolder = true;
-#endif
-
 // Same folder the SDK extracted into, so earlier installs are still found.
 fs::path WritableBaseDir() {
 #if REX_PLATFORM_ANDROID
@@ -297,17 +291,14 @@ void SDLCALL DialogCallback(void* userdata, const char* const* files, int) {
       [flow, then, picked]() { then(flow, picked); });
 }
 
-void ShowDialog(std::shared_ptr<Flow> flow, bool folder,
+void ShowDialog(std::shared_ptr<Flow> flow,
                 std::function<void(std::shared_ptr<Flow>, std::string)> then) {
   // XBLA packages have no extension, so the filter cannot narrow them down.
   static const SDL_DialogFileFilter kFilters[] = {
       {"Castlevania: Symphony of the Night (XBLA package)", "*"},
   };
   auto* request = new DialogRequest{std::move(flow), std::move(then)};
-  if (folder)
-    SDL_ShowOpenFolderDialog(DialogCallback, request, nullptr, nullptr, false);
-  else
-    SDL_ShowOpenFileDialog(DialogCallback, request, nullptr, kFilters, 1, nullptr, false);
+  SDL_ShowOpenFileDialog(DialogCallback, request, nullptr, kFilters, 1, nullptr, false);
 }
 
 bool Library(const GameDataPrompt& prompt) {
@@ -328,8 +319,7 @@ GameDataChoice MessageBoxPrompt(const GameDataPrompt& prompt) {
       buttons[count++] = {0, int(GameDataChoice::kAddVersion), Tr(IntroText::kAddVersion)};
   } else {
     message += Tr(IntroText::kNeedFiles);
-    if (!prompt.can_pick_folder)
-      message += std::string(" ") + Tr(IntroText::kSelectIsoOnly);
+    message += std::string(" ") + Tr(IntroText::kSelectIsoOnly);
     if (!prompt.copy_hint.empty())
       message += "\n\n" + Tr(IntroText::kCopyHint, prompt.copy_hint);
     if (prompt.can_extract)
@@ -339,8 +329,6 @@ GameDataChoice MessageBoxPrompt(const GameDataPrompt& prompt) {
                           Tr(IntroText::kExtract)};
     buttons[count++] = {prompt.can_extract ? 0u : SDL_MESSAGEBOX_BUTTON_RETURNKEY_DEFAULT,
                         int(GameDataChoice::kDiscImage), Tr(IntroText::kSelectFile)};
-    if (prompt.can_pick_folder)
-      buttons[count++] = {0, int(GameDataChoice::kFolder), Tr(IntroText::kSelectFolder)};
   }
   buttons[count++] = {SDL_MESSAGEBOX_BUTTON_ESCAPEKEY_DEFAULT, int(GameDataChoice::kQuit), Tr(IntroText::kQuit)};
   const SDL_MessageBoxData box = {SDL_MESSAGEBOX_INFORMATION, nullptr, Tr(IntroText::kTitle),
@@ -365,7 +353,7 @@ void Ask(std::shared_ptr<Flow> flow);
 std::vector<fs::path> ReplacedVersions(const Flow& flow) {
   std::vector<fs::path> replaced;
   for (const GameVersion& version : flow.versions) {
-    if (version.outdated && !version.linked && !version.temporary && !version.id.empty() &&
+    if (version.outdated && !version.temporary && !version.id.empty() &&
         version.id == flow.picked_info.id && IsDeletable(version.dir))
       replaced.push_back(version.dir);
   }
@@ -389,7 +377,7 @@ void CheckSpace(Flow& flow) {
   flow.prompt.error = message;
 }
 
-// Rescans after an install, delete or forget, keeping a command line
+// Rescans after an install or delete, keeping a command line
 // directory listed, and selects `prefer` when given.
 void Rescan(Flow& flow, const fs::path& prefer) {
   flow.versions = ScanLibrary(g_root);
@@ -518,9 +506,6 @@ void OnInstalled(std::shared_ptr<Flow> flow, std::string error, fs::path dir) {
     return;
   }
   const SourceInfo& info = flow->picked_info;
-  // A folder picked outside the library is used where it is.
-  if (!SameDir(dir.parent_path(), g_root))
-    AddLinkedVersion(dir);
   if (!info.release.empty())
     WriteVersionInfo(dir, info.id, info.release, info.languages);
   Rescan(*flow, dir);
@@ -582,27 +567,14 @@ void OnPicked(std::shared_ptr<Flow> flow, std::string picked) {
   }
   REXLOG_INFO("Selected {}", picked);
   const SourceInfo info = IdentifySource(picked);
-  const fs::path extracted = ExtractedSource(picked);
-  if (!extracted.empty()) {
-    // One already listed is just selected.
-    for (size_t i = 0; i < flow->versions.size(); ++i) {
-      if (SameDir(flow->versions[i].dir, extracted)) {
-        flow->selected = int(i);
-        flow->prompt.adding = false;
-        Ask(flow);
-        return;
-      }
-    }
-  }
   flow->prompt.release = info.release;
   flow->prompt.languages = info.languages;
   flow->prompt.error = info.error;
   flow->picked_info = info;
-  // Extracted files are used in place and need no room.
-  flow->required_bytes = extracted.empty() ? info.required_bytes : 0;
-  if (info.error.empty() && extracted.empty()) {
+  flow->required_bytes = info.required_bytes;
+  if (info.error.empty()) {
     for (const GameVersion& version : flow->versions) {
-      if (!version.linked && !version.temporary && !version.outdated && version.id == info.id) {
+      if (!version.temporary && !version.outdated && version.id == info.id) {
         flow->prompt.error = Tr(IntroText::kAlreadyInstalled, info.release);
         break;
       }
@@ -627,15 +599,9 @@ const GameVersion* Selected(const Flow& flow) {
 
 void AskToDelete(std::shared_ptr<Flow> flow) {
   const GameVersion* version = Selected(*flow);
-  if (version && version->linked) {
-    flow->prompt.confirm = Tr(IntroText::kConfirmForget, VersionLabel(*version)) + "\n" +
-                           version->dir.string();
-    flow->prompt.confirm_forget = true;
-  } else if (version && !version->temporary && IsDeletable(version->dir)) {
+  if (version && !version->temporary && IsDeletable(version->dir))
     flow->prompt.confirm =
         DeleteQuestion(VersionLabel(*version), version->dir, TreeSize(version->dir));
-    flow->prompt.confirm_forget = false;
-  }
   Ask(flow);
 }
 
@@ -646,10 +612,7 @@ void DeleteSelected(std::shared_ptr<Flow> flow) {
     return;
   }
   const GameVersion removed = *version;
-  if (removed.linked) {
-    REXLOG_INFO("Forgetting the linked {}", removed.dir.string());
-    ForgetLinkedVersion(removed.dir);
-  } else if (!removed.temporary && IsDeletable(removed.dir)) {
+  if (!removed.temporary && IsDeletable(removed.dir)) {
     const uint64_t total = TreeSize(removed.dir);
     REXLOG_INFO("Deleting {}", removed.dir.string());
     BeginIntroWork();
@@ -749,9 +712,8 @@ void OnChoice(std::shared_ptr<Flow> flow, GameDataChoice choice, int version) {
         Ask(flow);
       return;
     case GameDataChoice::kDiscImage:
-    case GameDataChoice::kFolder:
       SetIntroBusy(true);
-      ShowDialog(flow, kCanPickFolder && choice == GameDataChoice::kFolder, OnPicked);
+      ShowDialog(flow, OnPicked);
       return;
   }
 }
@@ -763,7 +725,7 @@ void FillVersionRows(Flow& flow) {
   for (const GameVersion& version : flow.versions) {
     VersionRow row;
     row.label = VersionLabel(version);
-    if (version.linked || version.temporary)
+    if (version.temporary)
       row.note = Tr(IntroText::kLinked, version.dir.string());
     if (version.needs_phases || version.outdated)
       row.note = Tr(version.needs_phases ? IntroText::kNeedsUpdate : IntroText::kOutdated) +
@@ -772,8 +734,7 @@ void FillVersionRows(Flow& flow) {
       row.note = Tr(IntroText::kNotSupportedYet) + (row.note.empty() ? "" : "   " + row.note);
     row.languages = version.languages;
     row.startable = version.startable;
-    row.linked = version.linked;
-    row.can_delete = !version.linked && !version.temporary && IsDeletable(version.dir);
+    row.can_delete = !version.temporary && IsDeletable(version.dir);
     prompt.versions.push_back(std::move(row));
   }
   prompt.selected_version = flow.selected;
@@ -834,7 +795,6 @@ void AskForGameData(const GameDataOptions& options, rex::ui::WindowedAppContext&
   flow->options = options;
   flow->context = &context;
   flow->done = std::move(done);
-  flow->prompt.can_pick_folder = kCanPickFolder;
   flow->prompt.copy_hint = CopyHint();
   flow->versions = std::move(g_versions);
   flow->selected = g_selected;

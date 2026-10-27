@@ -38,10 +38,6 @@ bool NeedsPatching(const std::filesystem::path& dir);
 // Whether `dir` was extracted in a way only extracting the game again fixes.
 bool IsOutdated(const std::filesystem::path& dir);
 
-// The game directory `picked` (a path or an Android content URI) is, or holds
-// the picked file, when it needs no extraction; else empty.
-std::filesystem::path ExtractedSource(const std::string& picked);
-
 struct SourceInfo {
   // The release, for the player; empty when not known.
   std::string release;
@@ -57,13 +53,13 @@ struct SourceInfo {
   bool startable = true;
 };
 
-// Identifies `picked` (as Install takes it) without extracting anything.
+// Identifies `picked` (as Install takes it, or a game directory) without
+// extracting anything.
 SourceInfo IdentifySource(const std::string& picked);
 
-// Runs the phases on `picked` (an XBLA package or a game directory),
-// extracting into `assets` when it is a package. Returns why it
-// failed, for the player, or empty with `dir` set to the ready game
-// directory.
+// Runs the phases on `picked` (an XBLA package, a path or an Android content
+// URI), extracting into `assets`. Returns why it failed, for the player, or
+// empty with `dir` set to the ready game directory.
 std::string Install(const std::string& picked, const std::filesystem::path& assets,
                     const InstallHooks& hooks, std::filesystem::path& dir);
 

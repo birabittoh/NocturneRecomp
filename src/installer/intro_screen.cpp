@@ -264,8 +264,7 @@ class IntroDialog final : public rex::ui::ImGuiDialog {
                          prompt.adding != prompt_.adding ||
                          prompt.versions.size() != prompt_.versions.size() ||
                          prompt.selected_version != selected_version_ ||
-                         prompt.can_extract != prompt_.can_extract ||
-                         prompt.confirm_forget != prompt_.confirm_forget;
+                         prompt.can_extract != prompt_.can_extract;
     prompt_ = prompt;
     if (rebuild) {
       BuildOptions();
@@ -280,8 +279,7 @@ class IntroDialog final : public rex::ui::ImGuiDialog {
     selected_version_ = prompt_.selected_version;
     if (!prompt_.confirm.empty()) {
       options_.push_back({IntroText::kCancel, GameDataChoice::kCancel, 0, 0});
-      options_.push_back({prompt_.confirm_forget ? IntroText::kForgetVersion : IntroText::kDeleteFiles,
-                          GameDataChoice::kConfirmDelete, 1, 0});
+      options_.push_back({IntroText::kDeleteFiles, GameDataChoice::kConfirmDelete, 1, 0});
       selected_ = 0;
       return;
     }
@@ -314,8 +312,6 @@ class IntroDialog final : public rex::ui::ImGuiDialog {
       return;
     }
     options_.push_back({IntroText::kSelectFile, GameDataChoice::kDiscImage, 0, 0});
-    if (prompt_.can_pick_folder)
-      options_.push_back({IntroText::kSelectFolder, GameDataChoice::kFolder, 0, 1});
     options_.push_back({IntroText::kExtract, GameDataChoice::kExtract, 1, 0});
     if (prompt_.versions.empty())
       options_.push_back({IntroText::kQuit, GameDataChoice::kQuit, 1, kCornerRow});
@@ -479,8 +475,7 @@ class IntroDialog final : public rex::ui::ImGuiDialog {
                  "\n" + Tr(IntroText::kPressExtract);
         } else {
           body = Tr(IntroText::kNeedFiles);
-          if (!prompt_.can_pick_folder)
-            body += std::string("\n") + Tr(IntroText::kSelectIsoOnly);
+          body += std::string("\n") + Tr(IntroText::kSelectIsoOnly);
           if (!prompt_.copy_hint.empty())
             body += "\n" + Tr(IntroText::kCopyHint, prompt_.copy_hint);
         }
@@ -559,8 +554,7 @@ class IntroDialog final : public rex::ui::ImGuiDialog {
   bool CanDelete(int version) const {
     if (version < 0 || version >= int(prompt_.versions.size()))
       return false;
-    const VersionRow& row = prompt_.versions[size_t(version)];
-    return row.linked || row.can_delete;
+    return prompt_.versions[size_t(version)].can_delete;
   }
 
   bool ShowsUpdateButton() const {
@@ -761,7 +755,7 @@ class IntroDialog final : public rex::ui::ImGuiDialog {
       case GameDataChoice::kExtract:
         return prompt_.can_extract;
       case GameDataChoice::kDelete:
-        return row && (row->linked || row->can_delete);
+        return row && row->can_delete;
       default:
         return true;
     }
@@ -1041,9 +1035,7 @@ class IntroDialog final : public rex::ui::ImGuiDialog {
                        active ? std::chrono::duration<float>(Clock::now() - scroll_since_).count()
                               : -1.0f);
       } else {
-        IntroText text = option.label;
-        if (option.choice == GameDataChoice::kDelete && SelectedRow() && SelectedRow()->linked)
-          text = IntroText::kForgetVersion;
+        const IntroText text = option.label;
         const ImU32 ink = Color(kText, a * (active ? 1.0f : 0.8f));
         if (plus) {
           const ImVec2 c((min.x + max.x) * 0.5f, (min.y + max.y) * 0.5f);
@@ -1196,8 +1188,7 @@ class IntroDialog final : public rex::ui::ImGuiDialog {
                        Tr(BackChoice() == GameDataChoice::kQuit ? IntroText::kHintQuit
                                                                 : IntroText::kHintBack);
     if (Library() && CanDelete(selected_version_))
-      text += std::string("      X  ") +
-              Tr(SelectedRow()->linked ? IntroText::kForgetVersion : IntroText::kDeleteVersion);
+      text += std::string("      X  ") + Tr(IntroText::kDeleteVersion);
     if (!Library() && prompt_.confirm.empty() && prompt_.outdated.empty())
       text += std::string("\n") + Tr(IntroText::kDialogNeedsMouse);
     CenteredText(draw, font, 17.0f * unit, size.x * 0.5f, size.y - 112.0f * unit,
