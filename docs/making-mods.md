@@ -327,11 +327,11 @@ game_version = "1.0.0"   # or, equivalently: game_version = ">= 1.0.0"
 ```
 
 This is checked against the build's own version (`nocturnerecomp_app.h`'s
-`OnPreSetup` sets it from `src/version.generated.h`, derived from the
-nearest `vX.Y.Z` git tag at CMake configure time -- see `CMakeLists.txt`)
+`OnPreSetup` sets it from `src/version.generated.h`: the CI tag, else the
+newest reachable `v*` git tag at CMake configure time -- see `CMakeLists.txt`)
 and is likewise a hard failure only when the build is actually older; if no
-tag is reachable, the version falls back to `0.0.0` and the check is
-accepted with a warning instead.
+tag is reachable, the version is empty and the check is accepted with a
+warning instead.
 
 ## Game versions
 

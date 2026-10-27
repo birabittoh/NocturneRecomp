@@ -89,8 +89,7 @@ std::string JsonString(const std::string& body, const char* key, size_t from = 0
 
 void StartUpdateCheck() {
   constexpr const char* kVersion = kVersionString;
-  // 0.0.0 is an untagged build (see CMakeLists.txt): every release is newer.
-  if (g_update_check || !kVersion[0] || std::string_view(kVersion) == "0.0.0" || !REXCVAR_GET(auto_update_enabled) ||
+  if (g_update_check || !kVersion[0] || !REXCVAR_GET(auto_update_enabled) ||
       !rex::system::AutoUpdater::SupportsSelfUpdate())
     return;
   g_update_check = new UpdateCheck;

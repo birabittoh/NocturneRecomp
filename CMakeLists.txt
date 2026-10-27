@@ -81,38 +81,27 @@ else()
     set(NOCTURNE_SHADER_FORMATS "spirv")
 endif()
 
-# Project version: an explicit NOCTURNE_VERSION_OVERRIDE, else the CI tag
-# (NOCTURNE_VERSION_NAME, also what the Android Gradle build stamps), else the
-# nearest reachable `vX.Y.Z` git tag, not an exact match -- a dev build sitting on commits after v1.2.2 already contains
-# everything v1.2.2 did, so it should still satisfy a mod's
-# `game_version >= 1.2.0` (see nocturnerecomp_app.h's OnPreSetup and
-# docs/making-mods.md). Falls back to "0.0.0" if git or a reachable tag is
-# unavailable (e.g. a shallow/--depth=1 checkout with no tags fetched); the
-# SDK already treats an unparsable/absent game_version as "can't verify,
-# don't block" for any mod that declares the constraint.
-find_package(Git QUIET)
-set(NOCTURNE_VERSION_OVERRIDE "" CACHE STRING "Version to embed (vX.Y.Z or X.Y.Z); empty to derive it")
-set(NOCTURNE_VERSION "0.0.0")
-set(NOCTURNE_GIT_TAG "${NOCTURNE_VERSION_OVERRIDE}")
-if(NOCTURNE_GIT_TAG STREQUAL "")
-    set(NOCTURNE_GIT_TAG "$ENV{NOCTURNE_VERSION_NAME}")
+# Release version the self-updater compares GitHub tags against: an explicit
+# override, else the CI tag (NOCTURNE_VERSION_NAME, also what the Android Gradle
+# build stamps), else the newest reachable v* tag, else empty, which leaves the
+# updater off. Recomputed on every configure so a new tag reaches an old build dir.
+# Mods' `game_version >= X.Y.Z` constraints compare against it too; an empty
+# version is "can't verify, don't block" (see docs/making-mods.md).
+set(NOCTURNE_VERSION_OVERRIDE "" CACHE STRING "Version embedded for the self-updater (vX.Y.Z or X.Y.Z); empty to derive it")
+set(NOCTURNE_VERSION "${NOCTURNE_VERSION_OVERRIDE}")
+if(NOCTURNE_VERSION STREQUAL "")
+    set(NOCTURNE_VERSION "$ENV{NOCTURNE_VERSION_NAME}")
 endif()
-if(NOT NOCTURNE_GIT_TAG STREQUAL "")
-    if(NOCTURNE_GIT_TAG MATCHES "^v?([0-9]+\\.[0-9]+\\.[0-9]+)$")
-        set(NOCTURNE_VERSION "${CMAKE_MATCH_1}")
-    endif()
-elseif(GIT_EXECUTABLE)
+if(NOCTURNE_VERSION STREQUAL "")
     execute_process(
-        COMMAND ${GIT_EXECUTABLE} describe --tags --abbrev=0 --match "v[0-9]*.[0-9]*.[0-9]*"
-        WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
-        OUTPUT_VARIABLE NOCTURNE_GIT_TAG
+        COMMAND git describe --tags --abbrev=0 --match "v*"
+        WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
+        OUTPUT_VARIABLE NOCTURNE_VERSION
         OUTPUT_STRIP_TRAILING_WHITESPACE
         ERROR_QUIET
-        RESULT_VARIABLE NOCTURNE_GIT_TAG_RC)
-    if(NOCTURNE_GIT_TAG_RC EQUAL 0 AND NOCTURNE_GIT_TAG MATCHES "^v([0-9]+\\.[0-9]+\\.[0-9]+)$")
-        set(NOCTURNE_VERSION "${CMAKE_MATCH_1}")
-    endif()
+    )
 endif()
+string(REGEX REPLACE "^v" "" NOCTURNE_VERSION "${NOCTURNE_VERSION}")
 configure_file(
     ${CMAKE_SOURCE_DIR}/src/version.generated.h.in
     ${CMAKE_SOURCE_DIR}/src/version.generated.h
