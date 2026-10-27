@@ -15,6 +15,7 @@
 #include <vector>
 
 #include <rex/logging.h>
+#include <rex/system/xmemory.h>
 
 #include "guest_shaders.h"
 #include "native_renderer_plume.h"
@@ -106,7 +107,7 @@ constexpr uint32_t kMaxDeclElements = 16;
 constexpr uint32_t kResolveClearTarget = 0x200;
 
 uint32_t Load32(const uint8_t* base, uint32_t address) {
-  const uint8_t* p = base + address;
+  const uint8_t* p = rex::memory::GuestPtr<const uint8_t*>(const_cast<uint8_t*>(base), address);
   return uint32_t(p[0]) << 24 | uint32_t(p[1]) << 16 | uint32_t(p[2]) << 8 | p[3];
 }
 
@@ -530,8 +531,8 @@ bool ReadDeclaration(const uint8_t* base, uint32_t decl, VertexDeclaration& out)
     out.elements[i].stream = uint16_t(Load32(base, e) >> 16);
     out.elements[i].offset = uint16_t(Load32(base, e) & 0xFFFFu);
     out.elements[i].type = Load32(base, e + 4);
-    out.elements[i].usage = base[e + 9];
-    out.elements[i].usage_index = base[e + 10];
+    out.elements[i].usage = *rex::memory::GuestPtr<const uint8_t*>(const_cast<uint8_t*>(base), e + 9);
+    out.elements[i].usage_index = *rex::memory::GuestPtr<const uint8_t*>(const_cast<uint8_t*>(base), e + 10);
   }
   return true;
 }

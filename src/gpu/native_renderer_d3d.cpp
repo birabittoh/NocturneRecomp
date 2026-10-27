@@ -13,6 +13,7 @@
 // short-circuited.
 
 #include <rex/hook.h>
+#include <rex/system/xmemory.h>
 #include <rex/logging.h>
 
 #include <rex/chrono/clock.h>
@@ -89,7 +90,7 @@ float F32(uint8_t* base, uint32_t address) {
 uint64_t Fnv(uint8_t* base, uint32_t address, uint32_t size) {
   uint64_t h = 0xCBF29CE484222325ull;
   for (uint32_t i = 0; i < size; ++i) {
-    h ^= *(base + address + i);
+    h ^= *rex::memory::GuestPtr<const uint8_t*>(base, address + i);
     h *= 0x100000001B3ull;
   }
   return h;
@@ -112,7 +113,7 @@ void DescribeShader(uint8_t* base, const char* kind, uint32_t object, uint32_t h
   {
     static const uint8_t vs_pat[8] = {0xf0, 0x55, 0x40, 0x03, 0x00, 0x00, 0x12, 0x00};
     for (uint32_t o = 0; o < 8192; o += 4)
-      if (!std::memcmp(base + ucode + o, vs_pat, 8))
+      if (!std::memcmp(rex::memory::GuestPtr<const uint8_t*>(base, ucode + o), vs_pat, 8))
         REXLOG_INFO("  {} file ucode found at ptr+{}", kind, o);
   }
   REXLOG_INFO("  {} shader obj={:08X} magic={:08X} hdr={} ucode={} ptr={:08X} fnv(ucode)={:016X}",
@@ -134,7 +135,7 @@ void TraceDraw(uint8_t* base, const InlineBlock& b) {
     for (uint32_t i = 0; i < n && i < 16; ++i) {
       const uint32_t e = decl + 52 + 12 * i;
       REXLOG_INFO("    [{}] stream/offset={:08X} type={:08X} usage={} idx={}", i, U32(base, e),
-                  U32(base, e + 4), *(base + e + 9), *(base + e + 10));
+                  U32(base, e + 4), *rex::memory::GuestPtr<const uint8_t*>(base, e + 9), *rex::memory::GuestPtr<const uint8_t*>(base, e + 10));
     }
   }
   for (uint32_t s = 0; s < 4; ++s) {

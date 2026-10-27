@@ -11,6 +11,7 @@
 #include <vector>
 
 #include <rex/logging.h>
+#include <rex/system/xmemory.h>
 
 extern "C" {
 extern const uint8_t kGuestShaderPackData[];
@@ -48,7 +49,7 @@ constexpr uint32_t kVertexMicrocode = 0x20;
 constexpr uint32_t kPixelMicrocode = 0x18;
 
 uint32_t Load32(const uint8_t* base, uint32_t address) {
-  const uint8_t* p = base + address;
+  const uint8_t* p = rex::memory::GuestPtr<const uint8_t*>(const_cast<uint8_t*>(base), address);
   return uint32_t(p[0]) << 24 | uint32_t(p[1]) << 16 | uint32_t(p[2]) << 8 | p[3];
 }
 
@@ -69,7 +70,8 @@ uint64_t ShaderKey(const uint8_t* base, uint32_t object, bool pixel) {
   const uint32_t ucode = Virtual(Load32(base, object + (pixel ? kPixelMicrocode : kVertexMicrocode)));
   if (size == 0 || size > 0x10000 || (size & 3))
     return 0;
-  std::vector<uint8_t> words(base + ucode, base + ucode + size);
+  const uint8_t* code = rex::memory::GuestPtr<const uint8_t*>(const_cast<uint8_t*>(base), ucode);
+  std::vector<uint8_t> words(code, code + size);
   if (!pixel) {
     const uint32_t sub = header + Load32(base, header + 24);
     if (Load32(base, header + 24) + 40 > header_size)

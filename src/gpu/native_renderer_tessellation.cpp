@@ -25,6 +25,7 @@
 #include <vector>
 
 #include <rex/logging.h>
+#include <rex/system/xmemory.h>
 
 #include "guest_shaders.h"
 #include "native_renderer_draw.h"
@@ -41,7 +42,7 @@ constexpr float kCellSize = 16.0f;  // pixels per generated cell, at most
 constexpr uint32_t kMaxCells = 160;
 
 uint32_t Load32(const uint8_t* base, uint32_t address) {
-  const uint8_t* p = base + address;
+  const uint8_t* p = rex::memory::GuestPtr<const uint8_t*>(const_cast<uint8_t*>(base), address);
   return uint32_t(p[0]) << 24 | uint32_t(p[1]) << 16 | uint32_t(p[2]) << 8 | p[3];
 }
 
