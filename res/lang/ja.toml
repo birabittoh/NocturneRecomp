@@ -29,6 +29,11 @@ language = "言語"
 gpu_backend = "GPUバックエンド"
 vulkan_device = "Vulkanデバイス"
 auto = "自動"
+restart_title = "警告"
+restart_confirm = "保存されていない進行状況はすべて失われます。今すぐゲームを再起動しますか？"
+restart_yes = "再起動"
+restart_cancel = "キャンセル"
+install_update = "アップデートをインストール"
 
 [enhancements]
 intro = "MottZillaのランダマイザー SOTN_XB_RANDO の修正と調整です。通常のゲームにも、ランダマイザーのシードの上にも適用されます。"

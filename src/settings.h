@@ -10,6 +10,7 @@
 #pragma once
 
 #include <filesystem>
+#include <functional>
 #include <memory>
 #include <string_view>
 #include <vector>
@@ -137,6 +138,18 @@ void MarkCvarLive(std::string_view name);
 
 // The window and settings file PersistWindowSize acts on. Call at startup.
 void BindWindowTarget(rex::ui::Window* window, std::filesystem::path user_settings_path);
+
+// Relaunches the game and closes this instance, so the next launch picks up the
+// restart-scoped cvars changed this session. Safe from any thread (the close is
+// marshalled onto the UI thread). False, doing nothing, if the relaunch could
+// not be started or BindWindowTarget has not run yet.
+bool RestartNow();
+
+// Closes the game, marshalled like RestartNow. False before BindWindowTarget.
+bool QuitNow();
+
+// Queues work on the window's UI thread. False before BindWindowTarget.
+bool CallInWindowThread(std::function<void()> work);
 
 // Saves the window's current logical size as window_width/window_height, which
 // the SDK reads when it creates the window on the next launch. Called by the

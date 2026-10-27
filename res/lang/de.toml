@@ -26,6 +26,11 @@ language = "Sprache"
 gpu_backend = "GPU-Backend"
 vulkan_device = "Vulkan-Gerät"
 auto = "Automatisch"
+restart_title = "Warnung"
+restart_confirm = "Alle nicht gespeicherten Fortschritte gehen verloren. Das Spiel jetzt neu starten?"
+restart_yes = "Neustart"
+restart_cancel = "Abbrechen"
+install_update = "Update installieren"
 
 [enhancements]
 intro = "Korrekturen und Anpassungen aus MottZillas SOTN_XB_RANDO-Randomizer. Sie gelten für das Originalspiel und zusätzlich zu Randomizer-Seeds."

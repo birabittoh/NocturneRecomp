@@ -26,6 +26,11 @@ language = "Langue"
 gpu_backend = "Backend GPU"
 vulkan_device = "Périphérique Vulkan"
 auto = "Auto"
+restart_title = "Avertissement"
+restart_confirm = "Toute progression non sauvegardée sera perdue. Redémarrer le jeu maintenant ?"
+restart_yes = "Redémarrer"
+restart_cancel = "Annuler"
+install_update = "Installer la mise à jour"
 
 [enhancements]
 intro = "Corrections et ajustements du randomizer SOTN_XB_RANDO de MottZilla. Ils s'appliquent au jeu d'origine et par-dessus les seeds du randomizer."

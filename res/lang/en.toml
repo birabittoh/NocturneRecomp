@@ -31,6 +31,11 @@ language = "Language"
 gpu_backend = "GPU Backend"
 vulkan_device = "Vulkan Device"
 auto = "Auto"
+restart_title = "Warning"
+restart_confirm = "All unsaved progress will be lost. Restart the game now?"
+restart_yes = "Restart"
+restart_cancel = "Cancel"
+install_update = "Install Update"
 
 [enhancements]
 intro = "Fixes and tweaks from MottZilla's SOTN_XB_RANDO randomizer. They apply to the vanilla game and on top of randomizer seeds."

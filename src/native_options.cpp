@@ -1678,7 +1678,7 @@ extern "C" void NativeOptions_SettingsEvent(PPCContext& ctx, uint8_t* base) {
         // than restart when that can't be determined.
         const uint32_t latch = InGameLatchAddress(base);
         const bool main_menu_instance = latch != 0 && Read8(base, latch) == 0;
-        if (main_menu_instance && AnyPendingRestart() && g_runtime && g_runtime->app_context()) {
+        if (main_menu_instance && AnyPendingRestart()) {
           // window->RequestClose() ends up in WindowSDL::RequestCloseImpl,
           // which calls SDL_DestroyWindow directly (not through SDL's event
           // queue, unlike Window::RequestPaint -- see its own "callable from
@@ -1694,16 +1694,13 @@ extern "C" void NativeOptions_SettingsEvent(PPCContext& ctx, uint8_t* base) {
           // close onto the thread that owns the window, the same mechanism
           // window.h documents "functions requested to be executed in the UI
           // thread... are also allowed to destroy windows" for.
-          rex::ui::WindowedAppContext* app_context = g_runtime->app_context();
-          if (rex::platform::process::Relaunch()) {
+          // RestartNow marshals the close onto the UI thread: this handler
+          // runs on the guest CPU thread, and closing the window from here left
+          // the old process running next to the relaunched one.
+          const std::string pending = fmt::format("{}", fmt::join(rex::cvar::GetPendingRestartFlags(), ", "));
+          if (RestartNow()) {
             REXLOG_INFO("[native_options] restart-pending change(s) accepted from the main "
-                        "menu ({}); relaunching",
-                        fmt::join(rex::cvar::GetPendingRestartFlags(), ", "));
-            app_context->CallInUIThread([] {
-              if (g_runtime && g_runtime->display_window()) {
-                g_runtime->display_window()->RequestClose();
-              }
-            });
+                        "menu ({}); relaunching", pending);
           }
         }
       } else if (button == kButtonCancel) {

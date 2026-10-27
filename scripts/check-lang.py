@@ -62,6 +62,10 @@ for path in sources:
         used.add(("native", key))
 
 # Keys composed at run time.
+# settings.cpp's ConfirmRestart takes its text keys as defaulted parameters.
+settings_src = (root / "src/settings.cpp").read_text(encoding="utf8")
+for key in re.findall(r'\b\w+_key\s*=\s*"(\w+)"', settings_src):
+    used.add(("settings", key))
 enh = (root / "src/enhancements.cpp").read_text(encoding="utf8")
 for cvar in re.findall(r'\{Enhancement::\w+,\s*"(enh_\w+)"', enh):
     used |= {("enhancements", cvar), ("enhancements", cvar + "_desc")}

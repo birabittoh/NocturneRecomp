@@ -39,6 +39,32 @@ namespace nocturne {
 
 namespace {
 
+// A modal asking to confirm a restart. Call every frame; `open` requests it.
+// `id` keeps the popups of different buttons apart.
+bool ConfirmRestart(const char* id, bool open, const char* message_key = "restart_confirm",
+                    const char* yes_key = "restart_yes") {
+  const std::string popup = std::string(Tr("settings", "restart_title")) + "##" + id;
+  if (open)
+    ImGui::OpenPopup(popup.c_str());
+  bool confirmed = false;
+  ImGui::SetNextWindowPos(ImGui::GetMainViewport()->GetCenter(), ImGuiCond_Appearing,
+                          ImVec2(0.5f, 0.5f));
+  if (ImGui::BeginPopupModal(popup.c_str(), nullptr,
+                             ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoMove)) {
+    ImGui::TextUnformatted(Tr("settings", message_key));
+    ImGui::Spacing();
+    if (ImGui::Button(Tr("settings", yes_key))) {
+      confirmed = true;
+      ImGui::CloseCurrentPopup();
+    }
+    ImGui::SameLine();
+    if (ImGui::Button(Tr("settings", "restart_cancel")))
+      ImGui::CloseCurrentPopup();
+    ImGui::EndPopup();
+  }
+  return confirmed;
+}
+
 // Everything build.py used to write into the shipped nocturnerecomp.toml.
 // These are the game's defaults, not necessarily the SDK's; kept here so
 // there is one place that owns "what NocturneRecomp ships with". Keybind/
@@ -91,6 +117,11 @@ constexpr std::array kGameDefaults = {
     DefaultValue{"update_data_root", "update"},
     DefaultValue{"mods_data_root", "mods"},
     DefaultValue{"license_mask", "1"},
+    // Static mirror of the mod catalog, attached to every release of the mods
+    // repo; used when the Firestore backend is rate limited or down.
+    DefaultValue{"mod_catalog_fallback_url",
+                 "https://github.com/birabittoh/NocturneRecomp-Mods/releases/latest/"
+                 "download/catalog.json"},
     DefaultValue{"mnk_mode", "true"},
     DefaultValue{"mnk_capture_mouse", "false"},
 };
@@ -210,11 +241,13 @@ class CuratedSettingsDialog : public rex::ui::ImGuiDialog {
       ImGui::TextWrapped("%s", Tr("settings", "restart_banner"));
       ImGui::PopStyleColor();
       ImGui::SameLine();
-      if (ImGui::SmallButton(Tr("settings", "restart_now"))) {
-        if (rex::platform::process::Relaunch() && window_) {
-          window_->RequestClose();
-        }
-      }
+      const bool open_confirm =
+          ImGui::SmallButton((std::string(Tr("settings", "restart_now")) + "##restart").c_str());
+      // Not Relaunch()+RequestClose() inline: under the native renderer this
+      // overlay draws on the guest's render thread, and closing the window from
+      // there hangs. RestartNow() marshals the close onto the UI thread.
+      if (ConfirmRestart("confirm_restart", open_confirm))
+        RestartNow();
       ImGui::Separator();
     }
 
@@ -520,6 +553,9 @@ class CuratedSettingsDialog : public rex::ui::ImGuiDialog {
   // than the SDK's mod manager overlay (F1) since a player who never touches
   // mods should still be told about an available update
   void DrawUpdateSection() {
+    if (!rex::system::AutoUpdater::SupportsSelfUpdate())
+      return;
+
     if (!update_check_requested_) {
       update_check_requested_ = true;
       auto_updater_.CheckAsync();
@@ -528,22 +564,31 @@ class CuratedSettingsDialog : public rex::ui::ImGuiDialog {
     // A previous session already downloaded and staged an update (whether or
     // not this one ever calls CheckAsync/InstallAsync again); offer the
     // restart regardless of auto_updater_'s own in-memory state.
-    if (rex::system::AutoUpdater::HasPendingSelfUpdate(rex::filesystem::GetExecutableFolder())) {
+    // InstallRoot, not the exe folder: on macOS the whole .app is swapped.
+    const auto install_root = rex::system::AutoUpdater::InstallRoot();
+    if (rex::system::AutoUpdater::HasPendingSelfUpdate(install_root)) {
       ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.45f, 0.85f, 0.55f, 1.0f));
       ImGui::TextWrapped("%s", Tr("settings", "update_downloaded"));
       ImGui::PopStyleColor();
       ImGui::SameLine();
-      if (ImGui::SmallButton((std::string(Tr("settings", "restart_apply")) + "##autoupdate").c_str())) {
+#if REX_PLATFORM_ANDROID
+      // The system installer takes it from here and replaces the app itself;
+      // closing the game would only dismiss the installer prompt.
+      if (ImGui::SmallButton((std::string(Tr("settings", "install_update")) + "##autoupdate").c_str()))
+        rex::system::AutoUpdater::ApplyAndRestart(install_root, {});
+#else
+      const bool open_confirm = ImGui::SmallButton(
+          (std::string(Tr("settings", "restart_apply")) + "##autoupdate").c_str());
+      if (ConfirmRestart("confirm_update", open_confirm)) {
         // This install root contains the running executable itself,
         // which stays locked for this process's whole lifetime (see
         // AutoUpdater::ApplyAndRestart's contract). The spawned helper
         // outlives this process, applies the swap, and launches the new exe.
-        if (rex::system::AutoUpdater::ApplyAndRestart(rex::filesystem::GetExecutableFolder(),
-                                                       rex::filesystem::GetExecutablePath()) &&
-            window_) {
-          window_->RequestClose();
-        }
+        if (rex::system::AutoUpdater::ApplyAndRestart(install_root,
+                                                       rex::filesystem::GetExecutablePath()))
+          QuitNow();
       }
+#endif
       ImGui::Separator();
       return;
     }
@@ -582,7 +627,7 @@ class CuratedSettingsDialog : public rex::ui::ImGuiDialog {
     ImGui::PopStyleColor();
     ImGui::SameLine();
     if (ImGui::SmallButton(Tr("settings", "download_update"))) {
-      auto_updater_.InstallAsync(*info, rex::filesystem::GetExecutableFolder());
+      auto_updater_.InstallAsync(*info, install_root);
     }
     ImGui::Separator();
   }
@@ -931,6 +976,31 @@ void PersistWindowSize() {
   rex::cvar::SetFlagByName("window_width", want_width, /*persist=*/true);
   rex::cvar::SetFlagByName("window_height", want_height, /*persist=*/true);
   rex::cvar::SaveConfigSubset(g_user_settings_path, {"window_width", "window_height"});
+}
+
+bool RestartNow() {
+  if (!g_window || !rex::platform::process::Relaunch())
+    return false;
+  // RequestClose ends up in WindowSDL::RequestCloseImpl, which destroys the
+  // window directly, so it has to run on the thread that owns the window.
+  // Callers are not: the native Options screen runs on the guest CPU thread,
+  // and the F4 overlay on the guest's render thread. Closing from there hangs,
+  // leaving the old window up next to the relaunched one.
+  return QuitNow();
+}
+
+bool QuitNow() {
+  if (!g_window)
+    return false;
+  rex::ui::Window* window = g_window;
+  window->app_context().CallInUIThread([window] { window->RequestClose(); });
+  return true;
+}
+
+bool CallInWindowThread(std::function<void()> work) {
+  if (!g_window)
+    return false;
+  return g_window->app_context().CallInUIThread(std::move(work));
 }
 
 void PrewarmSettingsDialogCaches() {
