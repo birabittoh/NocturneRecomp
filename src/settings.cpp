@@ -24,8 +24,11 @@
 #include <string_view>
 #include <vector>
 
+#include "generated/nocturnerecomp_init.h"
+
 #include <rex/cvar.h>
 #include <rex/filesystem.h>
+#include <rex/hook.h>
 #include <rex/input/input_system.h>
 #include <rex/logging/macros.h>
 #include <rex/platform.h>
@@ -1295,3 +1298,13 @@ std::unique_ptr<rex::ui::ImGuiDialog> CreateSettingsDialog(
 }
 
 }  // namespace nocturne
+
+// The pause menu's "Quit game" row (formerly "Return to Arcade", strings 31 and
+// 48; see font_overlay.cpp). Its handler, in the function table at 0x820099C8,
+// is a thunk that tail-calls XLaunchNewImage("XLNI_DASH_ARCADE", 0) to return
+// to the Xbox dashboard, which has nowhere to go here. Close the game instead,
+// as the settings dialog's Quit Game button does.
+REX_HOOK_RAW(sub_82577430) {
+  if (!nocturne::QuitNow())
+    REXLOG_WARN("[quit] no window to close");
+}

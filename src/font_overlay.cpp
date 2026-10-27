@@ -308,6 +308,47 @@ std::vector<uint8_t> MergeJapaneseStrings(const std::vector<uint8_t>& world_file
   return out;
 }
 
+// The button that used to say "Return to Arcade" (id 31, description id 48)
+// quits the game, so every strings_<code>.bin gets new text for both.
+constexpr size_t kQuitStringId = 31;
+constexpr size_t kQuitDescriptionId = 48;
+struct QuitLabel {
+  const char* code;
+  const char16_t* text;
+  const char16_t* description;
+};
+constexpr QuitLabel kQuitLabels[] = {
+    {"en", u"Quit game", u"Quit the game"},
+    {"de", u"Spiel beenden", u"Das Spiel beenden"},
+    {"es", u"Salir del juego", u"Salir del juego"},
+    {"fr", u"Quitter le jeu", u"Quitter le jeu"},
+    {"it", u"Esci dal gioco", u"Esci dal gioco"},
+    {"ja", u"ゲームを終了", u"ゲームを終了"},
+};
+
+// Points entry `id` of `file` at `text`, appended at the end, as in
+// take_run. Unchanged if the file has no such entry.
+void SetString(std::vector<uint8_t>& file, size_t id, const char16_t* text) {
+  const size_t entry = 4 + id * kStringEntrySize;
+  if (file.size() & 1)
+    file.push_back(0);
+  PutBe32(file, entry, static_cast<uint32_t>(file.size()));
+  for (const char16_t* c = text; *c; ++c) {
+    file.push_back(static_cast<uint8_t>(*c >> 8));
+    file.push_back(static_cast<uint8_t>(*c));
+  }
+  file.insert(file.end(), {0, 0});
+}
+
+std::vector<uint8_t> RelabelQuit(std::vector<uint8_t> file, const QuitLabel& label) {
+  std::vector<StringEntry> entries;
+  if (!ParseStrings(file, entries) || entries.size() <= kQuitDescriptionId)
+    return file;
+  SetString(file, kQuitStringId, label.text);
+  SetString(file, kQuitDescriptionId, label.description);
+  return file;
+}
+
 }  // namespace
 
 unsigned InstallJapaneseFontOverlay(rex::Runtime* runtime) {
@@ -384,12 +425,26 @@ unsigned InstallJapaneseFontOverlay(rex::Runtime* runtime) {
   if (patched.image.empty()) {
     REXLOG_DEBUG("font overlay: not patching font_ja.xpr ({})",
                  patched.error ? patched.error : "unknown");
-    if (jp_strings.empty()) {
-      return 0;
-    }
-    patched.image = std::move(original);  // JP's font still goes with JP's strings
+    patched.image = std::move(original);  // the strings are still relabelled
   }
   const size_t patched_size = patched.image.size();
+
+  // Every language's strings with the quit button relabelled. Japanese is
+  // JP's when it is merged in, World's otherwise.
+  std::vector<std::pair<std::string, std::vector<uint8_t>>> strings;
+  for (const QuitLabel& label : kQuitLabels) {
+    const std::string name = std::string("strings_") + label.code + ".bin";
+    std::vector<uint8_t> file;
+    if (!jp_strings.empty() && name == kStringsFileName) {
+      file = std::move(jp_strings);
+    } else {
+      const std::filesystem::path path = FindFile(media_dir, name);
+      if (!path.empty())
+        file = ReadHostFile(path);
+    }
+    if (!file.empty())
+      strings.emplace_back(name, RelabelQuit(std::move(file), label));
+  }
 
   auto device = std::make_unique<MediaOverlayDevice>(kOverlayMount);
   MediaOverlayDevice* device_raw = device.get();
@@ -412,7 +467,9 @@ unsigned InstallJapaneseFontOverlay(rex::Runtime* runtime) {
     }
     const std::string name = item.path().filename().string();
     if (rex::string::utf8_equal_case(name, kFontFileName) ||
-        (!jp_strings.empty() && rex::string::utf8_equal_case(name, kStringsFileName))) {
+        std::any_of(strings.begin(), strings.end(), [&](const auto& s) {
+          return rex::string::utf8_equal_case(name, s.first);
+        })) {
       continue;
     }
     root->Add(std::make_unique<HostEntry>(device_raw, root, name, item.path(),
@@ -425,9 +482,8 @@ unsigned InstallJapaneseFontOverlay(rex::Runtime* runtime) {
   }
   root->Add(std::make_unique<MemoryEntry>(device_raw, root, kFontFileName,
                                           std::move(patched.image)));
-  if (!jp_strings.empty()) {
-    root->Add(std::make_unique<MemoryEntry>(device_raw, root, kStringsFileName,
-                                            std::move(jp_strings)));
+  for (auto& [name, file] : strings) {
+    root->Add(std::make_unique<MemoryEntry>(device_raw, root, name, std::move(file)));
   }
 
   if (!vfs->RegisterDevice(std::move(device))) {
