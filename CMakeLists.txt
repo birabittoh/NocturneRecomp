@@ -210,12 +210,18 @@ if(PLUME_DXC_LIB_DIR)
 else()
     set(NOCTURNE_DXC_LIB_ARG "")
 endif()
+# The game library keeps each version in its own folder (assets/xbla-world);
+# CI and older checkouts have a flat assets/MEDIA.
+set(NOCTURNE_GUEST_MEDIA_DIR ${CMAKE_SOURCE_DIR}/assets/MEDIA)
+if(NOT EXISTS ${NOCTURNE_GUEST_MEDIA_DIR} AND EXISTS ${CMAKE_SOURCE_DIR}/assets/xbla-world/MEDIA)
+    set(NOCTURNE_GUEST_MEDIA_DIR ${CMAKE_SOURCE_DIR}/assets/xbla-world/MEDIA)
+endif()
 file(GLOB NOCTURNE_GUEST_SHADER_FILES CONFIGURE_DEPENDS
-    ${CMAKE_SOURCE_DIR}/assets/MEDIA/*.xvu ${CMAKE_SOURCE_DIR}/assets/MEDIA/*.xpu)
+    ${NOCTURNE_GUEST_MEDIA_DIR}/*.xvu ${NOCTURNE_GUEST_MEDIA_DIR}/*.xpu)
 add_custom_command(
     OUTPUT ${NOCTURNE_GUEST_SHADER_PACK} ${NOCTURNE_GUEST_SHADER_PACK_ASM}
     COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/scripts/gen-guest-shaders.py
-        --media ${CMAKE_SOURCE_DIR}/assets/MEDIA
+        --media ${NOCTURNE_GUEST_MEDIA_DIR}
         --out ${NOCTURNE_GUEST_SHADER_DIR}
         --pack ${NOCTURNE_GUEST_SHADER_PACK}
         --pack-asm ${NOCTURNE_GUEST_SHADER_PACK_ASM}
@@ -230,6 +236,27 @@ add_custom_command(
         ${CMAKE_SOURCE_DIR}/ext/KryptonRecomp/xenos_ucode.py
         ${NOCTURNE_GUEST_SHADER_FILES}
     COMMENT "Translating and compiling the guest's shaders"
+    VERBATIM
+)
+
+# Start screen art: every res/*.png, embedded by file stem (see
+# scripts/gen-images.py). None ships yet; dropping res/background.png or
+# res/logo.png in is picked up on the next configure.
+set(NOCTURNE_IMAGES_HEADER ${CMAKE_SOURCE_DIR}/src/images.generated.h)
+file(GLOB NOCTURNE_IMAGE_SOURCES CONFIGURE_DEPENDS ${CMAKE_SOURCE_DIR}/res/*.png)
+set(NOCTURNE_IMAGE_LIST ${CMAKE_BINARY_DIR}/image_sources.txt)
+string(REPLACE ";" "
+" _image_list "${NOCTURNE_IMAGE_SOURCES}")
+file(CONFIGURE OUTPUT ${NOCTURNE_IMAGE_LIST} CONTENT "${_image_list}
+")
+add_custom_command(
+    OUTPUT ${NOCTURNE_IMAGES_HEADER}
+    COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/scripts/gen-images.py
+    DEPENDS
+        ${CMAKE_SOURCE_DIR}/scripts/gen-images.py
+        ${NOCTURNE_IMAGE_LIST}
+        ${NOCTURNE_IMAGE_SOURCES}
+    COMMENT "Generating src/images.generated.h"
     VERBATIM
 )
 
@@ -283,6 +310,19 @@ set(NOCTURNERECOMP_SOURCES
     src/rando/rando_host.cpp
     src/room_presence.cpp
     src/settings.cpp
+    src/target.cpp
+    src/installer/game_data.cpp
+    src/installer/game_library.cpp
+    src/installer/install_pipeline.cpp
+    src/installer/intro_music.cpp
+    src/installer/intro_screen.cpp
+    src/installer/intro_text.cpp
+    src/installer/mods_screen.cpp
+    src/installer/release_id.cpp
+    src/installer/save_slots.cpp
+    src/installer/saves_screen.cpp
+    src/installer/xbla_package.cpp
+    src/platform/document_picker.cpp
     src/ui_text.cpp
     src/video_mode.cpp
     src/xbox_live.cpp
@@ -298,6 +338,7 @@ set(NOCTURNERECOMP_SOURCES
     ${NOCTURNE_GLYPHS_HEADER}
     ${NOCTURNE_LANG_HEADER}
     ${NOCTURNE_ICON_HEADER}
+    ${NOCTURNE_IMAGES_HEADER}
     ${CMAKE_SOURCE_DIR}/ext/KryptonRecomp/guest_shader_pack.cpp
     ${NOCTURNE_GUEST_SHADER_PACK_ASM}
 )
@@ -347,7 +388,7 @@ if(ANDROID)
     target_link_libraries(nocturnerecomp PRIVATE adrenotools)
     add_dependencies(nocturnerecomp main_hook file_redirect_hook gsl_alloc_hook hook_impl)
 endif()
-target_include_directories(nocturnerecomp PRIVATE src/gpu src/platform ext/KryptonRecomp)
+target_include_directories(nocturnerecomp PRIVATE src src/gpu src/installer src/platform ext/KryptonRecomp)
 
 # MottZilla's SOTN_XB_RANDO core (see src/rando/rando_core.cpp). It is a Win32
 # program's source: off Windows, src/rando/compat supplies the two headers

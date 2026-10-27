@@ -66,6 +66,20 @@ for path in sources:
 settings_src = (root / "src/settings.cpp").read_text(encoding="utf8")
 for key in re.findall(r'\b\w+_key\s*=\s*"(\w+)"', settings_src):
     used.add(("settings", key))
+# The start screen: intro_text.cpp's key tables, TrErr, and each page's own
+# lookup helper (saves_screen.cpp's S/Fill, mods_screen.cpp's T/Fmt).
+installer = root / "src/installer"
+intro_text = (installer / "intro_text.cpp").read_text(encoding="utf8")
+for table in re.findall(r'k(?:Keys|PhaseKeys|ProgressKeys)\s*=\s*\{(.*?)\};', intro_text, re.S):
+    used |= {("intro", key) for key in re.findall(r'"(\w+)"', table)}
+for path in installer.glob("*.cpp"):
+    text = path.read_text(encoding="utf8")
+    used |= {("intro", key) for key in re.findall(r'\bTrErr\(\s*"(\w+)"', text)}
+    used |= {("sdk_ui", key) for key in re.findall(r'\bSdkUiText\(\s*"(\w+)"', text)}
+saves_src = (installer / "saves_screen.cpp").read_text(encoding="utf8")
+used |= {("saves", key) for key in re.findall(r'\b(?:S|Fill)\(\s*"(\w+)"', saves_src)}
+mods_src = (installer / "mods_screen.cpp").read_text(encoding="utf8")
+used |= {("sdk_ui", key) for key in re.findall(r'\b(?:T|Fmt)\(\s*"(\w+)"', mods_src)}
 enh = (root / "src/enhancements.cpp").read_text(encoding="utf8")
 for cvar in re.findall(r'\{Enhancement::\w+,\s*"(enh_\w+)"', enh):
     used |= {("enhancements", cvar), ("enhancements", cvar + "_desc")}

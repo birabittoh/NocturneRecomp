@@ -30,6 +30,7 @@ src/main.cpp.bak
 # Embedded icon header/ico, rebuilt from assets/default.xex by scripts/gen-icon.py
 /src/icon.generated.h
 /src/icon.generated.ico
+/src/images.generated.h
 
 # Windows exe-icon resource script, rewritten by CMake with an absolute path
 # to src/icon.generated.ico (see CMakeLists.txt)

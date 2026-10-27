@@ -7,6 +7,9 @@
 
 #include <atomic>
 #include <chrono>
+#include <cstring>
+#include <functional>
+#include <optional>
 #include <memory>
 
 #include <imgui.h>
@@ -19,7 +22,6 @@
 #include <rex/input/input_system.h>
 #include <rex/rex_app.h>
 #include <rex/runtime.h>
-#include <rex/system/game_data_selector.h>
 #include <rex/version.h>
 #include <rex/ui/imgui_drawer.h>
 #include <rex/ui/imgui_theme.h>
@@ -38,11 +40,14 @@
 #include "fast_forward.h"
 #include "font_overlay.h"
 #include "fonts.generated.h"
+#include "game_data.h"
 #include "graphics_settings.h"
 #include "language_switch.h"
 #include "native_options.h"
 #include "host_timer_resolution.h"
 #include "icon.generated.h"
+#include "intro_screen.h"
+#include "intro_text.h"
 #include "native_renderer.h"
 #include "native_renderer_overlay.h"
 #include "native_renderer_plume.h"
@@ -51,7 +56,9 @@
 #include "rando_menu.h"
 #include "rando_runtime.h"
 #include "room_presence.h"
+#include "save_slots.h"
 #include "settings.h"
+#include "target.h"
 #include "ui_font.h"
 #include "ui_text.h"
 #include "version.generated.h"
@@ -90,6 +97,8 @@ class NocturnerecompApp : public rex::ReXApp {
     // what the CI matrix publishes.
     config.update_asset_format = "nocturnerecomp-{tag}-{platform}";
     config.update_repo = "birabittoh/NocturneRecomp";
+    // Called after FinishGameDataPaths has latched the picked version.
+    config.game_targets = nocturne::GameTargets;
 
     // One-shot toast shown top-left as the game starts
     config.startup_hint = "Press F4 to open settings.";
@@ -108,6 +117,10 @@ class NocturnerecompApp : public rex::ReXApp {
   // src/rando_runtime.h.
   void OnPostLoadXexImage() override {
     nocturne::GetRandoRuntime().Bind(runtime(), game_data_root(), user_data_root());
+    // The start screen animates the save icons from the image's set.
+    nocturne::CacheSaveIcons(user_data_root(), [](uint32_t address) {
+      return REX_KERNEL_STATE()->memory()->TranslateVirtual<const uint8_t*>(address);
+    });
 
     // Runtime (and therefore mod_registry()) exists now but mod plugins
     // haven't loaded yet -- ConstructRuntime calls OnPostLoadXexImage, then
@@ -144,20 +157,78 @@ class NocturnerecompApp : public rex::ReXApp {
     // to run after the config load to be configurable at all, and the pacer
     // does not sleep until well after this. See host_timer_resolution.h.
     nocturne::ApplyHostTimerResolution();
+    return true;
+  }
 
-    rex::system::GameDataSelectorSettings settings;
-    settings.default_xex_sha256 = "26a58b074c5dd6185b77a8111a0012866d11cba674b4b0810d79dbf07ad68aa6";
-    settings.is_xbla = true;
-    settings.config_path = config_path();
+  // Game data is resolved here rather than in SetupEnvironment because the
+  // window exists by now, so the start screen can draw: it lists the installed
+  // versions, extracts new ones from an XBLA package, and starts the pick.
+  std::optional<rex::PathConfig> OnFinalizePaths(
+      const rex::PathConfig& defaults, std::function<void(rex::PathConfig)> resume) override {
+    // Before the start screen, which can sit open for a long while.
+    window()->SetIcon(nocturne::kIconPNG, nocturne::kIconPNGSize);
+    // The SDK titles the window after the app identifier ("nocturnerecomp",
+    // lowercase, since that name also drives the config file and user data
+    // dir and can't be freely changed). Override the display-only title here.
+    window()->SetTitle("NocturneRecomp " + std::string(REXGLUE_BUILD_TITLE));
+    // The overlays record into the host frame, so the renderer needs the
+    // drawer that produces them, the start screen's included.
+    nocturne::PlumeSetOverlayDrawer(imgui_drawer());
+    nocturne::InitNativeRenderer(window());
+    nocturne::BindIntroScreen(imgui_drawer(), &app_context(), user_data_root());
+    nocturne::BindWindowTarget(window(), user_settings_path());
 
+    nocturne::GameDataOptions options;
+    options.config_path = config_path();
+    options.start_screen_flag = nocturne::StartScreenFlagPath(user_settings_path());
+    options.user_settings_path = user_settings_path();
+    options.game_data_root = defaults.game_data_root;
+    nocturne::BindIntroLanguageConfig(user_settings_path());
+    if (nocturne::UsePreparedGameData(options))
+      return FinishGameDataPaths();
 
-    return rex::system::GameDataSelector::EnsureGameData(settings);
+    // Asynchronous, so the main loop runs and feeds the start screen input.
+    nocturne::AskForGameData(options, app_context(), [this, resume](bool ready) {
+      if (!ready) {
+        // Teardown takes a moment; nothing is left to show meanwhile.
+        window()->Hide();
+        app_context().QuitFromUIThread();
+        return;
+      }
+      resume(FinishGameDataPaths());
+    });
+    return std::nullopt;
+  }
+
+  // The runtime mounts the picked version folder. game_data_root stays the
+  // library root in the config, since the settings save every cvar to it.
+  rex::PathConfig FinishGameDataPaths() {
+    nocturne::ReleaseIntroScreen();
+    RefreshPathDefaultsIfCvarsChanged();
+    rex::PathConfig paths = resolved_path_defaults();
+    paths.game_data_root = nocturne::SelectedGameDirectory();
+    nocturne::DetectTarget(paths.game_data_root);
+    return paths;
+  }
+
+  // Closing from the start screen quits through it; while game files are
+  // extracted, closing waits for the extraction to finish.
+  bool OnWindowCloseRequested() override {
+    if (nocturne::IsExtractingGameData()) {
+      REXLOG_INFO("Close requested while installing game files; ignoring until it finishes");
+      return false;
+    }
+    if (nocturne::RequestIntroQuit())
+      return false;
+    return true;
   }
 
   std::unique_ptr<rex::ui::ImGuiDialog> OnCreateUserSettingsOverlay() override {
-    return nocturne::CreateSettingsDialog(
-        imgui_drawer(), window(), user_settings_path(), config_path(),
-        static_cast<rex::input::InputSystem*>(runtime()->input_system()));
+    // No runtime yet on the start screen, so no input system to rebind with.
+    auto* input = runtime() ? static_cast<rex::input::InputSystem*>(runtime()->input_system())
+                            : nullptr;
+    return nocturne::CreateSettingsDialog(imgui_drawer(), window(), user_settings_path(),
+                                          config_path(), input);
   }
 
   void OnPostSetup() override {
@@ -166,7 +237,6 @@ class NocturnerecompApp : public rex::ReXApp {
     // destroys and recreates the overlay on every close/open, so without this
     // it re-ran on every single open). See PrewarmSettingsDialogCaches.
     nocturne::PrewarmSettingsDialogCaches();
-    nocturne::BindWindowTarget(window(), user_settings_path());
 
     // Bridge the guest "Achievements" pause-menu entry (XamShowAchievementsUI,
     // intercepted in achievements_menu.cpp) to the SDK's built-in achievements
@@ -175,13 +245,6 @@ class NocturnerecompApp : public rex::ReXApp {
     // live after setup.
     auto* input_sys = static_cast<rex::input::InputSystem*>(runtime()->input_system());
     nocturne::Achievements().Bind(window(), &app_context(), input_sys);
-
-    window()->SetIcon(nocturne::kIconPNG, nocturne::kIconPNGSize);
-
-    // The SDK titles the window after the app identifier ("nocturnerecomp",
-    // lowercase, since that name also drives the config file and user data
-    // dir and can't be freely changed). Override the display-only title here.
-    window()->SetTitle("NocturneRecomp " + std::string(REXGLUE_BUILD_TITLE));
 
     // Movement/aim in mnk_mode is driven by the D-pad and mouse keybinds, not
     // the left/right analog stick.
@@ -304,6 +367,29 @@ class NocturnerecompApp : public rex::ReXApp {
 
     ImFontConfig cfg;
     cfg.FontDataOwnedByAtlas = false;
+    // The start screen's font: large enough to stay sharp when the screen
+    // scales it down (the atlas is static, so scaling up would blur), and only
+    // the characters its text uses, so the Japanese glyphs stay a handful.
+    {
+      static ImVector<ImWchar> intro_glyphs;
+      if (intro_glyphs.empty()) {
+        ImFontGlyphRangesBuilder builder;
+        builder.AddRanges(atlas->GetGlyphRangesDefault());
+        builder.AddText(nocturne::IntroGlyphText().c_str());
+        builder.BuildRanges(&intro_glyphs);
+      }
+      static const ImWchar kLatin[] = {0x0020, 0x00FF, 0};
+      ImFontConfig intro_cfg = cfg;
+      std::strncpy(intro_cfg.Name, nocturne::kIntroFontName, sizeof(intro_cfg.Name));
+      atlas->AddFontFromMemoryTTF(const_cast<unsigned char*>(nocturne::kPTSerifRegularTTF),
+                                  static_cast<int>(nocturne::kPTSerifRegularTTFSize), 64.0f,
+                                  &intro_cfg, kLatin);
+      ImFontConfig merge = cfg;
+      merge.MergeMode = true;
+      atlas->AddFontFromMemoryTTF(const_cast<unsigned char*>(nocturne::kDotGothic16SubsetTTF),
+                                  static_cast<int>(nocturne::kDotGothic16SubsetTTFSize), 64.0f,
+                                  &merge, intro_glyphs.Data);
+    }
     // The Japanese overlays: PT Serif has no kana. Added before it so PT Serif
     // stays the default; the overlays switch to this one with UiFontScope.
     {
@@ -341,6 +427,7 @@ class NocturnerecompApp : public rex::ReXApp {
   // exists by now and the guest has not started, so no D3D call can arrive
   // ahead of the backend. Swap chain creation goes through the UI thread.
   void OnPreLaunchModule() override {
+    // Normally up since OnFinalizePaths; idempotent.
     nocturne::PlumeSetOverlayDrawer(imgui_drawer());
     window()->app_context().CallInUIThreadSynchronous(
         [this] { nocturne::InitNativeRenderer(window()); });

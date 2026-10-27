@@ -48,6 +48,12 @@ void PlumeSetOverlayDrawer(rex::ui::UIDrawer* drawer);
 // host frame rate follows the guest's.
 void PlumePresentFrame();
 
+// Present a frame holding only the overlays, for the start screen shown before
+// the guest runs. Waits for its own GPU work, so it never occupies a frame
+// slot the guest's first frames expect to find free. Must not be called once
+// the guest is presenting.
+void PlumePresentOverlayOnly();
+
 // The size the guest's render target should have: the swap chain's size fitted
 // to the guest's 16:9. Leaves the arguments alone when there is no swap chain
 // to measure, so callers pre-load a fallback.

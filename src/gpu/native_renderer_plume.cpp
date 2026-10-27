@@ -742,6 +742,74 @@ void PlumePresentFrame() {
   }
 }
 
+void PlumePresentOverlayOnly() {
+  if (!g_ready.load(std::memory_order_acquire) || g_recording)
+    return;
+
+  ApplySurfaceChanges();
+  if (!g_backend.swap_chain)
+    return;
+
+  ApplyVsyncIfChanged();
+  if (g_resize_pending.exchange(false, std::memory_order_acq_rel) ||
+      g_backend.swap_chain->needsResize()) {
+    WaitForAllSlots();
+    ApplyResize();
+  }
+  if (g_backend.swap_chain->isEmpty() || g_backend.framebuffers.empty())
+    return;
+
+  if (g_present_wait) {
+    if (g_present_debt > 0)
+      --g_present_debt;
+    else
+      g_backend.swap_chain->wait();
+  }
+
+  FrameSlot& slot = g_slots[g_slot];
+  uint32_t image = 0;
+  if (!g_backend.swap_chain->acquireTexture(slot.acquire_semaphore.get(), &image)) {
+    g_resize_pending.store(true, std::memory_order_release);
+    OwePresentWait();
+    return;
+  }
+  if (image >= g_backend.framebuffers.size()) {
+    OwePresentWait();
+    return;
+  }
+
+  RenderTexture* backbuffer = g_backend.swap_chain->getTexture(image);
+  RenderCommandList* commands = slot.command_list.get();
+  const uint32_t width = g_backend.swap_chain->getWidth();
+  const uint32_t height = g_backend.swap_chain->getHeight();
+  commands->begin();
+  commands->barriers(RenderBarrierStage::GRAPHICS,
+                     RenderTextureBarrier(backbuffer, RenderTextureLayout::COLOR_WRITE));
+  commands->setFramebuffer(g_backend.framebuffers[image].get());
+  commands->setViewports(RenderViewport(0.0f, 0.0f, float(width), float(height)));
+  commands->setScissors(RenderRect(0, 0, int32_t(width), int32_t(height)));
+  commands->clearColor(0, RenderColor(0.0f, 0.0f, 0.0f, 1.0f));
+  if (g_overlay != nullptr) {
+    PlumeUIDrawContext context(width, height, commands, kSwapChainFormat);
+    g_overlay->Draw(context);
+  }
+  commands->barriers(RenderBarrierStage::NONE,
+                     RenderTextureBarrier(backbuffer, RenderTextureLayout::PRESENT));
+  commands->end();
+
+  const RenderCommandList* submit = commands;
+  RenderCommandSemaphore* wait = slot.acquire_semaphore.get();
+  RenderCommandSemaphore* signal = g_backend.release_semaphores[image].get();
+  g_backend.queue->executeCommandLists(&submit, 1, &wait, 1, &signal, 1, slot.fence.get());
+  if (!g_backend.swap_chain->present(image, &signal, 1)) {
+    OwePresentWait();
+    g_resize_pending.store(true, std::memory_order_release);
+  }
+  // Not marked submitted: waiting here keeps this out of the guest's frame
+  // accounting, which would otherwise retire a frame index it never recorded.
+  g_backend.queue->waitForCommandFence(slot.fence.get());
+}
+
 void PlumeNotifyResize(uint32_t pixel_width, uint32_t pixel_height) {
   (void)pixel_width;
   (void)pixel_height;

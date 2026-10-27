@@ -15,6 +15,7 @@
 #include <initializer_list>
 #include <string>
 #include <string_view>
+#include <vector>
 
 namespace rex::system {
 class ModRegistry;
@@ -43,6 +44,15 @@ std::string TrArgs(const char* section, const char* key,
 // The text only if the current language itself (or a mod for it) has it; null
 // otherwise, with no English fallback.
 const char* TrCurrent(const char* section, const char* key);
+
+// The shipped languages' XLanguage ids, in res/lang file order.
+std::vector<uint32_t> ShippedLanguageIds();
+
+// A shipped language's name for itself (its file's `name`), or null.
+const char* LanguageName(uint32_t language_id);
+
+// `key` in that language only (mod text included), with no English fallback.
+const char* TrInLanguage(uint32_t language_id, const char* section, const char* key);
 
 // `key` of the [native] table as UTF-16, for the guest's own screens (the
 // game draws it in the language's font). Null only under TrNativeCurrent when

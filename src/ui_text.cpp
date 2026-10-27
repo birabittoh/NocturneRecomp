@@ -90,6 +90,23 @@ const char* FindIn(uint32_t id, const char* section, const char* key) {
 
 }  // namespace
 
+std::vector<uint32_t> ShippedLanguageIds() {
+  std::vector<uint32_t> ids;
+  for (const Language& language : Languages())
+    ids.push_back(language.id);
+  return ids;
+}
+
+const char* LanguageName(uint32_t language_id) {
+  const Language* language = FindLanguage(language_id);
+  const auto* name = language ? language->tables["name"].as_string() : nullptr;
+  return name ? name->get().c_str() : nullptr;
+}
+
+const char* TrInLanguage(uint32_t language_id, const char* section, const char* key) {
+  return FindIn(language_id, section, key);
+}
+
 uint32_t UiLanguageId() {
   return uint32_t(std::strtoul(rex::cvar::GetFlagByName("user_language").c_str(), nullptr, 10));
 }
