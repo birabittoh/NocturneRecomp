@@ -166,11 +166,6 @@ class NocturnerecompApp : public rex::ReXApp {
     if (std::filesystem::exists(user_settings_path()))
       rex::cvar::LoadConfig(user_settings_path());
 
-    // The guest is always told 1280x720 (its video mode is what the title lays
-    // its UI out for); the host renders at the window's size on top of that, so
-    // a "resolution" saved by an older build must not change the video mode.
-    rex::cvar::SetFlagByName("resolution", "720p", /*persist=*/false);
-
     // Both config files are loaded by now, so the cvar holds the user's value.
     // This used to be an unconditional timeBeginPeriod(1) in OnPreSetup; it has
     // to run after the config load to be configurable at all, and the pacer
@@ -200,7 +195,6 @@ class NocturnerecompApp : public rex::ReXApp {
     nocturne::GameDataOptions options;
     options.config_path = config_path();
     options.start_screen_flag = nocturne::StartScreenFlagPath(user_settings_path());
-    options.user_settings_path = user_settings_path();
     options.game_data_root = defaults.game_data_root;
     nocturne::BindIntroLanguageConfig(user_settings_path());
     if (nocturne::UsePreparedGameData(options))

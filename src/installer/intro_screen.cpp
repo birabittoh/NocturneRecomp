@@ -260,7 +260,6 @@ class IntroDialog final : public rex::ui::ImGuiDialog {
 
   void Update(const GameDataPrompt& prompt) {
     const bool rebuild = prompt.confirm.empty() != prompt_.confirm.empty() ||
-                         prompt.outdated.empty() != prompt_.outdated.empty() ||
                          prompt.adding != prompt_.adding ||
                          prompt.versions.size() != prompt_.versions.size() ||
                          prompt.selected_version != selected_version_ ||
@@ -281,12 +280,6 @@ class IntroDialog final : public rex::ui::ImGuiDialog {
       options_.push_back({IntroText::kCancel, GameDataChoice::kCancel, 0, 0});
       options_.push_back({IntroText::kDeleteFiles, GameDataChoice::kConfirmDelete, 1, 0});
       selected_ = 0;
-      return;
-    }
-    if (!prompt_.outdated.empty()) {
-      options_.push_back({IntroText::kSkip, GameDataChoice::kStart, 0, 0});
-      options_.push_back({IntroText::kExtractAgain, GameDataChoice::kExtractAgain, 1, 0});
-      selected_ = 1;
       return;
     }
     if (Library()) {
@@ -465,8 +458,6 @@ class IntroDialog final : public rex::ui::ImGuiDialog {
         std::string body;
         if (!prompt_.confirm.empty()) {
           body = prompt_.confirm;
-        } else if (!prompt_.outdated.empty()) {
-          body = prompt_.outdated;
         } else if (Library()) {
           body = Tr(IntroText::kLibraryReady);
         } else if (prompt_.can_extract) {
@@ -639,7 +630,7 @@ class IntroDialog final : public rex::ui::ImGuiDialog {
   };
 
   bool Library() const {
-    return prompt_.confirm.empty() && prompt_.outdated.empty() && !prompt_.adding &&
+    return prompt_.confirm.empty() && !prompt_.adding &&
            !prompt_.versions.empty();
   }
 
@@ -871,8 +862,6 @@ class IntroDialog final : public rex::ui::ImGuiDialog {
   }
 
   GameDataChoice BackChoice() const {
-    if (!prompt_.outdated.empty())
-      return GameDataChoice::kStart;
     return !prompt_.confirm.empty() || (!Library() && !prompt_.versions.empty())
                ? GameDataChoice::kCancel
                : GameDataChoice::kQuit;
@@ -1194,7 +1183,7 @@ class IntroDialog final : public rex::ui::ImGuiDialog {
                                                                 : IntroText::kHintBack);
     if (Library() && CanDelete(selected_version_))
       text += std::string("      X  ") + Tr(IntroText::kDeleteVersion);
-    if (!Library() && prompt_.confirm.empty() && prompt_.outdated.empty())
+    if (!Library() && prompt_.confirm.empty())
       text += std::string("\n") + Tr(IntroText::kDialogNeedsMouse);
     CenteredText(draw, font, 17.0f * unit, size.x * 0.5f, size.y - 112.0f * unit,
                  std::min(640.0f * unit, size.x - 32.0f), Color(kText, 0.7f * alpha), text);

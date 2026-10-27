@@ -27,7 +27,6 @@ enum class GameDataChoice {
   kConfirmDelete,
   kCancel,
   kAddVersion,
-  kExtractAgain,
 };
 
 // The library holds this many versions.
@@ -65,9 +64,6 @@ struct GameDataPrompt {
   // Asking whether to delete: the question, shown with Cancel and Delete
   // Files.
   std::string confirm;
-  // Asking whether to extract the selected version again, shown with Skip and
-  // Extract Again.
-  std::string outdated;
 };
 
 struct GameDataOptions {
@@ -76,8 +72,6 @@ struct GameDataOptions {
   std::filesystem::path config_path;
   // The one launch flag file (StartScreenFlagPath).
   std::filesystem::path start_screen_flag;
-  // Where the settings older builds kept are dropped from.
-  std::filesystem::path user_settings_path;
   // The resolved game_data_root, the library root; empty for the default.
   std::filesystem::path game_data_root;
 };

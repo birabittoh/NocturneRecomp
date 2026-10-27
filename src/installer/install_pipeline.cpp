@@ -108,10 +108,6 @@ bool NeedsPatching(const fs::path&) {
   return false;
 }
 
-bool IsOutdated(const fs::path&) {
-  return false;
-}
-
 SourceInfo IdentifySource(const std::string& picked) {
   std::error_code ec;
   const fs::path path = Resolve(picked);

@@ -10,11 +10,6 @@
 
 #include <rex/cvar.h>
 #include <rex/logging.h>
-
-#if REX_PLATFORM_WIN32
-#include <windows.h>
-#endif
-
 #include "install_pipeline.h"
 
 REXCVAR_DEFINE_STRING(game_version, "", "Game",
@@ -36,8 +31,6 @@ constexpr std::array<std::string_view, 2> kOrder = {"xbla-world", "xbla-jp"};
 // IDA databases stay next to the root executable they were made from.
 constexpr std::array<std::string_view, 7> kIdaFiles = {".i64", ".idb", ".id0", ".id1",
                                                        ".id2", ".nam", ".til"};
-
-fs::path g_user_settings_path;
 
 std::string Utf8(const fs::path& path) {
   const std::u8string text = path.u8string();
@@ -71,63 +64,6 @@ std::string TomlString(std::string_view text) {
     out += c;
   }
   return out + "\"";
-}
-
-// Removes `name`'s line from settings.toml and returns the string it held.
-std::string DropSetting(std::string_view name) {
-  if (g_user_settings_path.empty())
-    return {};
-  std::istringstream in(ReadText(g_user_settings_path));
-  std::string kept, value;
-  bool dropped = false;
-  std::string line;
-  while (std::getline(in, line)) {
-    const size_t equals = line.find('=');
-    std::string_view key =
-        std::string_view(line).substr(0, equals == std::string::npos ? 0 : equals);
-    while (!key.empty() && (key.back() == ' ' || key.back() == '\t'))
-      key.remove_suffix(1);
-    if (key != name) {
-      kept += line + '\n';
-      continue;
-    }
-    dropped = true;
-    try {
-      value = toml::parse(line)[name].value_or(std::string());
-    } catch (const toml::parse_error&) {
-    }
-  }
-  if (dropped && !WriteText(g_user_settings_path, kept))
-    REXLOG_WARN("Could not rewrite {}", g_user_settings_path.string());
-  return value;
-}
-
-// Older builds kept game directories outside the library, used in place, in
-// game_version_links, and the one release to start in game_version. Both lines
-// go; the log names the folders, which are left as they are.
-void DropOldSettings() {
-  const std::string links = DropSetting("game_version_links");
-  size_t from = 0;
-  while (from < links.size()) {
-    const size_t bar = std::min(links.find('|', from), links.size());
-    if (bar > from)
-      REXLOG_INFO("No longer listing the linked game files in {}; they are left there",
-                  links.substr(from, bar - from));
-    from = bar + 1;
-  }
-  if (const std::string pick = DropSetting("game_version"); !pick.empty())
-    REXLOG_INFO("Dropped the saved game version {}: every installed release starts", pick);
-  // Only the command line names a directory to start now.
-  const auto* flag = rex::cvar::GetFlagInfo("game_version");
-  if (flag && flag->source == rex::cvar::Source::kConfig)
-    REXCVAR_SET(game_version, "");
-}
-
-bool SamePath(const fs::path& a, const fs::path& b) {
-  std::error_code ec;
-  if (fs::equivalent(a, b, ec))
-    return true;
-  return a.lexically_normal() == b.lexically_normal();
 }
 
 bool IsVersionFolder(const fs::path& dir) {
@@ -192,28 +128,6 @@ std::string MigratingFolder(const fs::path& root) {
   }
 }
 
-// Only the link itself; a recursive delete would go through it.
-bool RemoveLink(const fs::path& link) {
-#if REX_PLATFORM_WIN32
-  if (RemoveDirectoryW(link.c_str()))
-    return true;
-#endif
-  std::error_code ec;
-  return fs::remove(link, ec);
-}
-
-bool IsLinkPath(const fs::path& path) {
-  std::error_code ec;
-  if (fs::is_symlink(path, ec))
-    return true;
-#if REX_PLATFORM_WIN32
-  const DWORD attributes = GetFileAttributesW(path.c_str());
-  return attributes != INVALID_FILE_ATTRIBUTES && (attributes & FILE_ATTRIBUTE_REPARSE_POINT);
-#else
-  return false;
-#endif
-}
-
 void Describe(GameVersion& version, bool write) {
   try {
     const toml::table table = toml::parse_file(Utf8(version.dir / kInfoFile));
@@ -229,7 +143,6 @@ void Describe(GameVersion& version, bool write) {
       WriteVersionInfo(version.dir, info.id, info.release, info.languages);
   }
   version.needs_phases = NeedsConversion(version.dir) || NeedsPatching(version.dir);
-  version.outdated = IsOutdated(version.dir);
 }
 
 size_t OrderOf(const GameVersion& version) {
@@ -239,30 +152,12 @@ size_t OrderOf(const GameVersion& version) {
 
 }  // namespace
 
-void BindLibrarySettings(const fs::path& user_settings_path) {
-  g_user_settings_path = user_settings_path;
-}
-
-void MigrateLibrary(const fs::path& root, const std::vector<fs::path>& candidates) {
+void MigrateLibrary(const fs::path& root) {
   std::error_code ec;
   if (fs::is_regular_file(root / kMigrating, ec)) {
     const std::string folder = MigratingFolder(root);
     if (!folder.empty())
       FinishMove(root, folder);
-  }
-
-  DropOldSettings();
-
-  // Goopie's Select Folder links the root to an extraction. Only the link
-  // goes: the migration below would otherwise move the files it points to.
-  if (IsLinkPath(root)) {
-    const fs::path target = fs::canonical(root, ec);
-    if (!ec && IsGameDirectory(target)) {
-      REXLOG_INFO("No longer using the game files {} links to ({}); they are left there",
-                  root.string(), target.string());
-      if (!RemoveLink(root))
-        REXLOG_ERROR("Could not remove the link {}", root.string());
-    }
   }
   fs::create_directories(root, ec);
 
@@ -273,23 +168,6 @@ void MigrateLibrary(const fs::path& root, const std::vector<fs::path>& candidate
     WriteText(root / kMigrating, "folder = " + TomlString(folder) + "\n");
     if (FinishMove(root, folder) && !info.release.empty())
       WriteVersionInfo(root / folder, info.id, info.release, info.languages);
-  }
-
-  for (const fs::path& candidate : candidates) {
-    if (SamePath(candidate, root) || IsLinkPath(candidate) || !IsGameDirectory(candidate))
-      continue;
-    const SourceInfo info = IdentifySource(candidate.string());
-    const fs::path dest = FreeVersionDir(root, info.id);
-    fs::rename(candidate, dest, ec);
-    if (ec) {
-      // Never copy gigabytes unasked: another drive's files stay where they are.
-      REXLOG_INFO("Could not move {} to {}, leaving it there: {}", candidate.string(),
-                  dest.string(), ec.message());
-      continue;
-    }
-    REXLOG_INFO("Moved the game files in {} to {}", candidate.string(), dest.string());
-    if (!info.release.empty())
-      WriteVersionInfo(dest, info.id, info.release, info.languages);
   }
 }
 

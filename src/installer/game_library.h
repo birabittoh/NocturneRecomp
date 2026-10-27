@@ -27,19 +27,12 @@ struct GameVersion {
   bool temporary = false;
   // Conversion or patching still has work on it.
   bool needs_phases = false;
-  // Unpacked by an older conversion: only unpacking the game again fixes it.
-  bool outdated = false;
 };
 
-// Where MigrateLibrary drops the settings older builds kept.
-void BindLibrarySettings(const std::filesystem::path& user_settings_path);
-
-// Moves single version installs (the root itself, or legacy `candidates`)
-// into version folders, and drops the linked folders and the picked version
-// older builds kept (linked files are left where they are). Finishes a move an earlier launch was killed
-// in. Cheap when there is nothing to do.
-void MigrateLibrary(const std::filesystem::path& root,
-                    const std::vector<std::filesystem::path>& candidates);
+// Moves a single version install in the root itself (assets/default.xex and
+// its tree) into its version folder (assets/xbla-world/...), finishing a move
+// an earlier launch was killed in. Cheap when there is nothing to do.
+void MigrateLibrary(const std::filesystem::path& root);
 
 // The versions in the root, in release order.
 std::vector<GameVersion> ScanLibrary(const std::filesystem::path& root);

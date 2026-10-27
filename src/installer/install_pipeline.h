@@ -2,8 +2,8 @@
 
 // The install as independent phases, each deciding for itself whether the
 // directory needs it. Today there is one, extracting an XBLA package into game
-// files; the hooks for later ones (NeedsConversion, NeedsPatching, IsOutdated)
-// stay so a future step for another release can slot in.
+// files; the hooks for later ones (NeedsConversion, NeedsPatching) stay so a
+// future step for another release can slot in.
 
 #include <filesystem>
 #include <functional>
@@ -34,9 +34,6 @@ bool IsGameDirectory(const std::filesystem::path& dir);
 // Whether the later phases still have work on `dir`.
 bool NeedsConversion(const std::filesystem::path& dir);
 bool NeedsPatching(const std::filesystem::path& dir);
-
-// Whether `dir` was extracted in a way only extracting the game again fixes.
-bool IsOutdated(const std::filesystem::path& dir);
 
 struct SourceInfo {
   // The release, for the player; empty when not known.

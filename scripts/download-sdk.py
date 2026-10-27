@@ -63,16 +63,9 @@ def read_file_trim(path):
 
 
 def read_pinned(path):
-    """Read a two-line .sdk-version file (repo + tag).
-
-    Falls back to treating a single-line file as a bare tag
-    (backward compat with the old format).
-    """
-    text = read_file_trim(path)
-    lines = text.splitlines()
-    if len(lines) >= 2:
-        return lines[0].strip(), lines[1].strip()
-    return DEFAULT_REPO, lines[0].strip()
+    """Read a two-line .sdk-version file (repo + tag)."""
+    repo, tag = read_file_trim(path).splitlines()[:2]
+    return repo.strip(), tag.strip()
 
 
 def write_file(path, content):
