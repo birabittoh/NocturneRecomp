@@ -33,6 +33,7 @@
 
 #include "function_hooks.h"
 #include "jp_artwork.h"
+#include "jp_voices.h"
 #include "language_switch.h"
 #include "player_status.h"
 
@@ -1124,6 +1125,7 @@ extern "C" void GraphicsSettings_PerFrame(PPCContext& ctx, uint8_t* base) {
   nocturne::player::ApplyRequestedLevelUp(ctx, base);
   ApplyPendingLanguageSwitch(ctx, base);
   ApplyPendingArtwork(base);
+  ApplyPendingVoices();
 
   ApplyRequestedPreset(ctx, base);
   ApplyPendingCustomRatioRequest(base);

@@ -4,11 +4,13 @@
 
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <filesystem>
 #include <map>
 #include <memory>
 #include <string>
 #include <utility>
+#include <vector>
 
 #include <rex/cvar.h>
 #include <rex/filesystem/devices/host_path_device.h>
@@ -23,8 +25,7 @@
 #include "target.h"
 
 REXCVAR_DEFINE_BOOL(english_voices, false, "Game",
-                    "Play World's English voices even when the JP release is installed")
-    .lifecycle(rex::cvar::Lifecycle::kRequiresRestart);
+                    "Play World's English voices even when the JP release is installed");
 
 namespace nocturne {
 namespace {
@@ -69,6 +70,18 @@ struct Sizes {
 };
 
 bool g_active = false;
+// Every table entry the two releases disagree on: guest address, World's
+// byte count, JP's.
+struct TableValue {
+  uint32_t address;
+  uint32_t world;
+  uint32_t jp;
+};
+std::vector<TableValue> g_table;
+rex::filesystem::VirtualFileSystem* g_vfs = nullptr;
+std::string g_world_sound_path;
+bool g_linked = false;
+std::atomic<bool> g_dirty{false};
 std::array<uint32_t, kKinds> g_wave_buffer{};  // sizes to allocate
 std::array<uint32_t, kKinds> g_sound_buffer{};  // guest addresses of ours
 
@@ -116,12 +129,12 @@ std::map<std::string, Sizes> BankSizes(const fs::path& dir) {
   return banks;
 }
 
-// Gives both tables JP's byte counts. A stage row is matched to its bank by
+// Records JP's byte counts for both tables (applied by UseVoices). A stage row is matched to its bank by
 // World's sizes rather than by the name it gives: some rows name sd_rou but
 // carry sd_tou's sizes, and JP's table has JP's sd_tou sizes there too.
-// Records the biggest bank of each kind, for the buffers. False, with nothing
-// written, when the image isn't the one these addresses were read from.
-bool PatchTables(const fs::path& world_sound, const fs::path& jp_sound) {
+// Records the biggest bank of each kind, for the buffers. False when the
+// image isn't the one these addresses were read from.
+bool BuildTables(const fs::path& world_sound, const fs::path& jp_sound) {
   if (Load(kStageTable) != kStageRow0.first || Load(kStageTable + 4) != kStageRow0.second ||
       LoadString(Load(kResidentTable)) != "game:\\data\\sound\\sd_alk.xsb") {
     REXLOG_WARN("jp voices: the bank tables are not where they should be");
@@ -139,11 +152,14 @@ bool PatchTables(const fs::path& world_sound, const fs::path& jp_sound) {
   for (uint32_t row = 0; row < kStageRows; ++row) {
     const uint32_t entry = kStageTable + row * kStageRowSize;
     const auto bank = by_world_sizes.find({Load(entry), Load(entry + 4)});
+    // World's banks are read into the same buffers when they play.
+    if (bank != by_world_sizes.end())
+      sound_size[kStageKind] = std::max(sound_size[kStageKind], Load(entry));
     const auto jp_bank = bank == by_world_sizes.end() ? jp.end() : jp.find(bank->second);
     if (jp_bank == jp.end() || !jp_bank->second.xsb || !jp_bank->second.xwb)
       continue;
-    Store(entry, jp_bank->second.xsb);
-    Store(entry + 4, jp_bank->second.xwb);
+    g_table.push_back({entry, Load(entry), jp_bank->second.xsb});
+    g_table.push_back({entry + 4, Load(entry + 4), jp_bank->second.xwb});
     sound_size[kStageKind] = std::max(sound_size[kStageKind], jp_bank->second.xsb);
     wave_size[kStageKind] = std::max(wave_size[kStageKind], jp_bank->second.xwb);
   }
@@ -156,10 +172,13 @@ bool PatchTables(const fs::path& world_sound, const fs::path& jp_sound) {
     const std::string path = LoadString(Load(entry));
     const uint32_t size = FileSize(jp_sound / path.substr(path.rfind('\\') + 1));
     const uint32_t kind = LoadByte(Load(entry + 8));
-    if (!size || kind >= kKinds)
+    if (kind >= kKinds)
       continue;
-    Store(entry + 12, size);
     auto& biggest = type == kLoadSoundBank ? sound_size[kind] : wave_size[kind];
+    biggest = std::max(biggest, Load(entry + 12));
+    if (!size)
+      continue;
+    g_table.push_back({entry + 12, Load(entry + 12), size});
     biggest = std::max(biggest, size);
   }
 
@@ -174,6 +193,25 @@ bool PatchTables(const fs::path& world_sound, const fs::path& jp_sound) {
   return true;
 }
 
+// Puts one release's byte counts in the tables and links DATA\sound to JP's
+// folder or not. Banks already loaded keep playing; each takes the choice
+// from its next load (a stage's on entering it, a character's or familiar's
+// when it is next loaded).
+void UseVoices(bool jp) {
+  for (const auto& value : g_table)
+    Store(value.address, jp ? value.jp : value.world);
+  if (jp && !g_linked) {
+    // Shadow the directory, not each file: see font_overlay.h.
+    g_linked = g_vfs->RegisterSymbolicLink(g_world_sound_path, kMount);
+    if (!g_linked)
+      REXLOG_WARN("jp voices: could not link {}", g_world_sound_path);
+  } else if (!jp && g_linked) {
+    g_vfs->UnregisterSymbolicLink(g_world_sound_path);
+    g_linked = false;
+  }
+  REXLOG_INFO("jp voices: playing {} voices", g_linked ? "JP's" : "World's");
+}
+
 }  // namespace
 
 bool JpVoicesAvailable() {
@@ -183,10 +221,6 @@ bool JpVoicesAvailable() {
 void InstallJpVoices(rex::Runtime* runtime) {
   if (!JpVoicesAvailable() || !runtime || !runtime->file_system())
     return;
-  if (REXCVAR_GET(english_voices)) {
-    REXLOG_INFO("jp voices: English voices forced, playing World's");
-    return;
-  }
 
   const fs::path& jp = JpDir();
   std::error_code ec;
@@ -203,9 +237,8 @@ void InstallJpVoices(rex::Runtime* runtime) {
     REXLOG_WARN("jp voices: no {} to replace", kGuestSoundPath);
     return;
   }
-  const std::string world_sound_path = world_entry->absolute_path();
 
-  if (!PatchTables(world_sound, jp_sound))
+  if (!BuildTables(world_sound, jp_sound))
     return;
 
   auto device = std::make_unique<rex::filesystem::HostPathDevice>(kMount, jp_sound, true);
@@ -213,16 +246,22 @@ void InstallJpVoices(rex::Runtime* runtime) {
     REXLOG_WARN("jp voices: could not mount {}", jp_sound.string());
     return;
   }
-  // Shadow the directory, not each file: see font_overlay.h.
-  if (!vfs->RegisterSymbolicLink(world_sound_path, kMount)) {
-    REXLOG_WARN("jp voices: could not link {}", world_sound_path);
-    vfs->UnregisterDevice(kMount);
-    return;
-  }
+  g_vfs = vfs;
+  g_world_sound_path = world_entry->absolute_path();
+  // The buffers are sized for JP's banks whichever plays, so the choice can
+  // change at any time.
   g_active = true;
-  REXLOG_INFO("jp voices: DATA\\sound now reads {} (wave buffers {:X} {:X} {:X} {:X})",
-              jp_sound.string(), g_wave_buffer[0], g_wave_buffer[1], g_wave_buffer[2],
-              g_wave_buffer[3]);
+  REXLOG_INFO("jp voices: {} available (wave buffers {:X} {:X} {:X} {:X})", jp_sound.string(),
+              g_wave_buffer[0], g_wave_buffer[1], g_wave_buffer[2], g_wave_buffer[3]);
+  UseVoices(!REXCVAR_GET(english_voices));
+  rex::cvar::RegisterChangeCallback("english_voices",
+                                    [](std::string_view, std::string_view) { g_dirty.store(true); });
+}
+
+void ApplyPendingVoices() {
+  if (!g_active || !g_dirty.exchange(false))
+    return;
+  UseVoices(!REXCVAR_GET(english_voices));
 }
 
 }  // namespace nocturne
