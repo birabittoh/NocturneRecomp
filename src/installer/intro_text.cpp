@@ -9,6 +9,7 @@
 #include <rex/cvar.h>
 
 #include "lang.generated.h"
+#include "settings.h"
 
 namespace nocturne {
 namespace {
@@ -158,6 +159,8 @@ void SetIntroLanguage(int index) {
 
 void BindIntroLanguageConfig(const std::filesystem::path& user_settings_path) {
   g_user_settings_path = user_settings_path;
+  // Applies live, so setting it below must not count as a pending restart.
+  MarkCvarLive("user_language");
   // No language chosen yet: start in the system's, text included.
   if (rex::cvar::GetFlagSource("user_language") != rex::cvar::Source::kDefault)
     return;
