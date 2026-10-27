@@ -39,6 +39,7 @@
 #include "achievements_screen.h"
 #include "fast_forward.h"
 #include "font_overlay.h"
+#include "jp_voices.h"
 #include "fonts.generated.h"
 #include "game_data.h"
 #include "graphics_settings.h"
@@ -311,6 +312,9 @@ class NocturnerecompApp : public rex::ReXApp {
     // memory (see font_overlay.h); their file is never modified. Runs before
     // the guest starts, so it is in place by the title's first font load.
     nocturne::InstallJapaneseFontOverlay(runtime());
+
+    // With World mounted, play JP's voice banks instead (see jp_voices.h).
+    nocturne::InstallJpVoices(runtime());
 
     // The constructor is what registers the Android back button bind.
     host_menu_ = std::make_unique<nocturne::HostMenu>(window());
