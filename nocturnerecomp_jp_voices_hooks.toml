@@ -1,0 +1,32 @@
+# JP's voice banks on World's code, included by nocturnerecomp_manifest.toml.
+#
+# World reads each bank with its own byte counts into buffers sized for its
+# own banks; JP's are mostly bigger. These hooks size the buffers for JP's
+# when jp_voices is active, and do nothing otherwise. See src/jp_voices.h.
+
+# sub_824FBE98: the four wave bank buffers, one sub_825D9098(size, ...) each.
+[[midasm_hook]]
+address = 0x824FBED0
+name = "JpVoicesWaveBuffer"
+registers = ["r3"]
+
+[[midasm_hook]]
+address = 0x824FBEF4
+name = "JpVoicesWaveBuffer"
+registers = ["r3"]
+
+[[midasm_hook]]
+address = 0x824FBF10
+name = "JpVoicesWaveBuffer"
+registers = ["r3"]
+
+[[midasm_hook]]
+address = 0x824FBF30
+name = "JpVoicesWaveBuffer"
+registers = ["r3"]
+
+# hd_read_trans (sub_82252A30), after its "load" log and before it reads the
+# descriptor: sound banks go into buffers big enough for JP's.
+[[midasm_hook]]
+address = 0x82252FDC
+name = "JpVoicesSoundBuffer"

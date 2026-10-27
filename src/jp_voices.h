@@ -8,6 +8,14 @@
 // on the parent directory). JP's banks are XACT version 42; xact_compat.cpp
 // converts them as they are loaded.
 //
+// Swapping the files is not enough on its own: World's code reads each bank
+// with a byte count from its own tables, into buffers sized for World's
+// banks, and most of JP's are bigger, so lines at the end of a bank went
+// missing. JP's own code is the same apart from those numbers. So the tables
+// get JP's file sizes, the four wave bank buffers are allocated at JP's
+// sizes, and sound banks are read into buffers of our own (see the hooks in
+// nocturnerecomp_jp_voices_hooks.toml).
+//
 // Nothing happens when JP is not installed, or when JP is the mounted folder
 // already (its voices are then the only ones there are).
 #pragma once
@@ -18,8 +26,8 @@ class Runtime;
 
 namespace nocturne {
 
-// Before the guest starts: the banks are opened at boot, so the setting
-// takes effect on the next launch.
+// After the image is mapped and before the guest starts: the banks are
+// opened at boot, so the setting takes effect on the next launch.
 void InstallJpVoices(rex::Runtime* runtime);
 
 }  // namespace nocturne
