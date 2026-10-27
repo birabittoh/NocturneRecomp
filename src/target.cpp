@@ -66,6 +66,11 @@ std::vector<std::string> GameTargets() {
   std::vector<std::string> targets{"xbla"};
   if (!TargetReleaseId().empty())
     targets.push_back(TargetReleaseId());
+  // JP's files can be in use with World mounted (voices, artwork, Japanese
+  // text, movies). Those switch live but mods are picked once at boot, so
+  // JP being installed is what counts.
+  if (JpOverlaysAvailable() && TargetReleaseId() != "xbla-jp")
+    targets.push_back("xbla-jp");
   return targets;
 }
 

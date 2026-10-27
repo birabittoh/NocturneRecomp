@@ -335,25 +335,34 @@ warning instead.
 
 ## Game versions
 
-The start screen installs each release into its own library folder, and a
-mod built against one release's addresses or files may not fit another. Say
+The start screen installs each release into its own library folder. The
+code that runs is always World's (the image is built into the executable),
+but the game's files come from whichever releases are installed: World's are
+mounted as `game:` when World is installed, otherwise JP's are, and with both
+installed JP's voices, artwork, Japanese text and movies are layered over
+World's. A mod built against one release's files may not fit another. Say
 which ones a mod is for in `mod.toml`:
 
 ```toml
 target = "xbla-world"         # or a list: target = ["xbla-world", "xbla-jp"]
 ```
 
-| value | runs on |
+| value | runs when |
 |---|---|
-| `any`, or no `target` | every release |
-| `xbla` | every Xbox Live Arcade release |
-| `xbla-world`, `xbla-jp` | that release only |
+| `any`, or no `target` | always |
+| `xbla` | any Xbox Live Arcade release is installed |
+| `xbla-world` | World's files are mounted (World is installed) |
+| `xbla-jp` | JP is installed, mounted or layered over World |
 
-The ids are the version folder names under `assets/`. On any other release
-the mod stays enabled in `mods.toml` but is left out of the run entirely,
-and the Mods page says why. Only `xbla-world` is playable today, so a mod
-with no `target` effectively runs on World; set `target = "xbla-world"` for
-anything that hooks guest addresses, so it stays off once JP runs.
+The ids are the version folder names in the game library. A mod listing
+several runs when any of them matches. When none does, the mod stays enabled
+in `mods.toml` but is left out of the run entirely, and the Mods page says
+why. Mods are picked at boot, so a JP setting switched in game (English
+voices, World artwork) does not take an `xbla-jp` mod out of the run.
+
+A mod that only hooks guest addresses fits every install, since the code is
+always World's: it needs no `target`. Set one when the mod replaces or reads
+a release's files.
 
 ## Library mods and the shared registry
 

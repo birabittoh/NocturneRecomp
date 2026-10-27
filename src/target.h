@@ -33,9 +33,10 @@ const std::string& TargetRelease();
 // That directory's library id ("xbla-world", "xbla-jp"), or empty when unknown.
 const std::string& TargetReleaseId();
 
-// What a mod.toml `target` may name to match this run: the platform ("xbla")
-// and the release id. RuntimeConfig::game_targets, so the SDK leaves
-// out mods made for another version. Empty before DetectTarget.
+// What a mod.toml `target` may name to match this run: the platform ("xbla"),
+// the mounted release id, and "xbla-jp" when JP is installed beside it.
+// RuntimeConfig::game_targets, so the SDK leaves out mods made for a release
+// whose files are not here. Empty before DetectTarget.
 std::vector<std::string> GameTargets();
 
 // For readers of mods.toml that run without the runtime's filtered list.
