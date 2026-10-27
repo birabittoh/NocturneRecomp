@@ -7,15 +7,16 @@ namespace nocturne {
 namespace {
 
 // The World default.xex is the file the guest image is built from. The JP
-// package is different code (18 MB against 15 MB), so it extracts but cannot
-// run yet. Both ship all six languages' strings_*.bin.
+// package is different code (18 MB against 15 MB), so it runs on World's
+// linked-in image with its own data (src/xact_compat.cpp reads its sound
+// banks). Both ship all six languages' strings_*.bin.
 constexpr std::array kReleases = {
     Release{"xbla-world", "Castlevania: Symphony of the Night (Xbox Live Arcade, World)",
             "default.xex", "26a58b074c5dd6185b77a8111a0012866d11cba674b4b0810d79dbf07ad68aa6",
             true, kTextAll, true},
     Release{"xbla-jp", "Dracula X: Nocturne in the Moonlight (Xbox Live Arcade, Japan)",
             "default.xex", "a524d039ee167c89bfd710033ac6fb43bbc874ae4dec1473c51d08f7974ea61b",
-            true, kTextAll, false},
+            true, kTextAll, true},
 };
 
 constexpr std::array<uint32_t, 64> kRound = {

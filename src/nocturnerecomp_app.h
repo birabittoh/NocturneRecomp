@@ -118,12 +118,9 @@ class NocturnerecompApp : public rex::ReXApp {
   }
 
 #ifdef NOCTURNE_EMBED_GUEST_IMAGE
-  // The linked-in image is World's; another release still loads its own.
+  // The linked-in image is World's; JP runs on it too, with its own data.
   void OnLoadXexImage(std::string& xex_image) override {
-    const std::string& release = nocturne::TargetReleaseId();
-    if (release.empty() || release == "xbla-world") {
-      xex_image = nocturne::MountGuestImage(runtime()->file_system());
-    }
+    xex_image = nocturne::MountGuestImage(runtime()->file_system());
   }
 #endif
 
