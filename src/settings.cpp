@@ -35,6 +35,9 @@
 #if REX_HAS_VULKAN
 #include <rex/ui/vulkan/provider.h>
 #endif
+#if defined(__ANDROID__)
+#include "android_gpu_driver.h"
+#endif
 
 namespace nocturne {
 
@@ -1029,7 +1032,11 @@ bool CallInWindowThread(std::function<void()> work) {
 
 void PrewarmSettingsDialogCaches() {
 #if REX_HAS_VULKAN
-  g_vulkan_devices = rex::ui::vulkan::EnumerateDevices();
+#if defined(__ANDROID__)
+  // Would load the stock driver next to the custom one adrenotools brings in.
+  if (!CustomVulkanDriverSelected())
+#endif
+    g_vulkan_devices = rex::ui::vulkan::EnumerateDevices();
 #endif
 }
 
