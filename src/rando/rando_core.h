@@ -30,7 +30,8 @@ std::string TakeSpoilers();
 void SeedGeneratorRng(uint32_t seed);
 
 // Runs the core functions behind `enhancements` against the buffer set by
-// SetMemoryXex. Caller holds the core.
-void WriteEnhancements(const Enhancements& enhancements);
+// SetMemoryXex, for a seed of `location_set` (see Result; empty for
+// vanilla). Caller holds the core.
+void WriteEnhancements(const Enhancements& enhancements, const std::string& location_set);
 
 }  // namespace nocturne::rando::detail

@@ -78,6 +78,9 @@ bool IsGlitchOrNoLogic(const Options& o) {
 // XB_Randomize applies these whatever the options.
 SeedUse Always(const Options&) { return SeedUse::kIncluded; }
 
+// Seeds never apply these: their options are left to the enhancements.
+SeedUse Never(const Options&) { return SeedUse::kNone; }
+
 // Every preset but Bingo (XB_PresetWrites).
 SeedUse UnlessBingo(const Options& o) { return IncludedIf(!PresetIs(o, "Bingo")); }
 
@@ -91,13 +94,13 @@ const std::vector<EnhancementInfo>& EnhancementList() {
   // Label and description are res/lang's [enhancements] <cvar> and <cvar>_desc.
   static const std::vector<EnhancementInfo> list = {
       {Enhancement::kFastWarps, "enh_fast_warps",
-       [](const Options& o) { return IncludedIf(o.fast_warps); }, "section_quality_of_life"},
+       &Never, "section_quality_of_life"},
       {Enhancement::kAntiFreeze, "enh_anti_freeze",
-       [](const Options& o) { return IncludedIf(o.anti_freeze); }},
+       &Never},
       {Enhancement::kRemoveClockStatue, "enh_remove_clock_statue",
-       [](const Options& o) { return IncludedIf(o.clock_statue); }},
+       &Never},
       {Enhancement::kBoostDropRates, "enh_boost_drop_rates",
-       [](const Options& o) { return IncludedIf(o.drops && o.drop_rates); }},
+       &Never},
       {Enhancement::kDeathOnVacation, "enh_death_on_vacation",
        [](const Options& o) { return IncludedIf(IsBountyHunter(o)); }},
       {Enhancement::kSkipMariaAlchemy, "enh_skip_maria_alchemy", &Always},
@@ -126,7 +129,7 @@ const std::vector<EnhancementInfo>& EnhancementList() {
       {Enhancement::kCheapDuplicator, "enh_cheap_duplicator",
        [](const Options& o) { return IncludedIf(o.shop); }},
       {Enhancement::kMapTracker, "enh_map_tracker",
-       [](const Options& o) { return IncludedIf(o.map_tracker); }, "section_other"},
+       &Never, "section_other"},
       {Enhancement::kClearFile, "enh_clear_file", &Always},
   };
   return list;

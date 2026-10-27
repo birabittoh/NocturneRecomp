@@ -67,8 +67,7 @@ void OwnedLabel(std::string_view name, bool owned) {
 
 class RandoMenuDialog : public rex::ui::ImGuiDialog {
  public:
-  RandoMenuDialog(rex::ui::ImGuiDrawer* drawer, std::filesystem::path user_root)
-      : ImGuiDialog(drawer), user_root_(std::move(user_root)) {
+  explicit RandoMenuDialog(rex::ui::ImGuiDrawer* drawer) : ImGuiDialog(drawer) {
     LoadOptions();
     SetSeedIfEmpty();
     rex::ui::RegisterBind(
@@ -80,8 +79,14 @@ class RandoMenuDialog : public rex::ui::ImGuiDialog {
 
  protected:
   void OnDraw(ImGuiIO&) override {
+    // Runs started from the main menu finish while the overlay is closed.
+    GetRandoMenu().Poll();
     if (!visible_) {
       return;
+    }
+    // The main menu's Randomizer pages changed them.
+    if (GetRandoMenu().options_revision() != revision_) {
+      LoadOptions();
     }
     const UiFontScope font;
     ImGui::SetNextWindowSize(ImVec2(560, 640), ImGuiCond_FirstUseEver);
@@ -149,12 +154,9 @@ class RandoMenuDialog : public rex::ui::ImGuiDialog {
       changed |= ImGui::Checkbox(Tr("randomizer", "shop"), &o.shop);
       changed |= ImGui::Checkbox(Tr("randomizer", "candles"), &o.candles);
     }
+    // Fast warps, anti-freeze and the like are enhancements (settings.cpp),
+    // which apply over any seed and can change while a game runs.
     changed |= ImGui::Checkbox(Tr("randomizer", "force_no_complexity"), &o.force_no_complexity);
-    changed |= ImGui::Checkbox(Tr("randomizer", "map_tracker"), &o.map_tracker);
-    changed |= ImGui::Checkbox(Tr("randomizer", "clock_statue"), &o.clock_statue);
-    changed |= ImGui::Checkbox(Tr("randomizer", "drop_rates"), &o.drop_rates);
-    changed |= ImGui::Checkbox(Tr("randomizer", "fast_warps"), &o.fast_warps);
-    changed |= ImGui::Checkbox(Tr("randomizer", "anti_freeze"), &o.anti_freeze);
 
     ImGui::EndDisabled();
     if (changed) {
@@ -202,9 +204,8 @@ class RandoMenuDialog : public rex::ui::ImGuiDialog {
       ImGui::BeginDisabled(running || runtime.request_pending || !runtime.supported);
       if (ImGui::Button(Tr("randomizer", "randomize"))) {
         CopySeedToOptions();
-        SaveOptions();
-        gen.Start(GetRandoRuntime().base(), user_root_ / "spoilers.txt", options_);
-        applied_ = false;
+        GetRandoMenu().Randomize(options_);
+        revision_ = GetRandoMenu().options_revision();
       }
       ImGui::EndDisabled();
     }
@@ -219,13 +220,6 @@ class RandoMenuDialog : public rex::ui::ImGuiDialog {
       return;
     }
     switch (gen.status()) {
-      case rando::Status::kDone:
-        if (!applied_) {
-          // Applied by the guest thread between frames; see rando_runtime.h.
-          GetRandoRuntime().RequestApply(gen.result());
-          applied_ = true;
-        }
-        break;
       case rando::Status::kFailed:
         ImGui::TextWrapped("%s", Tr("randomizer", "failed"));
         break;
@@ -381,20 +375,22 @@ class RandoMenuDialog : public rex::ui::ImGuiDialog {
 
   void CopySeedToOptions() { options_.seed = seed_buf_; }
 
-  std::filesystem::path OptionsPath() const { return user_root_ / "randomizer.txt"; }
-
+  // The overlay edits a copy of the shared options, for ImGui to point at.
   void LoadOptions() {
-    rando::LoadOptionsFile(OptionsPath(), &options_);
+    revision_ = GetRandoMenu().options_revision();
+    options_ = GetRandoMenu().options();
     std::snprintf(seed_buf_, sizeof(seed_buf_), "%s", options_.seed.c_str());
   }
 
-  void SaveOptions() { rando::SaveOptionsFile(OptionsPath(), options_); }
+  void SaveOptions() {
+    GetRandoMenu().SetOptions(options_);
+    revision_ = GetRandoMenu().options_revision();
+  }
 
-  std::filesystem::path user_root_;
   rando::Options options_;
+  uint32_t revision_ = 0;
   char seed_buf_[256] = {};
   bool visible_ = false;
-  bool applied_ = false;
   bool reveal_spoilers_ = false;  // tracker; off every session
 };
 
@@ -402,8 +398,69 @@ RandoMenu::RandoMenu() = default;
 RandoMenu::~RandoMenu() = default;
 
 void RandoMenu::Attach(rex::ui::ImGuiDrawer* drawer, const std::filesystem::path& user_data_root) {
-  if (drawer && !dialog_) {
-    dialog_ = std::make_unique<RandoMenuDialog>(drawer, user_data_root);
+  if (!drawer || dialog_) {
+    return;
+  }
+  {
+    std::lock_guard lock(mutex_);
+    user_root_ = user_data_root;
+    rando::LoadOptionsFile(user_root_ / "randomizer.txt", &options_);
+  }
+  ++revision_;
+  dialog_ = std::make_unique<RandoMenuDialog>(drawer);
+}
+
+rando::Options RandoMenu::options() const {
+  std::lock_guard lock(mutex_);
+  return options_;
+}
+
+void RandoMenu::SetOptions(const rando::Options& options) {
+  {
+    std::lock_guard lock(mutex_);
+    options_ = options;
+    if (!user_root_.empty()) {
+      rando::SaveOptionsFile(user_root_ / "randomizer.txt", options_);
+    }
+  }
+  ++revision_;
+}
+
+bool RandoMenu::Randomize(const rando::Options& options) {
+  SetOptions(options);
+  auto& gen = rando::Generator::Get();
+  const auto runtime = GetRandoRuntime().state();
+  if (gen.status() == rando::Status::kRunning || runtime.request_pending || !runtime.supported ||
+      (runtime.active && runtime.active->options == options)) {
+    return false;
+  }
+  std::filesystem::path spoilers;
+  {
+    std::lock_guard lock(mutex_);
+    spoilers = user_root_ / "spoilers.txt";
+  }
+  if (!gen.Start(GetRandoRuntime().base(), spoilers, options)) {
+    return false;
+  }
+  apply_pending_ = true;
+  return true;
+}
+
+void RandoMenu::Poll() {
+  if (!apply_pending_.load()) {
+    return;
+  }
+  switch (rando::Generator::Get().status()) {
+    case rando::Status::kDone:
+      // Applied by the guest thread between frames; see rando_runtime.h.
+      GetRandoRuntime().RequestApply(rando::Generator::Get().result());
+      apply_pending_ = false;
+      break;
+    case rando::Status::kRunning:
+      break;
+    default:  // failed or aborted
+      apply_pending_ = false;
+      break;
   }
 }
 

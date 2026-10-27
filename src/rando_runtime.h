@@ -32,7 +32,7 @@
 // (user_root/rando_slots/<slot>.txt). Loading a save applies that world on
 // the guest thread just before the game unpacks the save, whatever seed is
 // chosen for New Game; back at the title screen the New Game seed returns.
-// Saves with no record (made before this existed) load as vanilla.
+// A save with no record (an imported one) loads as vanilla.
 //
 // The enhancements (src/enhancements.h) are written over whichever world is
 // in memory, vanilla or seed, so what guest memory holds is always one

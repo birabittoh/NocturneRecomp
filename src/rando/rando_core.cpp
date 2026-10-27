@@ -196,7 +196,7 @@ void RandoSrand(unsigned seed) { g_rand_state = seed; }
 
 namespace nocturne::rando::detail {
 
-void WriteEnhancements(const Enhancements& e) {
+void WriteEnhancements(const Enhancements& e, const std::string& location_set) {
   fXEX = fopen(kMemoryXexPath, "r+b");
   if (!fXEX) {
     return;
@@ -227,19 +227,27 @@ void WriteEnhancements(const Enhancements& e) {
   if (e.Has(Enhancement::kReverseLibraryCard)) XB_ApplyReverseLibraryCardPatch();
   if (e.Has(Enhancement::kClearFile)) XB_PatchClearFile();
   if (e.Has(Enhancement::kMapTracker)) {
-    // XB_ApplyMapTrackerPatch for the "Guarded" location set (relics only),
-    // which is what the vanilla castle has; inline so as not to log to the
-    // Generator.
+    // XB_ApplyMapTrackerPatch for the seed's location set, inline so as not
+    // to log to the Generator. Equipment marks every check; Spread cuts the
+    // list after its own; anything else (Guarded, and the vanilla castle)
+    // marks the relics only.
     fseek(fXEX, MapTracker_CodeBlock_Ofs, SEEK_SET);
     fwrite(&MapTracker_CodeBlock[0], sizeof(MapTracker_CodeBlock), 1, fXEX);
     fseek(fXEX, 0x24035C + 0x4000, SEEK_SET);
     XB_Write_u32_be(XB_CalcBranch(0x24035C, 0x87FE70));
     fseek(fXEX, MapTracker_LocData_Ofs, SEEK_SET);
     fwrite(&MapTracker_LocData[0], sizeof(MapTracker_LocData), 1, fXEX);
-    fseek(fXEX, MapTracker_LocData_Ofs + MapTracker_Castle1Terminate_Ofs, SEEK_SET);
-    XB_Write_u16_be(0);
-    fseek(fXEX, MapTracker_LocData_Ofs + MapTracker_Castle2Terminate_Ofs, SEEK_SET);
-    XB_Write_u16_be(0);
+    if (location_set == "Spread") {
+      fseek(fXEX, MapTracker_LocData_Ofs + MapTracker_Castle1Terminate_Ofs, SEEK_SET);
+      XB_Write_u16_be(0);
+      fseek(fXEX, MapTracker_LocData_Ofs + MapTracker_Castle2TerminateSpread_Ofs, SEEK_SET);
+      XB_Write_u16_be(0);
+    } else if (location_set != "Equipment") {
+      fseek(fXEX, MapTracker_LocData_Ofs + MapTracker_Castle1Terminate_Ofs, SEEK_SET);
+      XB_Write_u16_be(0);
+      fseek(fXEX, MapTracker_LocData_Ofs + MapTracker_Castle2Terminate_Ofs, SEEK_SET);
+      XB_Write_u16_be(0);
+    }
   }
   // From XB_PresetWrites, XB_RandomizeShopItems and XB_ApplyBountyHunterPatches.
   if (e.Has(Enhancement::kClockRoomDoor)) {

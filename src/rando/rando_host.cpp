@@ -24,6 +24,7 @@
 #include "xb_rando.h"
 
 extern int XB_GeneratedSeedComplexity;  // defined in xb_rando.cpp, not in its header
+extern char XB_LocationSet[64];         // likewise
 
 // What xb_rando.cpp expects main.cpp to define.
 char sSeedName[256] = "";
@@ -182,13 +183,8 @@ void ForEachFlag(O& o, F&& f) {
   f("starting_gear", o.starting_gear);
   f("equipment", o.equipment);
   f("drops", o.drops);
-  f("drop_rates", o.drop_rates);
   f("shop", o.shop);
-  f("clock_statue", o.clock_statue);
-  f("fast_warps", o.fast_warps);
-  f("anti_freeze", o.anti_freeze);
   f("candles", o.candles);
-  f("map_tracker", o.map_tracker);
   f("force_no_complexity", o.force_no_complexity);
 }
 
@@ -370,14 +366,11 @@ std::shared_ptr<const Result> Generate(const BaseXex& base, const Options& o,
   XB_UseRandomStartingGear = o.starting_gear;
   XB_RandomizeEquipment = o.equipment;
   XB_RandomizeDrops = o.drops;
-  XB_BoostDropRates = o.drop_rates;
   XB_RandomizeShop = o.shop;
-  XB_ClockStatue = o.clock_statue;
-  XB_FastWarps = o.fast_warps;
-  XB_AntiFreeze = o.anti_freeze;
   XB_CandleRando = o.candles;
-  XB_EnableMapTracker = o.map_tracker;
   XB_ForceNoComplexity = o.force_no_complexity;
+  // Enhancements, written over the world by ComposeWorld instead.
+  XB_BoostDropRates = XB_ClockStatue = XB_FastWarps = XB_AntiFreeze = XB_EnableMapTracker = 0;
   XB_ChosenComplexity = std::clamp(o.complexity, 1, 8);
   std::strncpy(XB_PresetName, preset.name, sizeof(XB_PresetName) - 1);
   XB_PresetName[sizeof(XB_PresetName) - 1] = 0;
@@ -419,10 +412,12 @@ std::shared_ptr<const Result> Generate(const BaseXex& base, const Options& o,
   result->patches = DiffBase(base, patched, writes);
   result->spoilers = std::move(spoilers);
   result->complexity = XB_GeneratedSeedComplexity;
+  result->location_set = XB_LocationSet;
   return result;
 }
 
 std::shared_ptr<const PatchSet> ComposeWorld(const BaseXex& base, const PatchSet* seed,
+                                             const std::string& location_set,
                                              const Enhancements& enhancements,
                                              std::string* error) {
   std::vector<uint8_t> patched = base.file;
@@ -436,7 +431,7 @@ std::shared_ptr<const PatchSet> ComposeWorld(const BaseXex& base, const PatchSet
   if (!enhancements.Empty()) {
     std::lock_guard core_lock(g_core_mutex);
     detail::SetMemoryXex(&patched, base.mapped_end, &writes);
-    detail::WriteEnhancements(enhancements);
+    detail::WriteEnhancements(enhancements, location_set);
     const bool out_of_range = detail::MemoryXexOutOfRange();
     detail::SetMemoryXex(nullptr, 0);
     if (out_of_range) {

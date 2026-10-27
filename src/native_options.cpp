@@ -200,6 +200,9 @@ constexpr uint32_t kWatchdogPostLr = 0x825AB030u;
 // Front-end page index of the "Change Screen Size" screen, and where the
 // manager keeps the current one.
 constexpr uint32_t kResolutionPage = 17;
+// The main menu, and the Help & Options screen it opens.
+constexpr uint32_t kMainMenuPage = 1;
+constexpr uint32_t kMainHelpOptionsPage = 4;
 constexpr uint32_t kCurrentPageOffset = 4;
 
 // The settings screen's widget builder. Used only as an address *range* to
@@ -696,7 +699,17 @@ uint32_t VisibleRowCount() { return VisibleRowCount(Page()); }
 // How many rows the list is built with: enough for whichever page shows the
 // most. A page with fewer binds fewer, and the list hides the rest.
 uint32_t ListCapacity() {
-  return std::max(VisibleRowCount(kSettingsPage), VisibleRowCount(EnhancementsOptionsPage()));
+  return std::max({VisibleRowCount(kSettingsPage), VisibleRowCount(EnhancementsOptionsPage()),
+                   VisibleRowCount(RandomizerOptionsPage())});
+}
+
+// The page after or before `current` in its group (the shoulder buttons), or
+// null when it has none.
+const OptionsPage* NeighbourPage(const OptionsPage& current, int direction) {
+  if (const OptionsPage* page = NeighbourEnhancementsPage(current, direction)) {
+    return page;
+  }
+  return NeighbourRandomizerPage(current, direction);
 }
 
 bool IsEnumRow(const OptionRow& row) { return row.value_count > 0; }
@@ -810,6 +823,11 @@ uint32_t g_value_scratch = 0;
 // CScreenAchievement (page 15, see achievements_screen.cpp) does exactly what
 // the stretch screen's does. EnterPregameScreen is how that file arms this.
 uint32_t g_pregame_screen_page = 0;
+
+// Set while the settings screen's own handler runs on a randomizer page, for
+// NativeOptions_PostEvent to send its way out (back to Help & Options, with
+// no save loaded) to the main menu instead. Guest thread only.
+bool g_leaving_for_main_menu = false;
 
 // Needed to resolve the app object's virtual "signed in" through its vtable at
 // runtime (see RefreshSettingsTitle): there is no static address to hardcode.
@@ -1502,6 +1520,10 @@ extern "C" void NativeOptions_SettingsBuild(PPCContext& ctx, uint8_t* base) {
 // posting, so having swallowed its post once it stays disarmed -- this fires
 // exactly once per visit, not every frame.
 extern "C" void NativeOptions_PostEvent(PPCContext& ctx, uint8_t* base) {
+  if (ctx.r3.u32 == kEventClassPageSwitch && g_leaving_for_main_menu &&
+      ctx.r5.u32 == kMainHelpOptionsPage) {
+    ctx.r5.u32 = kMainMenuPage;
+  }
   if (ctx.r3.u32 == kEventClassPageSwitch && g_pregame_screen_page != 0) {
     const uint32_t manager = Read32BE(base, kUiManagerPtrAddr);
     const uint32_t current_page = manager ? Read32BE(base, manager + kCurrentPageOffset) : 0;
@@ -1656,7 +1678,7 @@ extern "C" void NativeOptions_SettingsEvent(PPCContext& ctx, uint8_t* base) {
     if (message_class == kMsgClassButton && g_entries &&
         (button == kButtonPreviousPage || button == kButtonNextPage)) {
       if (const OptionsPage* neighbour =
-              NeighbourEnhancementsPage(Page(), button == kButtonNextPage ? 1 : -1)) {
+              NeighbourPage(Page(), button == kButtonNextPage ? 1 : -1)) {
         SwitchPage(ctx, base, *neighbour);
         ctx.r3.u32 = 1;
         return;
@@ -1691,6 +1713,9 @@ extern "C" void NativeOptions_SettingsEvent(PPCContext& ctx, uint8_t* base) {
           if (IsRowActive(row) && row.commit) {
             row.commit(row, g_values[i]);
           }
+        }
+        if (Page().accept) {
+          Page().accept();
         }
 
         // Auto-restart on accept, but only from the main-menu entry point,
@@ -1744,9 +1769,13 @@ extern "C" void NativeOptions_SettingsEvent(PPCContext& ctx, uint8_t* base) {
     }
   }
 
+  // The randomizer pages were opened from the main menu, so they leave for it
+  // where the screen goes back to Help & Options. See NativeOptions_PostEvent.
+  g_leaving_for_main_menu = IsRandomizerPage(Page());
   if (g_original_settings_event_fn) {
     g_original_settings_event_fn(ctx, base);
   }
+  g_leaving_for_main_menu = false;
 
   if (restore_selected_row) {
     Write32BE(base, g_list + kListSelectedRow, kSubmenuRow);
@@ -1782,7 +1811,18 @@ extern "C" void NativeOptions_SettingsEvent(PPCContext& ctx, uint8_t* base) {
 void EnterPregameScreen(uint32_t page) { g_pregame_screen_page = page; }
 
 void SelectSettingsPage(SettingsPage page) {
-  g_page = page == SettingsPage::kEnhancements ? &EnhancementsOptionsPage() : &kSettingsPage;
+  switch (page) {
+    case SettingsPage::kSettings:
+      g_page = &kSettingsPage;
+      break;
+    case SettingsPage::kEnhancements:
+      g_page = &EnhancementsOptionsPage();
+      break;
+    case SettingsPage::kRandomizer:
+      BeginRandomizerEdit();
+      g_page = &RandomizerOptionsPage();
+      break;
+  }
 }
 
 namespace {

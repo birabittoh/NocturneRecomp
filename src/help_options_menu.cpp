@@ -5,6 +5,7 @@
 #include <rex/ppc/context.h>
 
 #include "function_hooks.h"
+#include "main_menu.h"
 #include "native_options.h"
 #include "native_options_page.h"
 #include "native_ui.h"
@@ -101,13 +102,15 @@ uint32_t ReadWord(const uint8_t* base, uint32_t address) { return Read32BE(base,
 // --- Hooks ----------------------------------------------------------------------
 
 // One more item on the main menu's list. The setup is shared by every menu
-// list, so only the Help & Options builder's own call is touched.
+// list, so only the Help & Options builder's own call is touched, and the
+// main menu's (main_menu.cpp), which gets one more too.
 extern "C" void HelpOptions_MenuListSetup(PPCContext& ctx, uint8_t* base) {
   const auto lr = static_cast<uint32_t>(ctx.lr);
   if (lr > kMainBuildFnAddr && lr <= kMainBuildFnAddr + kMainBuildFnSize &&
       ctx.r6.u32 == kMainStockItemCount) {
     ctx.r6.u32 = kMainStockItemCount + 1;
   }
+  AdjustMainMenuListSetup(ctx);
   fnhook::CallOriginal(kMenuListSetupFnAddr, ctx, base);
 }
 

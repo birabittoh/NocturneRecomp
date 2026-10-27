@@ -231,10 +231,7 @@ void RandoRuntime::OnSaveLoading() {
   std::string message;
   std::error_code ec;
   std::lock_guard apply_lock(apply_mutex_);
-  if (slot.empty() || !std::filesystem::exists(path, ec)) {
-    message = "This save has no seed recorded (it predates per-save seeds); playing the vanilla "
-              "game.";
-  } else if (!IsVanillaFile(path)) {
+  if (!slot.empty() && std::filesystem::exists(path, ec) && !IsVanillaFile(path)) {
     std::string error;
     seed = LoadSeedFile(path, &error);
     if (!seed) {
@@ -398,7 +395,8 @@ bool RandoRuntime::Apply(std::shared_ptr<const rando::Result> seed, std::string*
   if (written.Empty()) {
     patches = std::shared_ptr<const rando::PatchSet>(seed, &seed->patches);
   } else {
-    patches = rando::ComposeWorld(*base_, seed ? &seed->patches : nullptr, written, error);
+    patches = rando::ComposeWorld(*base_, seed ? &seed->patches : nullptr,
+                                  seed ? seed->location_set : std::string(), written, error);
     if (!patches) {
       return false;
     }

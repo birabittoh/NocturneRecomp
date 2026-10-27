@@ -34,14 +34,12 @@ struct Options {
   bool starting_gear = true;
   bool equipment = true;
   bool drops = true;
-  bool drop_rates = false;
   bool shop = true;
-  bool clock_statue = false;
-  bool fast_warps = false;
-  bool anti_freeze = false;
   bool candles = true;
-  bool map_tracker = false;
   bool force_no_complexity = false;
+  // The upstream options that are also enhancements (fast warps, anti-freeze,
+  // clock statue, boosted drop rates, map tracker) are not here: they apply
+  // over any world from the enhancements, and can change while a game runs.
 
   bool operator==(const Options&) const = default;
 };
@@ -123,6 +121,9 @@ struct Result {
   PatchSet patches;
   std::string spoilers;
   int complexity = 0;
+  // Where the preset can put items (the core's XB_LocationSet: "Guarded",
+  // "Spread" or "Equipment"), which is what the map tracker marks.
+  std::string location_set;
 };
 
 // Generates a seed on the calling thread, blocking while another run holds
@@ -188,10 +189,12 @@ inline constexpr int kWingSmashColorCount = 8;
 
 // The world to put in guest memory: `seed` (null: vanilla) with
 // `enhancements` written over it, as one PatchSet against the base image.
-// Shares the core with Generate. The caller leaves out enhancements the seed
-// already has or that clash with it (see EffectiveEnhancements in
-// src/enhancements.h).
+// `location_set` is the seed's Result::location_set (empty for vanilla), for
+// the map tracker. Shares the core with Generate. The caller leaves out
+// enhancements the seed already has or that clash with it (see
+// EffectiveEnhancements in src/enhancements.h).
 std::shared_ptr<const PatchSet> ComposeWorld(const BaseXex& base, const PatchSet* seed,
+                                             const std::string& location_set,
                                              const Enhancements& enhancements,
                                              std::string* error);
 

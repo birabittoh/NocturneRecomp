@@ -33,10 +33,13 @@ namespace nocturne {
 // when no save is loaded; the suppression disarms itself on the way back out.
 void EnterPregameScreen(uint32_t page);
 
-// The pages Help & Options can open the settings screen on.
+// The pages Help & Options, and the main menu's Randomizer entry
+// (main_menu.cpp), can open the settings screen on.
 enum class SettingsPage {
   kSettings,
   kEnhancements,
+  // Leaves for the main menu rather than Help & Options.
+  kRandomizer,
 };
 
 // Picks the page the settings screen shows the next time it opens. Guest

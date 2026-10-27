@@ -119,6 +119,9 @@ struct OptionsPage {
   // address of its glyph's image name. A null key shows none.
   NativeText prompt_text;
   uint32_t prompt_glyph = 0;
+
+  // Runs on A once every row of the page has been committed.
+  void (*accept)() = nullptr;
 };
 
 // Every row on a unique, in-range line; label-only rows only on stock lines of
@@ -186,5 +189,13 @@ const OptionsPage& EnhancementsOptionsPage();  // the first
 const OptionsPage* NeighbourEnhancementsPage(const OptionsPage& current, int direction);
 // "ENHANCEMENTS", for the Help & Options entries.
 const char16_t* EnhancementsMenuText();
+
+// The randomizer pages (native_randomizer.cpp), the same way. Their rows edit
+// a copy of the randomizer's options, which BeginRandomizerEdit takes afresh;
+// A then randomizes with it (see the pages' `accept`).
+const OptionsPage& RandomizerOptionsPage();  // the first
+const OptionsPage* NeighbourRandomizerPage(const OptionsPage& current, int direction);
+bool IsRandomizerPage(const OptionsPage& page);
+void BeginRandomizerEdit();
 
 }  // namespace nocturne

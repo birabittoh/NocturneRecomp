@@ -231,6 +231,39 @@ name = "HelpOptions_PauseEventHook"
 registers = ["r3"]
 return_on_true = true
 
+# Main menu -> Randomizer (src/main_menu.cpp): the main menu's builder,
+# Activate, event handler and update, and the menu-list layout it uses. Its
+# list setup goes through HelpOptions_MenuListSetupHook above.
+[[midasm_hook]]
+address = 0x825C5400
+name = "MainMenu_BuildHook"
+registers = ["r3"]
+return_on_true = true
+
+[[midasm_hook]]
+address = 0x825C5880
+name = "MainMenu_ActivateHook"
+registers = ["r3"]
+return_on_true = true
+
+[[midasm_hook]]
+address = 0x825C4FA8
+name = "MainMenu_EventHook"
+registers = ["r3"]
+return_on_true = true
+
+[[midasm_hook]]
+address = 0x825C5A08
+name = "MainMenu_UpdateHook"
+registers = ["r3"]
+return_on_true = true
+
+[[midasm_hook]]
+address = 0x825CAA30
+name = "MainMenu_ListLayoutHook"
+registers = ["r3"]
+return_on_true = true
+
 # Live language switch (src/language_switch.cpp): the option-list item text
 # setters, (list, index, string_id[, x, y]), recorded so a switch can replay
 # them and have the list re-measure and re-centre each item itself.
