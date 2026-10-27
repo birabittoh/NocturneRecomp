@@ -5,7 +5,10 @@
 #include <string>
 #include <unordered_map>
 
+#include <rex/platform.h>
+#if REX_PLATFORM_WIN32 || REX_PLATFORM_GNU_LINUX
 #include <rex/discord_rpc.h>
+#endif
 #include <rex/memory/utils.h>
 #include <rex/runtime.h>
 #include <rex/system/kernel_state.h>
@@ -152,6 +155,8 @@ std::string RoomCodeToName(const std::string& code) {
 void RoomPresence::Bind(rex::system::KernelState* kernel_state, rex::Runtime* runtime) {
   kernel_state_ = kernel_state;
 
+  // The SDK only builds its Discord client on Windows and Linux.
+#if REX_PLATFORM_WIN32 || REX_PLATFORM_GNU_LINUX
   rex::discord_rpc::Presence initial;
   initial.details_ = "Exploring Dracula's Castle";
   initial.large_image_key_ = "icon";
@@ -159,9 +164,13 @@ void RoomPresence::Bind(rex::system::KernelState* kernel_state, rex::Runtime* ru
   rex::discord_rpc::Start(kDiscordClientId, initial);
 
   runtime->mod_registry()->RegisterTick([this] { Tick(); });
+#else
+  (void)runtime;
+#endif
 }
 
 void RoomPresence::Tick() {
+#if REX_PLATFORM_WIN32 || REX_PLATFORM_GNU_LINUX
   if (!kernel_state_ || !kernel_state_->memory()) {
     return;
   }
@@ -262,6 +271,7 @@ void RoomPresence::Tick() {
     std::snprintf(state, sizeof(state), "HP %u/%u - Lv %u", hp_current, hp_max, level);
   }
   rex::discord_rpc::SetState(state);
+#endif
 }
 
 RoomPresence& GetRoomPresence() {

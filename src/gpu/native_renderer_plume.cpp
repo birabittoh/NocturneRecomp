@@ -19,6 +19,17 @@
 
 #include <plume_render_interface.h>
 
+#if defined(__ANDROID__)
+#include "android_gpu_driver.h"
+#endif
+
+#if defined(__APPLE__)
+#include <dlfcn.h>
+#include <filesystem>
+
+#include <rex/filesystem.h>
+#endif
+
 #include "native_renderer_plume_internal.h"
 
 namespace plume {
@@ -26,6 +37,7 @@ namespace plume {
 extern std::unique_ptr<RenderInterface> CreateD3D12Interface();
 #endif
 extern std::unique_ptr<RenderInterface> CreateVulkanInterface();
+extern void SetVulkanGetInstanceProcAddr(void* getInstanceProcAddr);
 }  // namespace plume
 
 namespace nocturne {
@@ -35,7 +47,15 @@ using namespace plume;
 
 // B8G8R8A8 rather than R8G8B8A8 because every Windows swap chain supports it
 // natively; the other costs a conversion on present.
+//
+// On Android it is the other way round: Adreno's surfaces do not list
+// B8G8R8A8_UNORM at all, and Plume reacts by silently creating the swap chain
+// with VK_FORMAT_UNDEFINED, which presents a black screen.
+#if defined(__ANDROID__)
+constexpr RenderFormat kSwapChainFormat = RenderFormat::R8G8B8A8_UNORM;
+#else
 constexpr RenderFormat kSwapChainFormat = RenderFormat::B8G8R8A8_UNORM;
+#endif
 
 // Three, not two. With two there is exactly one spare buffer, so a frame cannot
 // start until the previous one's flip has retired its buffer, which under vsync
@@ -46,6 +66,94 @@ constexpr uint32_t kSwapChainBuffers = 3;
 // value Plume hands to SetMaximumFrameLatency on D3D12, where 0 is not a legal
 // argument.
 constexpr uint32_t kMaxFrameLatency = 2;
+
+#if defined(__APPLE__)
+// Point Vulkan at the loader and MoltenVK shipped in the package, so the game
+// runs without a Vulkan SDK or Homebrew installed.
+//
+// The loader is dlopen'd by absolute path because volk dlopens it by leaf name,
+// which only searches the DYLD_ variables, and dyld captures those at launch so
+// setenv cannot extend them. Preloading works because a leaf dlopen matches an
+// already loaded image. The driver manifest is read at instance creation, so
+// VK_DRIVER_FILES is in time. Without it vkCreateInstance returns
+// VK_ERROR_INCOMPATIBLE_DRIVER.
+//
+// Both halves defer to an environment that already says otherwise. Probes the
+// flat layout then the .app one, matching the SDK's own vulkan_moltenvk.cpp.
+void BootstrapAppleVulkanRuntime() {
+  namespace fs = std::filesystem;
+
+  const fs::path exe_dir = rex::filesystem::GetExecutableFolder();
+  if (exe_dir.empty())
+    return;
+  // Contents/MacOS -> Contents, for the bundle layouts below. Empty when the
+  // executable is not inside a bundle, in which case those probes are skipped.
+  const fs::path bundle = exe_dir.filename() == "MacOS" ? exe_dir.parent_path() : fs::path();
+
+  auto first_existing = [](const std::vector<fs::path>& candidates) -> fs::path {
+    for (const fs::path& candidate : candidates) {
+      std::error_code ec;
+      if (!candidate.empty() && fs::exists(candidate, ec))
+        return candidate;
+    }
+    return {};
+  };
+
+  // vulkan/lib first: that is the layout the SDK's CMake stages, so it is the
+  // loader the SDK was built against rather than whatever else is lying around.
+  std::vector<fs::path> loaders = {
+      exe_dir / "vulkan" / "lib" / "libvulkan.1.dylib", exe_dir / "libvulkan.1.dylib",
+      exe_dir / "libvulkan.dylib", exe_dir / "lib" / "libvulkan.1.dylib",
+      exe_dir / "vulkan" / "lib" / "libMoltenVK.dylib", exe_dir / "libMoltenVK.dylib"};
+  if (!bundle.empty()) {
+    loaders.push_back(bundle / "Frameworks" / "libvulkan.1.dylib");
+    loaders.push_back(bundle / "Frameworks" / "libvulkan.dylib");
+    loaders.push_back(bundle / "Frameworks" / "libMoltenVK.dylib");
+  }
+
+  const fs::path loader = first_existing(loaders);
+  if (!loader.empty()) {
+    // RTLD_GLOBAL, not RTLD_LOCAL: volk's later dlopen has to be able to match
+    // this image. Never dlclose'd; it is needed for the life of the process.
+    if (dlopen(loader.string().c_str(), RTLD_NOW | RTLD_GLOBAL) != nullptr) {
+      REXLOG_DEBUG("native_renderer: preloaded the bundled Vulkan loader from {}", loader.string());
+    } else {
+      REXLOG_WARN("native_renderer: could not load the bundled Vulkan loader at {}: {}",
+                  loader.string(), dlerror());
+    }
+  } else {
+    REXLOG_DEBUG(
+        "native_renderer: no Vulkan loader shipped with this build, falling back to whatever is "
+        "installed on the system");
+  }
+
+  const char* existing = std::getenv("VK_DRIVER_FILES");
+  const char* existing_legacy = std::getenv("VK_ICD_FILENAMES");
+  if ((existing && existing[0]) || (existing_legacy && existing_legacy[0]))
+    return;
+
+  std::vector<fs::path> icds = {
+      exe_dir / "vulkan" / "share" / "vulkan" / "icd.d" / "MoltenVK_icd.json",
+      exe_dir / "share" / "vulkan" / "icd.d" / "MoltenVK_icd.json",
+      exe_dir / "vulkan" / "icd.d" / "MoltenVK_icd.json"};
+  if (!bundle.empty()) {
+    icds.push_back(bundle / "Resources" / "vulkan" / "icd.d" / "MoltenVK_icd.json");
+  }
+
+  const fs::path icd = first_existing(icds);
+  if (icd.empty()) {
+    REXLOG_DEBUG(
+        "native_renderer: no MoltenVK driver manifest shipped with this build; if Vulkan instance "
+        "creation fails with ErrorIncompatibleDriver, that is why");
+    return;
+  }
+  // Both names: VK_DRIVER_FILES is the current one, VK_ICD_FILENAMES the
+  // deprecated spelling older loaders still read.
+  setenv("VK_DRIVER_FILES", icd.string().c_str(), 1);
+  setenv("VK_ICD_FILENAMES", icd.string().c_str(), 1);
+  REXLOG_DEBUG("native_renderer: using the bundled MoltenVK driver manifest at {}", icd.string());
+}
+#endif  // __APPLE__
 
 struct PlumeBackend {
   // Not named `interface`: windows.h defines that as a macro, and Plume drags
@@ -88,6 +196,12 @@ std::atomic<bool> g_ready{false};
 // happen where every other swap chain call happens rather than where the event
 // arrives.
 std::atomic<bool> g_resize_pending{false};
+
+// The window surface going away and coming back (Android backgrounding). Same
+// deferral as the resize: recorded on the UI thread, applied by the next
+// present. `g_pending_surface` holds the new ANativeWindow to rebuild on.
+std::atomic<bool> g_surface_lost{false};
+std::atomic<void*> g_pending_surface{nullptr};
 
 // Same shape as the resize: the `vsync` cvar can change from the settings
 // overlay at any time, but the swap chain is only safe to touch from the
@@ -252,6 +366,50 @@ void ApplyResize() {
   GrowReleaseSemaphores();
 }
 
+// Drops the swap chain and everything indexed by its images. Presenting is
+// skipped until a new surface arrives; the guest's work is still submitted.
+void ReleaseSwapChain() {
+  if (!g_backend.swap_chain)
+    return;
+  WaitForAllSlots();
+  g_backend.framebuffers.clear();
+  g_backend.swap_chain.reset();
+}
+
+bool RebuildSwapChain(void* window_handle) {
+  ReleaseSwapChain();
+  if (window_handle == nullptr)
+    return false;
+
+  g_backend.swap_chain = g_backend.queue->createSwapChain(
+      RenderSwapChainDesc(static_cast<RenderWindow>(window_handle), kSwapChainFormat,
+                          kSwapChainBuffers, g_present_wait, kMaxFrameLatency));
+  if (!g_backend.swap_chain) {
+    REXLOG_ERROR("native_renderer: could not rebuild the swap chain on the new window surface");
+    return false;
+  }
+  // Same order as init: vsync before the first resize, since on Vulkan the
+  // present mode is what the resize bakes in.
+  const bool vsync = g_vsync_wanted.load(std::memory_order_acquire);
+  g_backend.swap_chain->setVsyncEnabled(vsync);
+  g_vsync_applied.store(vsync, std::memory_order_relaxed);
+  g_backend.swap_chain->resize();
+  CreateFramebuffers();
+  GrowReleaseSemaphores();
+  REXLOG_DEBUG("native_renderer: swap chain rebuilt on the new window surface, {}x{}",
+               g_backend.swap_chain->getWidth(), g_backend.swap_chain->getHeight());
+  return true;
+}
+
+// Applies a pending surface loss or replacement. Called first thing in every
+// present, since either can leave the swap chain absent.
+void ApplySurfaceChanges() {
+  if (g_surface_lost.exchange(false, std::memory_order_acq_rel))
+    ReleaseSwapChain();
+  if (void* surface = g_pending_surface.exchange(nullptr, std::memory_order_acq_rel))
+    RebuildSwapChain(surface);
+}
+
 }  // namespace
 
 RenderDevice* PlumeDevice() {
@@ -287,14 +445,29 @@ uint64_t PlumeFrameSerial() { return g_frame_serial; }
 
 void PlumeSetOverlayDrawer(rex::ui::UIDrawer* drawer) { g_overlay = drawer; }
 
-bool InitPlumeBackend(void* window_handle) {
+bool InitPlumeBackend(void* window_handle, void* window_view) {
   if (g_ready.load(std::memory_order_acquire))
     return true;
   if (window_handle == nullptr) {
     REXLOG_ERROR("native_renderer: no native window handle, cannot bring up Plume");
     return false;
   }
+#if defined(__APPLE__)
+  // Plume only asserts the layer is non-null, which a release build drops.
+  if (window_view == nullptr) {
+    REXLOG_ERROR("native_renderer: no CAMetalLayer for the game window, cannot bring up Plume");
+    return false;
+  }
+  const RenderWindow render_window{window_handle, window_view};
+  // Before anything touches volk.
+  BootstrapAppleVulkanRuntime();
+#else
+  (void)window_view;
   const RenderWindow render_window = static_cast<RenderWindow>(window_handle);
+#endif
+#if defined(__ANDROID__)
+  SetVulkanGetInstanceProcAddr(LoadSelectedVulkanDriver());
+#endif
 
   // D3D12 on Windows unless gpu_backend asks for Vulkan, Vulkan elsewhere.
   // Plume's Vulkan backend goes through volk and loads the loader at runtime,
@@ -419,18 +592,37 @@ void PlumeGuestExtent(uint32_t* width, uint32_t* height) {
 
 bool PlumeBackendReady() { return g_ready.load(std::memory_order_acquire); }
 
-void PlumePresentFrame() {
-  if (!g_ready.load(std::memory_order_acquire) || !g_backend.swap_chain)
+void PlumeSurfaceLost() {
+  if (!g_ready.load(std::memory_order_acquire))
     return;
+  g_pending_surface.store(nullptr, std::memory_order_release);
+  g_surface_lost.store(true, std::memory_order_release);
+}
+
+void PlumeSurfaceRestored(void* window_handle) {
+  if (!g_ready.load(std::memory_order_acquire) || window_handle == nullptr)
+    return;
+  g_pending_surface.store(window_handle, std::memory_order_release);
+}
+
+void PlumePresentFrame() {
+  if (!g_ready.load(std::memory_order_acquire))
+    return;
+
+  // Before anything that touches the swap chain, since these can leave it
+  // absent (backgrounded on Android); the frame is then submitted unpresented.
+  ApplySurfaceChanges();
+  const bool have_swap_chain = g_backend.swap_chain != nullptr;
 
   // Before the resize check, because on Vulkan a present mode change is exactly
   // what needsResize() reports.
-  ApplyVsyncIfChanged();
+  if (have_swap_chain)
+    ApplyVsyncIfChanged();
 
   // Both the queued resize and the swap chain's own "I need one" answer, since
   // a minimise or a DPI change can invalidate it without an event we hooked.
-  if (g_resize_pending.exchange(false, std::memory_order_acq_rel) ||
-      g_backend.swap_chain->needsResize()) {
+  if (have_swap_chain && (g_resize_pending.exchange(false, std::memory_order_acq_rel) ||
+                          g_backend.swap_chain->needsResize())) {
     // A resize replaces the swap chain's textures, and a frame still in flight
     // is rendering into one of them.
     WaitForAllSlots();
@@ -444,7 +636,8 @@ void PlumePresentFrame() {
   RenderCommandList* commands = PlumeFrameCommands();
 
   // A minimised window has a zero sized swap chain and nothing to present to.
-  bool presenting = !g_backend.swap_chain->isEmpty() && !g_backend.framebuffers.empty();
+  bool presenting =
+      have_swap_chain && !g_backend.swap_chain->isEmpty() && !g_backend.framebuffers.empty();
 
   // Bounds how far ahead of the display the frame loop may run. `Present(0, 0)`
   // does not block, so without this the queue would fill to the buffer count and
@@ -530,8 +723,16 @@ void PlumePresentFrame() {
   WaitForSlot(g_slots[g_slot]);
   GuestFrameRetired(g_slot);
 
+#if defined(__ANDROID__)
+  // A few seconds of real frames, so a driver that dies compiling the first
+  // pipelines still gets the picker on the next launch.
+  if (presenting && g_frames_presented == 300)
+    MarkRendererStarted();
+#endif
+
   ++g_frames_presented;
-  SettleWindowSize();
+  if (have_swap_chain)
+    SettleWindowSize();
   if (g_frames_presented % 600 == 0) {
     REXLOG_DEBUG(
         "native_renderer: Plume presented {} frames ({} acquire failures, {} present failures, "

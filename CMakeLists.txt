@@ -301,6 +301,9 @@ set(NOCTURNERECOMP_SOURCES
     ${CMAKE_SOURCE_DIR}/ext/KryptonRecomp/guest_shader_pack.cpp
     ${NOCTURNE_GUEST_SHADER_PACK_ASM}
 )
+if(ANDROID)
+    list(APPEND NOCTURNERECOMP_SOURCES src/platform/android_gpu_driver.cpp)
+endif()
 
 if(WIN32)
     add_executable(nocturnerecomp WIN32 ${NOCTURNERECOMP_SOURCES} ${NOCTURNE_ICON_RC})
@@ -344,7 +347,7 @@ if(ANDROID)
     target_link_libraries(nocturnerecomp PRIVATE adrenotools)
     add_dependencies(nocturnerecomp main_hook file_redirect_hook gsl_alloc_hook hook_impl)
 endif()
-target_include_directories(nocturnerecomp PRIVATE src/gpu ext/KryptonRecomp)
+target_include_directories(nocturnerecomp PRIVATE src/gpu src/platform ext/KryptonRecomp)
 
 # MottZilla's SOTN_XB_RANDO core (see src/rando/rando_core.cpp). It is a Win32
 # program's source: off Windows, src/rando/compat supplies the two headers

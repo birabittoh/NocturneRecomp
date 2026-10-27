@@ -12,7 +12,10 @@
 #include <imgui.h>
 
 #include <rex/cvar.h>
+#include <rex/platform.h>
+#if REX_PLATFORM_WIN32 || REX_PLATFORM_GNU_LINUX
 #include <rex/discord_rpc.h>
+#endif
 #include <rex/input/input_system.h>
 #include <rex/rex_app.h>
 #include <rex/runtime.h>
@@ -354,7 +357,9 @@ class NocturnerecompApp : public rex::ReXApp {
     // Tear the host renderer down before the window goes away.
     nocturne::ShutdownPlumeBackend();
 
+#if REX_PLATFORM_WIN32 || REX_PLATFORM_GNU_LINUX
     rex::discord_rpc::Stop();
+#endif
     nocturne::ReleaseHostTimerResolution();
   }
 

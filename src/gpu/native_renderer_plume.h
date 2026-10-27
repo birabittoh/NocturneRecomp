@@ -22,10 +22,20 @@ class UIDrawer;
 namespace nocturne {
 
 // Bring up a Plume device and a swap chain on `window_handle` (an HWND on
-// Windows, an SDL_Window* on Linux). Safe to call once; returns false and logs
-// if the backend could not be created, in which case every other entry point
-// here is a no-op and the game runs headless.
-bool InitPlumeBackend(void* window_handle);
+// Windows, an SDL_Window* on Linux, an ANativeWindow* on Android, an NSWindow*
+// on Apple). Safe to call once; returns false and logs if the backend could not
+// be created, in which case every other entry point here is a no-op and the
+// game runs headless.
+//
+// `window_view` is only read on Apple, where Plume's RenderWindow is a
+// {NSWindow*, CAMetalLayer*} pair and the layer becomes the Vulkan surface.
+bool InitPlumeBackend(void* window_handle, void* window_view = nullptr);
+
+// Android hands out a new ANativeWindow every time the app returns to the
+// foreground and releases the old one on the way out. Both only record the
+// request; the next present drops or rebuilds the swap chain, like a resize.
+void PlumeSurfaceLost();
+void PlumeSurfaceRestored(void* window_handle);
 
 // True once InitPlumeBackend has succeeded.
 bool PlumeBackendReady();
