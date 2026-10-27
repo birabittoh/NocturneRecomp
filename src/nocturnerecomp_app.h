@@ -58,7 +58,6 @@
 #include "native_renderer.h"
 #include "native_renderer_overlay.h"
 #include "native_renderer_plume.h"
-#include "player_inspector.h"
 #include "player_status.h"
 #include "rando_menu.h"
 #include "rando_runtime.h"
@@ -279,10 +278,9 @@ class NocturnerecompApp : public rex::ReXApp {
     // in, updated once per guest frame. See src/room_presence.h/.cpp.
     nocturne::GetRoomPresence().Bind(ks, runtime());
 
-    // Typed player-status API (relics, items, equipment) and its debug inspector
-    // (I). See src/player_status.h.
+    // Typed player-status API (relics, items, equipment), also exported to mods
+    // as a C ABI (src/api/nocturne_player_api.h). See src/player_status.h.
     nocturne::player::GetPlayerStatus().Bind(runtime());
-    nocturne::GetPlayerInspector().Bind(runtime());
 
     // Formerly the fast_forward mod; moved in-app (see fast_forward.h) since
     // it's a base feature, not optional content.
@@ -390,7 +388,6 @@ class NocturnerecompApp : public rex::ReXApp {
     nocturne::Achievements().AttachWatcher(drawer);
     nocturne::GetAccentColor().AttachWatcher(drawer);
     nocturne::GetFastForward().AttachWatcher(drawer);
-    nocturne::GetPlayerInspector().Attach(drawer);
     nocturne::GetRandoMenu().Attach(drawer, user_data_root());
   }
 

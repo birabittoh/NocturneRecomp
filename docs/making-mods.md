@@ -205,6 +205,11 @@ running at process exit; use `OnShutdown()` instead.
   event names `event_pong` and `blackboard` already subscribe to, it
   demonstrates that `Subscribe` supports fan-out to multiple listeners
   rather than last-one-wins.
+- **`src/item_inspector/`** (F7): consumes the game's exported C ABI
+  (`rexmod/nocturne_player_api.h`) rather than registry addresses: it
+  resolves the entry points out of the host executable, reads and edits
+  relics, items and equipment, and logs the `player.*` events. See
+  [Library mods and the shared registry](#library-mods-and-the-shared-registry).
 - **`src/xex_patch_potion/`** and **`src/xex_patch_red_rust/`**:
   two independent, no-UI mods that each patch a different item
   name/description baked into the guest image's static data directly in
@@ -413,17 +418,43 @@ per guest frame on GPU swap, useful for anything that needs to react every
 frame rather than just at startup or launch. Ticks run on the
 command-processor thread, not the render/UI thread.
 
-**Player status (relics, items, stats)**: the base game registers
-`"player.status"` (the live `g_Status` struct) and publishes
-`player.save_loaded`, `player.save_unloaded`, `player.relic_changed` (u64 =
-relic index, bytes = old/new flags) and `player.item_changed` (u64 = item id,
-bytes = old/new count) from a per-frame tick. `rexmod/player_status.h` has the
-layout constants, relic/item enums and name tables, and a read-only
-`rexmod::player::View` over the struct (`View::Find(registry, memory)`). Its
-`Loaded()` also checks `"app.state"`, the app's current / game / front-end
-state pointers, because the struct keeps its values after Quit to Title. The layout and its confidence notes live
-in the base game's `src/player_status.cpp`; the header mirrors it. The base game's
-inventory inspector (I) shows all of this live.
+**Player status (relics, items, stats)**: the base game exports a C ABI for
+the live `g_Status` struct, declared in `src/api/nocturne_player_api.h`. A mod
+doesn't link against the game: it copies the header (NocturneRecomp-Mods keeps
+it at `rexmod/nocturne_player_api.h`) and resolves the entry points out of the
+host executable at runtime, null-checking each one so it still loads on an
+older host:
+
+```cpp
+#include <rexmod/nocturne_player_api.h>
+
+void* HostSymbol(const char* name) {
+#if defined(_WIN32)
+  return reinterpret_cast<void*>(GetProcAddress(GetModuleHandleA(nullptr), name));
+#else
+  return dlsym(RTLD_DEFAULT, name);
+#endif
+}
+
+auto get = reinterpret_cast<NocturneGetPlayerStatusFn>(HostSymbol("NocturneGetPlayerStatus"));
+NocturnePlayerStatus status;
+if (get && get(&status) == NOCTURNE_PLAYER_OK) {
+  // status.relics, status.hand_count, status.equipped, status.stats, ...
+}
+```
+
+It covers reading the whole struct (stats and the ROOMS counter included),
+single relics and item counts, the relic/item names and categories, raw
+writes to relic flags, item counts and every stat, a real level up through
+the game's own routine, and the game-clear flag that gates Richter mode. The game also publishes `player.save_loaded`, `player.save_unloaded`,
+`player.relic_changed` (u64 = relic index, bytes = old/new flags) and
+`player.item_changed` (u64 = item id, bytes = old/new count) from a per-frame
+tick; the header names them too. The raw struct address is still registered
+as `"player.status"`, and `"app.state"` holds the app's current / game /
+front-end state pointers. The layout and its confidence notes live in the
+base game's `src/player_status.cpp`. NocturneRecomp-Mods' `src/item_inspector/`
+(F7) shows all of this live, and `src/player_stats/` (F6) edits the stats
+through it.
 
 **Ordering**: producers register in `OnCreateDialogs` (dispatched in
 `enabled_mods` order, before `OnModuleLaunched`); consumers look up lazily,

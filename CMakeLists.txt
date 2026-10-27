@@ -376,7 +376,6 @@ set(NOCTURNERECOMP_SOURCES
     src/native_enhancements.cpp
     src/native_options.cpp
     src/native_ui.cpp
-    src/player_inspector.cpp
     src/player_status.cpp
     src/enhancements.cpp
     src/rando_menu.cpp

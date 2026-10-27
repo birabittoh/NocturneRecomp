@@ -4,9 +4,10 @@
 // Everything reads live guest memory, so it is only meaningful while a save is
 // loaded (Snapshot::loaded). The layout is documented next to the offsets in
 // player_status.cpp, including which rows are confirmed and which are still
-// provisional. Mods reach the same layout through the "player.status" registry
-// address and NocturneRecomp-Mods' rexmod/player_status.h, which mirrors this
-// file's constants -- keep the two in sync.
+// provisional. Mods reach it through the C ABI in api/nocturne_player_api.h
+// (exported from the bottom of player_status.cpp), which mirrors this file's
+// constants -- keep the two in sync -- or the raw "player.status" registry
+// address.
 //
 // Events (ModRegistry::Publish, fired from a per-guest-frame tick):
 //   player.save_loaded    Snapshot::loaded edge 0 -> 1; no relic/item events follow
@@ -76,8 +77,10 @@ struct Stats {
   int32_t hp = 0, hp_max = 0;
   int32_t hearts = 0, hearts_max = 0;
   int32_t mp = 0, mp_max = 0;
-  int32_t str = 0, con = 0, intl = 0, lck = 0;  // equipment-adjusted copy
+  int32_t str_base = 0, con_base = 0, int_base = 0, lck_base = 0;  // without equipment
+  int32_t str = 0, con = 0, intl = 0, lck = 0;  // with equipment bonuses
   int32_t level = 0, exp = 0, gold = 0, kills = 0;
+  int32_t rooms = 0;  // outside g_Status, see kRoomsAddress
   int32_t play_hours = 0, play_minutes = 0, play_seconds = 0, play_frames = 0;
 };
 
@@ -118,6 +121,8 @@ class PlayerStatus {
   // leaves the inventory order list alone and a new item may not appear in menus.
   bool SetRelic(Relic relic, uint8_t flags);
   bool SetItemCount(ItemId id, uint8_t count);
+  // One Stats field, by NOCTURNE_STAT_* index (api/nocturne_player_api.h).
+  bool SetStat(int stat, int32_t value);
 
   // Diffs against the previous snapshot and publishes player.* events.
   // Registered as a guest-frame tick by Bind().
@@ -128,9 +133,17 @@ class PlayerStatus {
   Snapshot last_;
 };
 
-// Performs a level up queued by the "player.request_level_up" event (any payload). Needs a live
-// guest context, so it is called from the per-frame hook (GraphicsSettings_PerFrame).
+// Queues a level up, as the "player.request_level_up" event does.
+void RequestLevelUp();
+
+// Performs a level up queued by RequestLevelUp() or the "player.request_level_up" event (any
+// payload). Needs a live guest context, so it is called from the per-frame hook
+// (GraphicsSettings_PerFrame).
 void ApplyRequestedLevelUp(PPCContext& ctx, uint8_t* base);
+
+// The game-clear flag (OR of every save slot's): 1, 0, or -1 while unmapped.
+int GameCleared();
+bool SetGameCleared(bool cleared);
 
 PlayerStatus& GetPlayerStatus();
 
