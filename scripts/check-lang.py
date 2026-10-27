@@ -66,6 +66,8 @@ for path in sources:
 settings_src = (root / "src/settings.cpp").read_text(encoding="utf8")
 for key in re.findall(r'\b\w+_key\s*=\s*"(\w+)"', settings_src):
     used.add(("settings", key))
+for args in re.findall(r'\bConfirmRestart\(\s*"\w+"\s*,\s*\w+\s*,([^)]*)\)', settings_src):
+    used |= {("settings", key) for key in re.findall(r'"(\w+)"', args)}
 # The start screen: intro_text.cpp's key tables, TrErr, and each page's own
 # lookup helper (saves_screen.cpp's S/Fill, mods_screen.cpp's T/Fmt).
 installer = root / "src/installer"

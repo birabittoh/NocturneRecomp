@@ -4,6 +4,7 @@
 #include "settings.h"
 
 #include "enhancements.h"
+#include "game_data.h"
 #include "graphics_settings.h"
 #include "rando_runtime.h"
 #include "ui_font.h"
@@ -359,11 +360,34 @@ class CuratedSettingsDialog : public rex::ui::ImGuiDialog {
 #endif
 
     ImGui::Separator();
+    DrawStartScreenRow();
+
+    ImGui::Separator();
     if (ImGui::CollapsingHeader(Tr("settings", "advanced"))) {
       for (const char* name : kAdvancedCvarNames) {
         DrawAdvancedRow(name);
       }
     }
+  }
+
+  // Restarts into the start screen, where the game files can be deleted or
+  // another source picked.
+  void DrawStartScreenRow() {
+    const bool open_restart =
+        ImGui::Button((std::string(Tr("settings", "start_screen")) + "##start_screen").c_str());
+    if (ImGui::IsItemHovered())
+      ImGui::SetTooltip("%s", Tr("settings", "start_screen_tip"));
+    if (ConfirmRestart("confirm_start_screen", open_restart)) {
+      const auto flag = StartScreenFlagPath(user_settings_path_);
+      RequestStartScreenOnNextLaunch(flag, true);
+      if (!RestartNow())
+        RequestStartScreenOnNextLaunch(flag, false);
+    }
+    ImGui::SameLine();
+    const bool open_quit =
+        ImGui::Button((std::string(Tr("settings", "quit_game")) + "##quit_game").c_str());
+    if (ConfirmRestart("confirm_quit", open_quit, "quit_confirm", "quit_yes"))
+      QuitNow();
   }
 
   // The randomizer core's standalone patches (see enhancements.h). The
