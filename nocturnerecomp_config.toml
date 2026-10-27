@@ -258,12 +258,6 @@ name = "MainMenu_UpdateHook"
 registers = ["r3"]
 return_on_true = true
 
-[[midasm_hook]]
-address = 0x825CAA30
-name = "MainMenu_ListLayoutHook"
-registers = ["r3"]
-return_on_true = true
-
 # Live language switch (src/language_switch.cpp): the option-list item text
 # setters, (list, index, string_id[, x, y]), recorded so a switch can replay
 # them and have the list re-measure and re-centre each item itself.

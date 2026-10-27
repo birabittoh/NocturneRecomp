@@ -31,7 +31,6 @@ constexpr uint32_t kBuildFnAddr = 0x825C5400u;     // (screen)
 constexpr uint32_t kActivateFnAddr = 0x825C5880u;  // (screen, ...)
 constexpr uint32_t kEventFnAddr = 0x825C4FA8u;     // (screen, message)
 constexpr uint32_t kUpdateFnAddr = 0x825C5A08u;    // (screen, delta)
-constexpr uint32_t kListLayoutFnAddr = 0x825CAA30u;  // (list, y)
 // The return address of the builder's call to the shared list setup.
 constexpr uint32_t kBuildListSetupLr = 0x825C5508u;
 
@@ -55,13 +54,6 @@ constexpr uint32_t kFirstMovedItem = 2;
 // The two slots the Activate picks between, in our numbering.
 constexpr uint32_t kUnlockItem = 5;
 constexpr uint32_t kLastItem = 6;
-
-// The list starts half an item higher than the stock 180, so the extra item
-// takes as much room off the gap under the title as off the one above the
-// description panel.
-constexpr uint32_t kStockListY = 180;
-constexpr uint32_t kItemSpacing = 34;
-constexpr uint32_t kListY = kStockListY - kItemSpacing / 2;
 
 // The stock items' text and description ids, in our numbering.
 constexpr uint32_t kLeaderboardsStringId = 72;
@@ -143,7 +135,6 @@ bool ItemEnabled(const uint8_t* base, uint32_t index) {
 void AdjustMainMenuListSetup(PPCContext& ctx) {
   if (static_cast<uint32_t>(ctx.lr) == kBuildListSetupLr && ctx.r6.u32 == kStockItemCount) {
     g_list = ctx.r3.u32;
-    ctx.r5.u32 = kListY;
     ctx.r6.u32 = kStockItemCount + 1;
   }
 }
@@ -275,14 +266,6 @@ extern "C" void MainMenu_Update(PPCContext& ctx, uint8_t* base) {
   CallGuest(ctx, base, kSetTextByIdFnAddr, description, id);
 }
 
-// The list half an item higher; see kListY.
-extern "C" void MainMenu_ListLayout(PPCContext& ctx, uint8_t* base) {
-  if (g_list && ctx.r3.u32 == g_list && ctx.r4.u32 == kStockListY) {
-    ctx.r4.u32 = kListY;
-  }
-  fnhook::CallOriginal(kListLayoutFnAddr, ctx, base);
-}
-
 void RefreshMainMenuText(PPCContext& ctx, uint8_t* base) {
   SetListItemText(ctx, base, g_list, kRandomizerItem, kItemText.Get());
 }
@@ -301,7 +284,4 @@ bool MainMenu_EventHook(PPCRegister& r3) {
 }
 bool MainMenu_UpdateHook(PPCRegister& r3) {
   return nocturne::fnhook::Enter(r3, nocturne::kUpdateFnAddr, &nocturne::MainMenu_Update);
-}
-bool MainMenu_ListLayoutHook(PPCRegister& r3) {
-  return nocturne::fnhook::Enter(r3, nocturne::kListLayoutFnAddr, &nocturne::MainMenu_ListLayout);
 }
