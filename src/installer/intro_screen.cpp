@@ -849,7 +849,7 @@ class IntroDialog final : public rex::ui::ImGuiDialog {
     const Option& option = options_[size_t(i)];
     if (option.mods) {
       if (!mods_)
-        mods_ = std::make_unique<ModsScreen>(g_drawer->immediate_drawer());
+        mods_ = std::make_unique<ModsScreen>(g_drawer->immediate_drawer(), g_context);
       mods_->Reopen(gamepad_);
       mods_open_ = true;
       return;

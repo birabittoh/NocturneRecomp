@@ -299,6 +299,7 @@ installed = "Installiert"
 installed_many = "%zu Mods installiert; frühere Einträge gewinnen bei Konflikten"
 installed_one = "%zu Mod installiert; frühere Einträge gewinnen bei Konflikten"
 installing = "Installation..."
+install_mod = "Mod installieren..."
 installing_percent = "Installation... %.0f%%"
 loading_catalog = "Katalog wird geladen..."
 mods_title = "Mods"
@@ -342,13 +343,15 @@ confirm_delete = "Spielstand {} ({}) löschen? Das lässt sich nicht rückgängi
 err_not_save = "Diese Datei ist kein Spielstand von Castlevania: Symphony of the Night für Xbox 360."
 err_no_save_in_zip = "Das Archiv enthält keinen BASLUS-00067DRAX-Spielstand."
 
+[mods_page]
+install_file = "Mod installieren..."
+install_failed = "Mod konnte nicht installiert werden: {}"
+updated = "Mod aktualisiert: {}. Starte das Spiel neu, um sie anzuwenden."
+installed = "Mod installiert: {}. Starte das Spiel neu, um sie anzuwenden."
+
 [host_menu]
-menu_install_mod = "Mod installieren (.zip)..."
 menu_gpu_driver = "GPU-Treiber..."
 menu_exit = "Beenden"
-mod_install_failed = "Mod konnte nicht installiert werden: {}"
-mod_updated = "Mod aktualisiert: {}. Starte das Spiel neu, um sie anzuwenden."
-mod_installed = "Mod installiert: {}. Starte das Spiel neu, um sie anzuwenden."
 driver_invalid = "Diese Datei ist kein Vulkan-Treiberpaket."
 driver_installed = "{} installiert."
 driver_system = "Systemtreiber"

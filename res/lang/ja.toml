@@ -302,6 +302,7 @@ installed = "インストール済み"
 installed_many = "%zu 個のMODがインストール済み。上にあるものが競合時に優先されます"
 installed_one = "%zu 個のMODがインストール済み。上にあるものが競合時に優先されます"
 installing = "インストール中..."
+install_mod = "Modをインストール..."
 installing_percent = "インストール中... %.0f%%"
 loading_catalog = "カタログを読み込み中..."
 mods_title = "MOD"
@@ -345,13 +346,15 @@ confirm_delete = "セーブファイル {}（{}）を削除しますか？元に
 err_not_save = "このファイルは Xbox 360 版「悪魔城ドラキュラX 月下の夜想曲」のセーブデータではありません。"
 err_no_save_in_zip = "アーカイブに BASLUS-00067DRAX のセーブデータがありません。"
 
+[mods_page]
+install_file = "Modをインストール..."
+install_failed = "そのModをインストールできませんでした: {}"
+updated = "Modを更新しました: {}。反映するにはゲームを再起動してください。"
+installed = "Modをインストールしました: {}。反映するにはゲームを再起動してください。"
+
 [host_menu]
-menu_install_mod = "Modをインストール (.zip)..."
 menu_gpu_driver = "GPUドライバー..."
 menu_exit = "終了"
-mod_install_failed = "そのModをインストールできませんでした: {}"
-mod_updated = "Modを更新しました: {}。反映するにはゲームを再起動してください。"
-mod_installed = "Modをインストールしました: {}。反映するにはゲームを再起動してください。"
 driver_invalid = "そのファイルはVulkanドライバーパッケージではありません。"
 driver_installed = "{} をインストールしました。"
 driver_system = "システムドライバー"

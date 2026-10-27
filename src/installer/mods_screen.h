@@ -25,18 +25,20 @@
 namespace rex::ui {
 class ImmediateDrawer;
 class ImmediateTexture;
+class WindowedAppContext;
 }  // namespace rex::ui
 
 namespace nocturne {
 
 class ModsScreen {
  public:
-  explicit ModsScreen(rex::ui::ImmediateDrawer* drawer);
+  ModsScreen(rex::ui::ImmediateDrawer* drawer, rex::ui::WindowedAppContext* context);
   ~ModsScreen();
 
   // Rereads the mods folder and the catalog on the next frame.
   void Reopen(bool gamepad) {
     loaded_ = false;
+    status_.clear();
     gamepad_ = gamepad;
     focus_ = {};
   }
@@ -70,7 +72,7 @@ class ModsScreen {
     int index = 0;
     bool operator==(const Focus&) const = default;
   };
-  enum class ToolId { kAutoSort, kRefreshDisk, kOpenFolder, kUpdate, kRefreshCatalog };
+  enum class ToolId { kAutoSort, kRefreshDisk, kOpenFolder, kInstallFile, kUpdate, kRefreshCatalog };
   struct Tool {
     ToolId id;
     std::string label;
@@ -114,6 +116,7 @@ class ModsScreen {
   int TabCount() const;
   const std::string& IdAt(const Focus& focus) const;
   void FocusMod(const std::string& id);
+  void InstallFromFile();
   const rex::system::ModInfo& Info(const std::string& id) const;
   const rex::system::CatalogMod* Listed(const std::string& id) const;
   bool UpdateAvailable(const std::string& id) const;
@@ -150,6 +153,7 @@ class ModsScreen {
   rex::ui::ImmediateTexture* RemoteIcon(const std::string& url);
 
   rex::ui::ImmediateDrawer* drawer_;
+  rex::ui::WindowedAppContext* context_;
   bool loaded_ = false;
   std::filesystem::path mods_root_;
   std::vector<rex::system::ModStateEntry> entries_;
@@ -198,6 +202,12 @@ class ModsScreen {
   float fling_[3] = {0, 0, 0};
   ListGeometry geometry_[3];
   bool was_installing_ = false;
+
+  // The file window is open, and the outcome of the last sideload.
+  bool picking_ = false;
+  std::string status_;
+  bool status_error_ = false;
+  std::shared_ptr<bool> alive_ = std::make_shared<bool>(true);
 
   rex::system::ModCatalog installer_;
   rex::net::CancelToken cancel_;

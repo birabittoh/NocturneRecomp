@@ -11,12 +11,10 @@
 #include <SDL3/SDL.h>
 
 #include <cstdarg>
+#include <functional>
 #include <string>
 #include <vector>
 
-#include <rex/system/mod_state.h>
-
-#include "document_picker.h"
 #include "ui_text.h"
 #endif
 
@@ -36,14 +34,12 @@ namespace {
 // Menu entries, in the order NocturneRecompActivity shows them. The indices
 // are what nativeHostMenuSelect switches on, so keep the two in step.
 enum MenuItem : int {
-  kInstallMod = 0,
-  kGpuDriver,
+  kGpuDriver = 0,
   kExit,
 };
 
 std::vector<std::string> MenuItems() {
-  return {Tr("host_menu", "menu_install_mod"), Tr("host_menu", "menu_gpu_driver"),
-          Tr("host_menu", "menu_exit")};
+  return {Tr("host_menu", "menu_gpu_driver"), Tr("host_menu", "menu_exit")};
 }
 
 // The strings NocturneRecompActivity draws itself, in the order of its T_*
@@ -115,29 +111,6 @@ void ShowNativeMenu() {
   env->DeleteLocalRef(activity);
 }
 
-void ShowToast(const std::string& message) {
-  JNIEnv* env = JniEnv();
-  if (!env) {
-    return;
-  }
-  jstring text = env->NewStringUTF(message.c_str());
-  CallActivityVoid("showHostToast", "(Ljava/lang/String;)V", text);
-  env->DeleteLocalRef(text);
-}
-
-std::string DoInstallMod(const std::filesystem::path& archive) {
-  std::string error;
-  const auto result = rex::system::ModState::InstallLocalArchive(
-      rex::system::ModState::ResolveModsRoot(), archive, error);
-  if (!result) {
-    return Tr("host_menu", "mod_install_failed", error);
-  }
-  if (result->staged) {
-    return Tr("host_menu", "mod_updated", result->id);
-  }
-  return Tr("host_menu", "mod_installed", result->id);
-}
-
 void RunOnUiThread(std::function<void()> work) {
   if (!g_instance) {
     return;
@@ -161,15 +134,6 @@ Java_com_birabittoh_nocturnerecomp_NocturneRecompActivity_nativeHostMenuSelect(J
   rex::ui::Window* window = g_instance->window_for_callback();
 
   switch (index) {
-    case kInstallMod:
-      RunOnUiThread([window] {
-        PickFileToRead(window->app_context(), [](std::optional<std::filesystem::path> picked) {
-          if (picked) {
-            ShowToast(DoInstallMod(*picked));
-          }
-        });
-      });
-      break;
     case kGpuDriver:
       CallActivityVoid("showGpuDriverDialog", "(Z)V", static_cast<jboolean>(JNI_FALSE));
       break;

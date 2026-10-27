@@ -16,6 +16,9 @@
 #include <rex/system/mod_version.h>
 #include <rex/ui/image_decode.h>
 #include <rex/ui/immediate_drawer.h>
+#include <rex/ui/windowed_app_context.h>
+
+#include "document_picker.h"
 
 #include "intro_music.h"
 #include "settings.h"
@@ -97,9 +100,12 @@ std::unique_ptr<rex::ui::ImmediateTexture> Upload(rex::ui::ImmediateDrawer* draw
 
 }  // namespace
 
-ModsScreen::ModsScreen(rex::ui::ImmediateDrawer* drawer) : drawer_(drawer) {}
+ModsScreen::ModsScreen(rex::ui::ImmediateDrawer* drawer, rex::ui::WindowedAppContext* context)
+    : drawer_(drawer), context_(context) {}
 
 ModsScreen::~ModsScreen() {
+  *alive_ = false;
+
   // The frame that last drew them may still be in flight, so they are never freed.
   static std::vector<std::unique_ptr<rex::ui::ImmediateTexture>> graveyard;
   for (auto& [url, texture] : icons_) {
@@ -363,6 +369,9 @@ void ModsScreen::BuildTools() {
   // Android has no file manager to hand the folder to.
   tools_.push_back({ToolId::kOpenFolder, T("open_folder", "Open Mods Folder"), true});
 #endif
+  if (context_) {
+    tools_.push_back({ToolId::kInstallFile, Tr("mods_page", "install_file"), !picking_});
+  }
   tools_.push_back({ToolId::kUpdate, T("update", "Update"), has && UpdateAvailable(current_)});
 }
 
@@ -664,12 +673,40 @@ void ModsScreen::ActivateTool(int index) {
       rex::platform::process::OpenFolder(mods_root_);
       break;
     }
+    case ToolId::kInstallFile:
+      InstallFromFile();
+      return;
     case ToolId::kUpdate:
       if (const auto* listed = Listed(current_))
         installer_.InstallAsync(*listed, mods_root_);
       break;
   }
   BuildLists();
+}
+
+void ModsScreen::InstallFromFile() {
+  if (!context_ || picking_)
+    return;
+  picking_ = true;
+  status_.clear();
+  std::weak_ptr<bool> alive = alive_;
+  PickFileToRead(*context_, [this, alive](std::optional<std::filesystem::path> picked) {
+    if (alive.expired())
+      return;
+    picking_ = false;
+    if (!picked)
+      return;
+    std::string error;
+    const auto result = rex::system::ModState::InstallLocalArchive(mods_root_, *picked, error);
+    status_error_ = !result;
+    if (!result)
+      status_ = Tr("mods_page", "install_failed", error);
+    else
+      status_ = Tr("mods_page", result->staged ? "updated" : "installed", result->id);
+    Reload();
+    if (result)
+      FocusMod(result->id);
+  });
 }
 
 void ModsScreen::Press() {
@@ -1407,6 +1444,9 @@ bool ModsScreen::Draw(ImDrawList* draw, ImFont* font, ImVec2 size, float unit, f
     } else if (install.done) {
       status = install.message;
       color = install.ok ? kGood : kError;
+    } else if (!status_.empty()) {
+      status = status_;
+      color = status_error_ ? kError : kGood;
     } else if (tab_ == 0) {
       status = entries_.size() == 1
                    ? Fmt("installed_one", "%zu mod installed; earlier entries win conflicts",

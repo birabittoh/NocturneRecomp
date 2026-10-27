@@ -300,6 +300,7 @@ installed = "Installata"
 installed_many = "%zu mod installate; le voci precedenti vincono sui conflitti"
 installed_one = "%zu mod installata; le voci precedenti vincono sui conflitti"
 installing = "Installazione..."
+install_mod = "Installa mod..."
 installing_percent = "Installazione... %.0f%%"
 loading_catalog = "Caricamento del catalogo..."
 mods_title = "Mod"
@@ -343,13 +344,15 @@ confirm_delete = "Eliminare il file {} ({})? L'operazione non si può annullare.
 err_not_save = "Questo file non è un salvataggio Xbox 360 di Castlevania: Symphony of the Night."
 err_no_save_in_zip = "L'archivio non contiene salvataggi BASLUS-00067DRAX."
 
+[mods_page]
+install_file = "Installa mod..."
+install_failed = "Impossibile installare la mod: {}"
+updated = "Mod aggiornata: {}. Riavvia il gioco per applicarla."
+installed = "Mod installata: {}. Riavvia il gioco per applicarla."
+
 [host_menu]
-menu_install_mod = "Installa mod (.zip)..."
 menu_gpu_driver = "Driver GPU..."
 menu_exit = "Esci"
-mod_install_failed = "Impossibile installare la mod: {}"
-mod_updated = "Mod aggiornata: {}. Riavvia il gioco per applicarla."
-mod_installed = "Mod installata: {}. Riavvia il gioco per applicarla."
 driver_invalid = "Quel file non è un pacchetto driver Vulkan."
 driver_installed = "{} installato."
 driver_system = "Driver di sistema"
