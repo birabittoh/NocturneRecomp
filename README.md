@@ -1,9 +1,9 @@
 # NocturneRecomp
 
-Static recompilation of **Castlevania: Symphony of the Night** (Xbox Live Arcade) for Windows
-and Linux, built on the [ReXGlue SDK](https://github.com/birabittoh/rexglue-sdk).
+Static recompilation of **Castlevania: Symphony of the Night** (Xbox Live Arcade) for Windows,
+Linux, macOS and Android, built on the [ReXGlue SDK](https://github.com/birabittoh/rexglue-sdk).
 
-This project converts the Xbox 360 PowerPC `default.xex` into native x86_64
+This project converts the Xbox 360 PowerPC `default.xex` into native x86_64 and arm64
 code at build time, then wraps it with a small host runtime (logging,
 overlays, hooks) so the game runs natively and can be modded like a PC port.
 
@@ -19,7 +19,52 @@ Get the latest stable build from the [Releases](../../releases/latest) page.
 
 Nightly builds are available from [CI artifacts](https://nightly.link/birabittoh/NocturneRecomp/workflows/ci/main?preview).
 
-Just extract the archive, run the executable and it will prompt you to extract the game.
+| Platform | Download | First run |
+|---|---|---|
+| Windows | `nocturnerecomp-<tag>-win-amd64.zip` | extract the archive and run `nocturnerecomp.exe` |
+| Linux | `nocturnerecomp-<tag>-linux-amd64.tar.gz` / `-linux-arm64.tar.gz` | extract the archive and run `nocturnerecomp` |
+| macOS | `nocturnerecomp-<tag>-mac-arm64.dmg` / `-mac-amd64.dmg` | drag the app to Applications; the build is not notarized, so right-click it and choose **Open** the first time |
+| Android | `nocturnerecomp-<tag>-android-arm64.apk` | sideload the APK (allow installs from your browser or file manager) |
+
+### The start screen
+
+The game opens on a start screen. Pick your legally dumped XBLA package (the
+`LIVE`/STFS file, which has no extension) with **Select File**, or on desktop
+an already extracted folder with **Select Folder**, then **Extract**.
+
+Two releases are recognized, and each is installed into its own folder of
+the game library:
+
+| Release | Folder | Status |
+|---|---|---|
+| Castlevania: Symphony of the Night (Xbox Live Arcade, World) | `assets/xbla-world` | playable |
+| Dracula X: Nocturne in the Moonlight (Xbox Live Arcade, Japan) | `assets/xbla-jp` | extracts, not playable yet |
+
+The start screen also has a **Mods** page and a **Saves** page (export a
+save as a zip, import one into an empty slot, delete). It is skipped once a
+playable version is picked; use **Restart to Start Screen** in the settings
+overlay (F4) to come back to it, or set `show_start_screen = true` to see it
+on every launch.
+
+## Making it portable
+
+By default saves, options and caches live in your platform user folder
+(`Documents/nocturnerecomp` on Windows). To keep them next to the executable
+instead, create an empty `portable.txt` beside it.
+
+The root cvars in `nocturnerecomp.toml` (or `--name=value` on the command
+line) override each location. Any root left empty falls back to its default.
+
+```toml
+game_data_root   = "assets"    # one folder per installed version (default: assets)
+user_data_root   = "user"      # saves and profiles (default: Documents/nocturnerecomp)
+cache_root       = "cache"     # shader cache (default: <user_data_root>/cache)
+mods_data_root   = "mods"      # mod folders (default: mods)
+mods_dump_root   = "dumps"     # dumped textures and shaders (default: dumps)
+update_data_root = "update"    # extracted title update files (default: update)
+```
+
+## Troubleshooting
 
 ### Android: the game crashes or will not start
 
@@ -55,8 +100,14 @@ scoop install llvm cmake ninja
 ### 1. Clone
 
 ```bash
-git clone https://github.com/birabittoh/NocturneRecomp
+git clone --recursive https://github.com/birabittoh/NocturneRecomp
 cd NocturneRecomp
+```
+
+If you already cloned without `--recursive`, fetch the submodules with:
+
+```bash
+git submodule update --init --recursive
 ```
 
 ### 2. Download the ReXGlue SDK
@@ -67,21 +118,31 @@ python scripts/download-sdk.py --pinned
 
 ### 3. Provide your game
 
-Place your legally dumped XBLA package (the `LIVE`/STFS file) into `game/`, then extract it into `assets/`:
+Place your legally dumped World XBLA package (the `LIVE`/STFS file) into `game/`, then extract it:
 
 ```bash
 python scripts/extract_game.py
 ```
 
-`assets/default.xex` must exist before running codegen.
+This writes the same layout the start screen does: the package goes into
+`assets/xbla-world/`, and `assets/default.xex` becomes a copy of that
+version's executable, which codegen and the build read (the guest shaders
+come from `assets/xbla-world/MEDIA`). Pass a package path to pick one when
+`game/` holds several, and `--force` to replace an existing version folder.
+
+An older flat `assets/` tree still works: the game moves it into
+`assets/xbla-world/` the first time it runs.
 
 ### 4. Build
-
-Use this script:
 
 ```bash
 python scripts/build.py
 ```
+
+Without `--release` the script builds RelWithDebInfo. `--package` builds the
+release archive for the host platform; macOS `.dmg` files come from
+`scripts/package-mac.py` and the Android APK from the Gradle project in
+`android/` (see `.github/workflows/_build.yml` for the exact steps).
 
 ## Credits
 

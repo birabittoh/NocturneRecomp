@@ -222,13 +222,15 @@ python scripts/make_mods.py
 
 run from `NocturneRecomp-Mods`, not this repo. It configures and builds
 every `src/<name>/` project and assembles the result into
-`mods/<name>/code/<platform>/` (`<name>.dll` / `lib<name>.so`, plus
+`mods/<name>/code/<platform>/` (`<name>.dll` / `lib<name>.so` /
+`lib<name>.dylib`, plus
 `mod.toml` and `icon.png` at the mod root). See that repo's README and the
 script's own `--help`/docstring for flags (`--mod`, `--target
 {win-amd64,linux-amd64,linux-arm64}`, `--package`, `--sdk-dir`) and
 cross-build details. Once built, copy `mods/<name>/` into this repo's
 `mods/` as-is: `LoadModPlugin` checks `code/<platform>/<stem>...` (matching
-the running host) before falling back to a flat `code/<stem>...`, so a mod
+the running host: `win-amd64`, `linux-amd64`, `linux-arm64`, `mac-amd64`,
+`mac-arm64` or `android-arm64`) before falling back to a flat `code/<stem>...`, so a mod
 folder carrying every platform side by side (as a multi-platform
 distribution from that repo's releases does) loads correctly with no
 flattening step needed. A locally-built, single-platform mod's flat
@@ -330,6 +332,28 @@ nearest `vX.Y.Z` git tag at CMake configure time -- see `CMakeLists.txt`)
 and is likewise a hard failure only when the build is actually older; if no
 tag is reachable, the version falls back to `0.0.0` and the check is
 accepted with a warning instead.
+
+## Game versions
+
+The start screen installs each release into its own library folder, and a
+mod built against one release's addresses or files may not fit another. Say
+which ones a mod is for in `mod.toml`:
+
+```toml
+target = "xbla-world"         # or a list: target = ["xbla-world", "xbla-jp"]
+```
+
+| value | runs on |
+|---|---|
+| `any`, or no `target` | every release |
+| `xbla` | every Xbox Live Arcade release |
+| `xbla-world`, `xbla-jp` | that release only |
+
+The ids are the version folder names under `assets/`. On any other release
+the mod stays enabled in `mods.toml` but is left out of the run entirely,
+and the Mods page says why. Only `xbla-world` is playable today, so a mod
+with no `target` effectively runs on World; set `target = "xbla-world"` for
+anything that hooks guest addresses, so it stays off once JP runs.
 
 ## Library mods and the shared registry
 
