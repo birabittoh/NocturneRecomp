@@ -10,6 +10,7 @@
 // restore it to 1.0 when both inputs release (and on unbind), so a shutdown
 // never leaves the game stuck sped up.
 #include "fast_forward.h"
+#include "touch_input_driver.h"
 
 #include <string>
 
@@ -89,7 +90,7 @@ class FastForwardWatcher : public rex::ui::WindowInputListener, public rex::ui::
     if (window_) {
       window_->RemoveInputListener(this);
     }
-    if (key_held_ || pad_held_) {
+    if (key_held_ || pad_held_ || touch_held_) {
       rex::chrono::Clock::set_guest_time_scalar(1.0);
     }
   }
@@ -131,6 +132,12 @@ class FastForwardWatcher : public rex::ui::WindowInputListener, public rex::ui::
   // here, so nothing is actually drawn) -- used as a per-frame poll point for
   // the controller's held state (XInput has no button-event callback).
   void OnDraw(ImGuiIO&) override {
+    // The on-screen pad's fast forward button reports nothing to the guest.
+    const bool touch_down = touch::TouchFastForwardHeld();
+    if (touch_down != touch_held_) {
+      touch_held_ = touch_down;
+      ApplyState();
+    }
     if (input_system_) {
       uint16_t mask = rex::ui::ParseGamepadButton(bind_button_);
       if (mask != 0) {
@@ -147,7 +154,7 @@ class FastForwardWatcher : public rex::ui::WindowInputListener, public rex::ui::
 
  private:
   void ApplyState() {
-    rex::chrono::Clock::set_guest_time_scalar((key_held_ || pad_held_)
+    rex::chrono::Clock::set_guest_time_scalar((key_held_ || pad_held_ || touch_held_)
                                                   ? REXCVAR_GET(fast_forward_scale)
                                                   : 1.0);
   }
@@ -159,6 +166,7 @@ class FastForwardWatcher : public rex::ui::WindowInputListener, public rex::ui::
   std::string bind_button_ = kDefaultBindButton;
   bool key_held_ = false;
   bool pad_held_ = false;
+  bool touch_held_ = false;
 };
 
 FastForward::FastForward() = default;

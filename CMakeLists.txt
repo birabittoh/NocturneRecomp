@@ -131,6 +131,7 @@ add_custom_command(
         ${CMAKE_SOURCE_DIR}/scripts/gen-fonts.py
         ${CMAKE_SOURCE_DIR}/src/fonts/PTSerif-Regular.ttf
         ${CMAKE_SOURCE_DIR}/src/fonts/DotGothic16-Subset.ttf
+        ${CMAKE_SOURCE_DIR}/src/fonts/Roboto-Medium.ttf
     COMMENT "Generating src/fonts.generated.h"
     VERBATIM
 )
@@ -324,6 +325,8 @@ set(NOCTURNERECOMP_SOURCES
     src/installer/xbla_package.cpp
     src/platform/document_picker.cpp
     src/platform/host_menu.cpp
+    src/platform/touch_controls_overlay.cpp
+    src/platform/touch_input_driver.cpp
     src/ui_text.cpp
     src/video_mode.cpp
     src/xbox_live.cpp

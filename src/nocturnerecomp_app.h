@@ -60,6 +60,8 @@
 #include "save_slots.h"
 #include "settings.h"
 #include "target.h"
+#include "touch_controls_overlay.h"
+#include "touch_layout.h"
 #include "ui_font.h"
 #include "ui_text.h"
 #include "version.generated.h"
@@ -300,6 +302,17 @@ class NocturnerecompApp : public rex::ReXApp {
     // The constructor is what registers the Android back button bind.
     host_menu_ = std::make_unique<nocturne::HostMenu>(window());
 
+    // On-screen pad. Registered on every platform; the touch_controls cvar (on
+    // by default only on Android) decides whether it is shown.
+    if (input_sys) {
+      auto touch = std::make_unique<nocturne::touch::TouchInputDriver>(nullptr, 0);
+      touch->Setup();
+      touch->SetLayoutProvider(&nocturne::BuildTouchLayout);
+      touch_controls_overlay_ = std::make_unique<nocturne::touch::TouchControlsOverlay>(
+          imgui_drawer(), touch.get(), input_sys);
+      input_sys->AddDriver(std::move(touch));
+    }
+
     // The renderer loads no GPU plugin, so the SDK's per guest frame callback
     // (which drives the mod registry's tick) never fires; the swap hook does it.
     nocturne::SetGuestFrameCallback([this] { runtime()->mod_registry()->DispatchTick(); });
@@ -371,6 +384,17 @@ class NocturnerecompApp : public rex::ReXApp {
 
     ImFontConfig cfg;
     cfg.FontDataOwnedByAtlas = false;
+    // The touch pad's button letters: sans serif, like the controller's own.
+    // Found by name (see touch_controls_overlay.cpp's FaceButtonFont).
+    {
+      static const ImWchar kFaceButtonGlyphs[] = {'0', '9', 'A', 'Z', 0};
+      ImFontConfig face_cfg = cfg;
+      face_cfg.OversampleH = face_cfg.OversampleV = 2;
+      std::strncpy(face_cfg.Name, "Touch controls", sizeof(face_cfg.Name));
+      atlas->AddFontFromMemoryTTF(const_cast<unsigned char*>(nocturne::kRobotoMediumTTF),
+                                  static_cast<int>(nocturne::kRobotoMediumTTFSize), 96.0f,
+                                  &face_cfg, kFaceButtonGlyphs);
+    }
     // The start screen's font: large enough to stay sharp when the screen
     // scales it down (the atlas is static, so scaling up would blur), and only
     // the characters its text uses, so the Japanese glyphs stay a handful.
@@ -461,6 +485,8 @@ class NocturnerecompApp : public rex::ReXApp {
   double fps_smoothed_ = 0.0;
   // Back-button menu on Android. See host_menu.h.
   std::unique_ptr<nocturne::HostMenu> host_menu_;
+  // Draws the on-screen pad; the driver it reads is owned by the input system.
+  std::unique_ptr<rex::ui::ImGuiDialog> touch_controls_overlay_;
 
   std::filesystem::path user_settings_path() const { return user_data_root() / "settings.toml"; }
 };
