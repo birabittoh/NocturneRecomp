@@ -64,6 +64,7 @@ struct TouchControl {
     // neighbours, so a layout gets a real D-pad rather than four buttons that
     // cannot be pressed together.
     kDpad,
+    kSquare,  // half_width is the half side; half_height is unused
   };
 
   Shape shape = Shape::kCircle;
@@ -74,7 +75,20 @@ struct TouchControl {
   TouchTrigger trigger = TouchTrigger::kNone;
   // Reports nothing to the guest; holding it only turns on TouchFastForwardHeld.
   bool fast_forward = false;
+  // Name of a registered keybind (rex::ui::InvokeBind) fired on press. Also
+  // reports nothing to the guest.
+  std::string bind;
 };
+
+/// A keybind currently on an F-key, for the optional row of function key buttons.
+struct TouchFunctionKey {
+  int number;        // 1..12
+  std::string bind;  // bind cvar name
+};
+
+/// Active binds whose effective key is F1..F12, ordered by key. Read live, so
+/// rebinds and mod binds appear without the layout knowing about them.
+std::vector<TouchFunctionKey> TouchFunctionKeys();
 
 /**
  * An analog stick.
@@ -207,6 +221,7 @@ class TouchInputDriver final : public InputDriver, public rex::ui::WindowInputLi
 
   // WindowInputListener
   void OnTouchEvent(rex::ui::TouchEvent& e) override;
+  void HandleTouchEvent(rex::ui::TouchEvent& e, std::string* bind_to_fire);
 
   /// Installs the pad design. Safe to call at any point; anything currently
   /// held is released, since the controls it was held against are gone.
@@ -270,6 +285,9 @@ class TouchInputDriver final : public InputDriver, public rex::ui::WindowInputLi
   float surface_height_ = 0.0f;
   double layout_scale_ = 0.0;
   std::string layout_ui_mode_button_;  // the toggle pill's button
+  std::string layout_movement_;        // dpad or stick
+  std::string layout_function_keys_;   // which F-key buttons the layout was built with
+  std::chrono::steady_clock::time_point function_keys_checked_;
 
   FingerTargetMap finger_targets_;
 

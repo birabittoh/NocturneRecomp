@@ -611,6 +611,19 @@ void TouchControlsOverlay::OnDraw(ImGuiIO& io) {
         break;
       }
 
+      case TouchControl::Shape::kSquare: {
+        const ImVec2 lo(c.cx - c.half_width, c.cy - c.half_width);
+        const ImVec2 hi(c.cx + c.half_width, c.cy + c.half_width);
+        draw_list->AddRectFilled(lo, hi, FillColor(alpha, pressed), c.half_width * 0.2f);
+        draw_list->AddRect(lo, hi, EdgeColor(alpha, pressed), c.half_width * 0.2f, 0, 2.0f);
+        ImFont* font = ImGui::GetFont();
+        const float size = c.half_width * 0.8f;
+        const ImVec2 ts = font->CalcTextSizeA(size, FLT_MAX, 0.0f, c.label.c_str());
+        draw_list->AddText(font, size, ImVec2(c.cx - ts.x * 0.5f, c.cy - ts.y * 0.5f),
+                           EdgeColor(alpha, pressed), c.label.c_str());
+        break;
+      }
+
       case TouchControl::Shape::kDpad:
         draw_list->AddCircleFilled(ImVec2(c.cx, c.cy), c.half_width, FillColor(alpha, false), 32);
         draw_list->AddCircle(ImVec2(c.cx, c.cy), c.half_width, EdgeColor(alpha, pressed), 32, 2.0f);

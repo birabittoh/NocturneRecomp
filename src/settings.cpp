@@ -142,11 +142,11 @@ constexpr std::array kGameDefaults = {
 // host_timer_resolution_ms is absent here on purpose: 5ms is right for
 // everyone, so it gets no curated row. It is listed in kAdvancedCvarNames
 // instead, where the generic widget exposes it as the raw millisecond value.
-constexpr std::array<const char*, 13> kBasicCvarNames = {
+constexpr std::array<const char*, 15> kBasicCvarNames = {
     "fullscreen",       "vsync",         "user_name",       "user_language",
     "gpu_backend",      "vulkan_device", "audio_mute",      "audio_volume",
-    "graphics_style_enhanced", "touch_controls", "touch_scale", "touch_opacity",
-    "touch_hide_delay"};
+    "graphics_style_enhanced", "touch_controls", "touch_movement", "touch_function_keys", "touch_scale",
+    "touch_opacity", "touch_hide_delay"};
 
 // audio_volume is stored (and applied to samples by the SDL audio driver) as
 // linear amplitude, but human loudness perception is roughly logarithmic --
@@ -394,10 +394,41 @@ class CuratedSettingsDialog : public rex::ui::ImGuiDialog {
     ImGui::PopID();
     if (entry->getter() != "true")
       return;
+    DrawTouchMovementRow();
+    DrawTouchFunctionKeysRow();
     DrawTouchSliderRow("touch_scale", Tr("settings", "touch_scale"), 0.5f, 2.0f, "%.2f");
     DrawTouchSliderRow("touch_opacity", Tr("settings", "touch_opacity"), 0.1f, 1.0f, "%.2f");
     // Whole seconds; the top step means the pad never hides.
     DrawTouchSliderRow("touch_hide_delay", Tr("settings", "touch_hide_delay"), 1.0f, 11.0f, "%.0f", /*never_at_max=*/true);
+  }
+
+  void DrawTouchFunctionKeysRow() {
+    const auto* entry = rex::cvar::GetFlagInfo("touch_function_keys");
+    if (!entry)
+      return;
+    ImGui::TextUnformatted(Tr("settings", "touch_function_keys"));
+    ImGui::SameLine(180.0f);
+    ImGui::PushID("touch_function_keys");
+    if (rex::ui::DrawCvarWidget(*entry, 160.0f, /*persist=*/true))
+      SaveBasic();
+    ImGui::PopID();
+  }
+
+  void DrawTouchMovementRow() {
+    const std::string current = rex::cvar::GetFlagByName("touch_movement");
+    ImGui::TextUnformatted(Tr("settings", "touch_movement"));
+    ImGui::SameLine(180.0f);
+    ImGui::PushID("touch_movement");
+    if (ImGui::RadioButton(Tr("settings", "touch_movement_dpad"), current != "stick")) {
+      rex::cvar::SetFlagByName("touch_movement", "dpad", /*persist=*/true);
+      SaveBasic();
+    }
+    ImGui::SameLine();
+    if (ImGui::RadioButton(Tr("settings", "touch_movement_stick"), current == "stick")) {
+      rex::cvar::SetFlagByName("touch_movement", "stick", /*persist=*/true);
+      SaveBasic();
+    }
+    ImGui::PopID();
   }
 
   void DrawTouchSliderRow(const char* name, const char* label, float min, float max,

@@ -25,7 +25,11 @@
 #include <rex/cvar.h>
 #include <rex/input/gyro.h>
 #include <rex/logging.h>
+#include <rex/input/input_system.h>
 #include <rex/platform.h>
+#include <rex/runtime.h>
+#include <rex/system/kernel_state.h>
+#include <rex/ui/keybinds.h>
 
 // Touch controls only make sense where there is a touch screen and no
 // keyboard, so they default on for Android and off elsewhere. They stay
@@ -35,6 +39,11 @@ REXCVAR_DEFINE_BOOL(touch_controls, REX_PLATFORM_ANDROID != 0, "Input/Touch",
                     "Show on-screen touch controls");
 REXCVAR_DEFINE_DOUBLE(touch_scale, 1.0, "Input/Touch",
                       "Size of the on-screen touch controls (0.5..2)");
+REXCVAR_DEFINE_BOOL(touch_function_keys, false, "Input/Touch",
+                    "Show a second row of on-screen buttons, one per F-key bind");
+REXCVAR_DEFINE_STRING(touch_movement, "dpad", "Input/Touch",
+                      "Touch movement control: dpad or stick (free-placed analog stick)")
+    .allowed({"dpad", "stick"});
 REXCVAR_DEFINE_DOUBLE(touch_opacity, 0.45, "Input/Touch",
                       "Opacity of the on-screen touch controls (0..1)");
 REXCVAR_DEFINE_DOUBLE(touch_hide_delay, 3.0, "Input/Touch",
@@ -81,6 +90,9 @@ bool HitTest(const TouchControl& c, float x, float y) {
   if (c.shape == TouchControl::Shape::kPill) {
     return std::fabs(dx) <= c.half_width && std::fabs(dy) <= c.half_height;
   }
+  if (c.shape == TouchControl::Shape::kSquare) {
+    return std::fabs(dx) <= c.half_width && std::fabs(dy) <= c.half_width;
+  }
   // Circles and D-pads are both round.
   return dx * dx + dy * dy <= c.half_width * c.half_width;
 }
@@ -119,6 +131,44 @@ uint16_t ResolveButtons(const TouchControl& c, float x, float y) {
 }
 
 }  // namespace
+
+std::vector<TouchFunctionKey> TouchFunctionKeys() {
+  std::vector<TouchFunctionKey> keys;
+  for (const auto& bind : rex::ui::SnapshotBinds()) {
+    if (!bind.active || bind.effective_key.size() < 2 || bind.effective_key[0] != 'F') {
+      continue;
+    }
+    int number = 0;
+    for (size_t i = 1; i < bind.effective_key.size(); ++i) {
+      const char ch = bind.effective_key[i];
+      if (ch < '0' || ch > '9') {
+        number = 0;
+        break;
+      }
+      number = number * 10 + (ch - '0');
+    }
+    if (number >= 1 && number <= 12) {
+      keys.push_back({number, bind.name});
+    }
+  }
+  std::stable_sort(keys.begin(), keys.end(),
+                   [](const TouchFunctionKey& a, const TouchFunctionKey& b) {
+                     return a.number < b.number;
+                   });
+  return keys;
+}
+
+// bind_ui_mode only toggles, and UI mode is what suppresses guest input, so
+// check that first: a tap must never leave UI mode. The switch itself happens
+// on the next UI frame, after the bind above has opened its overlay.
+static void EnterUiMode() {
+  auto* kernel = rex::system::kernel_state();
+  auto* runtime = kernel ? kernel->emulator() : nullptr;
+  auto* input = runtime ? static_cast<rex::input::InputSystem*>(runtime->input_system()) : nullptr;
+  if (input && !input->IsGuestInputSuppressed()) {
+    rex::ui::InvokeBind("bind_ui_mode");
+  }
+}
 
 void TouchKeepVisible() { g_keep_visible_until_ms.store(NowMs() + 250, std::memory_order_relaxed); }
 
@@ -298,11 +348,30 @@ void TouchInputDriver::RefreshLayout() {
   const float height = float(attached_window_->GetActualPhysicalHeight());
   const double scale = REXCVAR_GET(touch_scale);
   std::string ui_mode_button = rex::cvar::GetFlagByName("ui_mode_button");
+  std::string movement = rex::cvar::GetFlagByName("touch_movement");
+
+  // The bind list is only re-read a couple of times a second: this runs on
+  // every touch event, and binds change rarely.
+  std::string function_keys = layout_function_keys_;
+  const auto now = std::chrono::steady_clock::now();
+  if (!REXCVAR_GET(touch_function_keys)) {
+    function_keys.clear();
+  } else if (function_keys.empty() ||
+             now - function_keys_checked_ > std::chrono::milliseconds(500)) {
+    function_keys_checked_ = now;
+    function_keys = "on";
+    for (const auto& key : TouchFunctionKeys()) {
+      function_keys += "," + std::to_string(key.number) + key.bind;
+    }
+  }
   if (width == surface_width_ && height == surface_height_ && scale == layout_scale_ &&
-      ui_mode_button == layout_ui_mode_button_) {
+      ui_mode_button == layout_ui_mode_button_ && movement == layout_movement_ &&
+      function_keys == layout_function_keys_) {
     return;
   }
   layout_scale_ = scale;
+  layout_function_keys_ = std::move(function_keys);
+  layout_movement_ = std::move(movement);
   layout_ui_mode_button_ = std::move(ui_mode_button);
   surface_width_ = width;
   surface_height_ = height;
@@ -313,6 +382,17 @@ void TouchInputDriver::RefreshLayout() {
 }
 
 void TouchInputDriver::OnTouchEvent(rex::ui::TouchEvent& e) {
+  // Fired after the driver's lock is released: a bind opens overlays, which
+  // may call back into the driver.
+  std::string bind;
+  HandleTouchEvent(e, &bind);
+  if (!bind.empty()) {
+    rex::ui::InvokeBind(bind);
+    EnterUiMode();
+  }
+}
+
+void TouchInputDriver::HandleTouchEvent(rex::ui::TouchEvent& e, std::string* bind_to_fire) {
   const bool releasing = e.action() == rex::ui::TouchEvent::Action::kUp ||
                          e.action() == rex::ui::TouchEvent::Action::kCancel;
   // A release is always processed: the gate can close between a press and its
@@ -355,6 +435,7 @@ void TouchInputDriver::OnTouchEvent(rex::ui::TouchEvent& e) {
         pressed_mask_ |= uint64_t(1) << i;
         control_buttons_[i] = ResolveButtons(layout_.controls[i], x, y);
         finger_targets_[id] = {FingerTarget::Kind::kControl, i};
+        *bind_to_fire = layout_.controls[i].bind;
         ++packet_number_;
         e.set_handled(true);
         return;

@@ -5,7 +5,8 @@
 // The driver owns the machinery (hit-testing, multi-touch, the resulting
 // X_INPUT_STATE) and the overlay the drawing; this is the layout. Symphony of
 // the Night is a 2D platformer played on the D-pad, so the pad has a D-pad
-// where a stick would be, and no stick at all.
+// where a stick would be. A free-placed left stick is available through
+// touch_movement.
 
 #pragma once
 
@@ -19,6 +20,7 @@
 #include <rex/ui/keybinds.h>
 
 REXCVAR_DECLARE(double, touch_scale);
+REXCVAR_DECLARE(bool, touch_function_keys);
 
 namespace nocturne {
 
@@ -64,10 +66,17 @@ inline touch::TouchLayout BuildTouchLayout(float width, float height) {
   // gesture.
   const float inset = u * 0.06f;
 
-  // Eight-way D-pad, bottom left: a diagonal reports both neighbours, which
-  // the game needs for crouching attacks and up-diagonal jumps.
-  const float dpad_r = u * 0.20f * scale;
-  layout.controls.push_back(MakeDpad(inset + dpad_r, height - inset - dpad_r, dpad_r));
+  if (rex::cvar::GetFlagByName("touch_movement") == "stick") {
+    // Free-placed: the thumb plants it wherever it lands.
+    layout.sticks.push_back(MakeStick(/*zone_left=*/0.0f, /*zone_top=*/height * 0.30f,
+                                      /*zone_right=*/width * 0.45f, /*zone_bottom=*/height,
+                                      /*radius=*/u * 0.16f * scale, TouchAxis::kLeft));
+  } else {
+    // Eight-way D-pad, bottom left: a diagonal reports both neighbours, which
+    // the game needs for crouching attacks and up-diagonal jumps.
+    const float dpad_r = u * 0.20f * scale;
+    layout.controls.push_back(MakeDpad(inset + dpad_r, height - inset - dpad_r, dpad_r));
+  }
 
   // A/B/X/Y diamond, bottom right, in the Xbox arrangement (A at the bottom).
   const float face_r = u * 0.085f * scale;
@@ -110,6 +119,28 @@ inline touch::TouchLayout BuildTouchLayout(float width, float height) {
   layout.controls.push_back(
       MakePill(width * 0.5f + menu_step, pill_y, menu_rx, pill_ry, "START",
                RemappedStartOrBack("remap_start", X_INPUT_GAMEPAD_START)));
+
+  // Optional second row of square buttons, one per F-key bind, read live.
+  if (REXCVAR_GET(touch_function_keys)) {
+    const auto keys = touch::TouchFunctionKeys();
+    const float side = u * 0.05f * scale;
+    const float gap = u * 0.015f;
+    const float row_y = pill_y + pill_ry + gap + side;
+    const float total = keys.size() * (side * 2.0f + gap) - gap;
+    float x = width * 0.5f - total * 0.5f + side;
+    for (const auto& key : keys) {
+      TouchControl c;
+      c.shape = TouchControl::Shape::kSquare;
+      c.cx = x;
+      c.cy = row_y;
+      c.half_width = side;
+      c.half_height = side;
+      c.label = "F" + std::to_string(key.number);
+      c.bind = key.bind;
+      layout.controls.push_back(std::move(c));
+      x += side * 2.0f + gap;
+    }
+  }
 
   return layout;
 }
