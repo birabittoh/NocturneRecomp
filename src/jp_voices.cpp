@@ -22,8 +22,8 @@
 
 #include "target.h"
 
-REXCVAR_DEFINE_BOOL(jp_voices, true, "Game",
-                    "Japanese voices, when the JP release is installed")
+REXCVAR_DEFINE_BOOL(english_voices, false, "Game",
+                    "Play World's English voices even when the JP release is installed")
     .lifecycle(rex::cvar::Lifecycle::kRequiresRestart);
 
 namespace nocturne {
@@ -176,20 +176,21 @@ bool PatchTables(const fs::path& world_sound, const fs::path& jp_sound) {
 
 }  // namespace
 
-void InstallJpVoices(rex::Runtime* runtime) {
-  const fs::path& jp = JpDir();
-  if (jp.empty() || !runtime || !runtime->file_system())
-    return;
+bool JpVoicesAvailable() {
   std::error_code ec;
-  if (fs::equivalent(jp, GameDataRoot(), ec)) {
-    REXLOG_INFO("jp voices: JP is the mounted folder, nothing to link");
+  return !JpDir().empty() && !fs::equivalent(JpDir(), GameDataRoot(), ec);
+}
+
+void InstallJpVoices(rex::Runtime* runtime) {
+  if (!JpVoicesAvailable() || !runtime || !runtime->file_system())
     return;
-  }
-  if (!REXCVAR_GET(jp_voices)) {
-    REXLOG_INFO("jp voices: off, playing World's");
+  if (REXCVAR_GET(english_voices)) {
+    REXLOG_INFO("jp voices: English voices forced, playing World's");
     return;
   }
 
+  const fs::path& jp = JpDir();
+  std::error_code ec;
   const fs::path jp_sound = jp / "DATA" / "sound";
   const fs::path world_sound = GameDataRoot() / "DATA" / "sound";
   if (!fs::is_directory(jp_sound, ec)) {

@@ -1,7 +1,7 @@
 // nocturnerecomp - play JP's voices while World's folder is mounted.
 //
 // With both releases installed the runtime mounts World as game:, so the
-// guest reads World's English DATA\sound banks. When jp_voices is on, JP's
+// guest reads World's English DATA\sound banks. Unless english_voices is on, JP's
 // DATA\sound folder is mounted as a device of its own and World's resolved
 // DATA\sound path is linked to it, the same directory-level shadow as
 // font_overlay.h (and for the same reason: the open path only follows links
@@ -17,7 +17,8 @@
 // nocturnerecomp_jp_voices_hooks.toml).
 //
 // Nothing happens when JP is not installed, or when JP is the mounted folder
-// already (its voices are then the only ones there are).
+// already (its voices are then the only ones there are): JpVoicesAvailable()
+// is false, and the settings hide the english_voices row.
 #pragma once
 
 namespace rex {
@@ -25,6 +26,9 @@ class Runtime;
 }  // namespace rex
 
 namespace nocturne {
+
+// Both releases are installed and World is mounted, so there is a choice.
+bool JpVoicesAvailable();
 
 // After the image is mapped and before the guest starts: the banks are
 // opened at boot, so the setting takes effect on the next launch.

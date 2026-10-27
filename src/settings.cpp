@@ -7,6 +7,7 @@
 #include "game_data.h"
 #include "graphics_settings.h"
 #include "host_menu.h"
+#include "jp_voices.h"
 #include "rando_runtime.h"
 #include "touch_input_driver.h"
 #include "ui_font.h"
@@ -142,11 +143,11 @@ constexpr std::array kGameDefaults = {
 // host_timer_resolution_ms is absent here on purpose: 5ms is right for
 // everyone, so it gets no curated row. It is listed in kAdvancedCvarNames
 // instead, where the generic widget exposes it as the raw millisecond value.
-constexpr std::array<const char*, 15> kBasicCvarNames = {
+constexpr std::array<const char*, 16> kBasicCvarNames = {
     "fullscreen",       "vsync",         "user_name",       "user_language",
     "gpu_backend",      "vulkan_device", "audio_mute",      "audio_volume",
     "graphics_style_enhanced", "touch_controls", "touch_movement", "touch_function_keys", "touch_scale",
-    "touch_opacity", "touch_hide_delay"};
+    "touch_opacity", "touch_hide_delay", "english_voices"};
 
 // audio_volume is stored (and applied to samples by the SDL audio driver) as
 // linear amplitude, but human loudness perception is roughly logarithmic --
@@ -353,6 +354,7 @@ class CuratedSettingsDialog : public rex::ui::ImGuiDialog {
     DrawGraphicsStyleRow();
     DrawAudioMuteRow();
     DrawAudioVolumeRow();
+    DrawEnglishVoicesRow();
     DrawUserNameRow();
     DrawLanguageRow();
     // The native renderer reads both: gpu_backend picks D3D12 or Vulkan (only
@@ -775,6 +777,20 @@ class CuratedSettingsDialog : public rex::ui::ImGuiDialog {
     ImGui::TextUnformatted(Tr("settings", "mute_audio"));
     ImGui::SameLine(180.0f);
     ImGui::PushID("audio_mute");
+    if (rex::ui::DrawCvarWidget(*entry, 160.0f, /*persist=*/true)) {
+      SaveBasic();
+    }
+    ImGui::PopID();
+  }
+
+  // Only with both releases installed: otherwise there is one set of voices.
+  void DrawEnglishVoicesRow() {
+    const auto* entry = rex::cvar::GetFlagInfo("english_voices");
+    if (!entry || !JpVoicesAvailable())
+      return;
+    ImGui::TextUnformatted(Tr("settings", "english_voices"));
+    ImGui::SameLine(180.0f);
+    ImGui::PushID("english_voices");
     if (rex::ui::DrawCvarWidget(*entry, 160.0f, /*persist=*/true)) {
       SaveBasic();
     }

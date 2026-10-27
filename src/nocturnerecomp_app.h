@@ -313,7 +313,8 @@ class NocturnerecompApp : public rex::ReXApp {
     // the guest starts, so it is in place by the title's first font load.
     nocturne::InstallJapaneseFontOverlay(runtime());
 
-    // With World mounted, play JP's voice banks instead (see jp_voices.h).
+    // With World mounted, play JP's voice banks unless English ones are
+    // forced (see jp_voices.h).
     nocturne::InstallJpVoices(runtime());
 
     // The constructor is what registers the Android back button bind.
