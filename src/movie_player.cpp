@@ -51,8 +51,11 @@
 // JP draws the movie over a game that keeps running, with the game's sound
 // suspended. Here the hooks hold their state machine on the playing step
 // instead, so nothing advances underneath, and the movie is decoded and drawn
-// on the host (rex::audio::AsfMovieDecoder, MovieOverlay). Start skips it, as
-// in JP. A folder without the movie files (World) runs the vanilla code.
+// on the host (rex::audio::AsfMovieDecoder, MovieOverlay). Like JP's, the
+// picture fills the PS1 box: JP builds its XMV quad from the four corners of
+// the Change Screen Size rect (JP dword_82B32C90, sub_825E01E0), the rect the
+// game's layers are drawn in, so it follows the player's stretch and the
+// border outside the box stays on screen. Start skips it, as in JP. A folder without the movie files (World) runs the vanilla code.
 //
 // Hooks wired up in nocturnerecomp_movie_hooks.toml.
 // ---------------------------------------------------------------------------
@@ -66,6 +69,11 @@ namespace {
 constexpr uint32_t kMovieIndex = 0x831751A0;   // dword_831751A0
 constexpr uint32_t kStrPlayerOn = 0x8318EE20;  // dword_8318EE20
 constexpr size_t kFramesAhead = 8;
+
+// The Change Screen Size rect (LTRB, guest display pixels) and the full display
+// it stretches towards; see graphics_settings.cpp.
+constexpr uint32_t kStretchRect = 0x82882C68;
+constexpr uint32_t kStretchRectMax = 0x82882C98;
 
 uint32_t ReadU32(uint32_t guest_address) {
   return rex::memory::load_and_swap<uint32_t>(
@@ -304,19 +312,39 @@ class MovieOverlay final : public rex::ui::ImGuiDialog {
       }
     }
 
-    ImDrawList* draw = ImGui::GetForegroundDrawList();
-    const ImVec2 size = io.DisplaySize;
-    draw->AddRectFilled(ImVec2(0, 0), size, IM_COL32(0, 0, 0, 255));
-    if (textures_.empty())
+    ImVec2 min;
+    ImVec2 max;
+    if (!BoxOnWindow(io.DisplaySize, min, max))
       return;
-    const auto* texture = textures_.back().get();
-    const float scale =
-        std::min(size.x / float(texture->width), size.y / float(texture->height));
-    const float w = texture->width * scale;
-    const float h = texture->height * scale;
-    const ImVec2 min((size.x - w) * 0.5f, (size.y - h) * 0.5f);
-    draw->AddImage(reinterpret_cast<ImTextureID>(textures_.back().get()), min,
-                   ImVec2(min.x + w, min.y + h));
+    ImDrawList* draw = ImGui::GetForegroundDrawList();
+    if (textures_.empty()) {
+      draw->AddRectFilled(min, max, IM_COL32(0, 0, 0, 255));
+      return;
+    }
+    draw->AddImage(reinterpret_cast<ImTextureID>(textures_.back().get()), min, max);
+  }
+
+  // The PS1 box in window pixels. The presenter letterboxes the guest display
+  // into the window at its own aspect ratio, so the box is mapped through the
+  // same fit.
+  static bool BoxOnWindow(const ImVec2& window, ImVec2& min, ImVec2& max) {
+    const auto rect = [](uint32_t base, int i) {
+      return float(int32_t(ReadU32(base + 4 * i)));
+    };
+    const float display_x = rect(kStretchRectMax, 0);
+    const float display_y = rect(kStretchRectMax, 1);
+    const float display_w = rect(kStretchRectMax, 2) - display_x;
+    const float display_h = rect(kStretchRectMax, 3) - display_y;
+    if (display_w <= 0 || display_h <= 0)
+      return false;
+    const float scale = std::min(window.x / display_w, window.y / display_h);
+    const float x0 = (window.x - display_w * scale) * 0.5f;
+    const float y0 = (window.y - display_h * scale) * 0.5f;
+    min = ImVec2(x0 + (rect(kStretchRect, 0) - display_x) * scale,
+                 y0 + (rect(kStretchRect, 1) - display_y) * scale);
+    max = ImVec2(x0 + (rect(kStretchRect, 2) - display_x) * scale,
+                 y0 + (rect(kStretchRect, 3) - display_y) * scale);
+    return max.x > min.x && max.y > min.y;
   }
 
  private:
