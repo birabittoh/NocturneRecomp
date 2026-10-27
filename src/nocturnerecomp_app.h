@@ -42,6 +42,7 @@
 #include "fonts.generated.h"
 #include "game_data.h"
 #include "graphics_settings.h"
+#include "host_menu.h"
 #include "language_switch.h"
 #include "native_options.h"
 #include "host_timer_resolution.h"
@@ -296,6 +297,9 @@ class NocturnerecompApp : public rex::ReXApp {
     // the guest starts, so it is in place by the title's first font load.
     nocturne::InstallJapaneseFontOverlay(runtime());
 
+    // The constructor is what registers the Android back button bind.
+    host_menu_ = std::make_unique<nocturne::HostMenu>(window());
+
     // The renderer loads no GPU plugin, so the SDK's per guest frame callback
     // (which drives the mod registry's tick) never fires; the swap hook does it.
     nocturne::SetGuestFrameCallback([this] { runtime()->mod_registry()->DispatchTick(); });
@@ -455,6 +459,8 @@ class NocturnerecompApp : public rex::ReXApp {
   std::chrono::steady_clock::time_point fps_poll_time_ = std::chrono::steady_clock::now();
   uint64_t fps_poll_frame_count_ = 0;
   double fps_smoothed_ = 0.0;
+  // Back-button menu on Android. See host_menu.h.
+  std::unique_ptr<nocturne::HostMenu> host_menu_;
 
   std::filesystem::path user_settings_path() const { return user_data_root() / "settings.toml"; }
 };

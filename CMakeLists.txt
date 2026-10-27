@@ -323,6 +323,7 @@ set(NOCTURNERECOMP_SOURCES
     src/installer/saves_screen.cpp
     src/installer/xbla_package.cpp
     src/platform/document_picker.cpp
+    src/platform/host_menu.cpp
     src/ui_text.cpp
     src/video_mode.cpp
     src/xbox_live.cpp
