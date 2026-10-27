@@ -12,7 +12,9 @@
 //     languages), created by sub_825CEC78 and stored at 0x82E7A590. Every
 //     text draw and measure reads that pointer fresh.
 //   * the PS1 side's own language index at 0x8313BC20 (sub_824FAEF8), which
-//     its code uses to pick from its static per-language tables.
+//     its code uses to pick from its static per-language tables. It also
+//     picks each dialogue scene's script routine, so it only changes once no
+//     scene is running.
 //
 // Anything else that branches on the language (screen layouts, the native
 // options labels) asks XConfig or the cvar each time, so it is already live.

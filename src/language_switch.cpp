@@ -61,6 +61,12 @@ constexpr uint32_t kFontChNameAddr = 0x8200B8B4u;
 // The PS1 side's language index (set by sub_824FAEF8).
 constexpr uint32_t kPs1LanguageAddr = 0x8313BC20u;
 
+// Nonzero while a PS1 dialogue scene runs. Each scene's entity picks its
+// Japanese or Latin script routine from the language index every frame
+// (e.g. sub_823A6AA8), and the two keep separate state, so changing the
+// index mid-scene hands the other routine a script it never started.
+constexpr uint32_t kPs1DialogueActiveAddr = 0x831745C4u;
+
 constexpr uint32_t kAllocFnAddr = 0x82576950u;  // (size) -> pointer
 
 // A text widget's own copy of its text (wcsncpy'd in, up to 0x800 chars), its
@@ -141,6 +147,10 @@ uint32_t g_loaded_language = 0;
 // Keyed by language code and by font file name address. Guest thread only.
 std::unordered_map<std::string, uint32_t> g_tables;
 std::unordered_map<uint32_t, uint32_t> g_fonts;
+
+// A PS1 language index waiting for the current dialogue scene to end, or -1.
+// Guest thread only.
+int64_t g_pending_ps1_index = -1;
 
 // One recorded list item text call, replayed as is.
 struct ListItemText {
@@ -400,7 +410,7 @@ void SwitchLanguage(PPCContext& ctx, uint8_t* base, uint32_t language) {
   if (font) {
     Write32BE(base, kFontPtrAddr, font);
   }
-  Write32BE(base, kPs1LanguageAddr, files.ps1_index);
+  g_pending_ps1_index = files.ps1_index;
 
   for (const Retext& r : retext) {
     if (r.id >= count) {
@@ -480,6 +490,11 @@ void NoteTextSetById(uint32_t text_widget, uint32_t string_id) {
 }
 
 void ApplyPendingLanguageSwitch(PPCContext& ctx, uint8_t* base) {
+  if (g_pending_ps1_index >= 0 && Read32BE(base, kPs1DialogueActiveAddr) == 0) {
+    Write32BE(base, kPs1LanguageAddr, static_cast<uint32_t>(g_pending_ps1_index));
+    g_pending_ps1_index = -1;
+  }
+
   const uint32_t requested = g_requested_language.load();
   if (requested == g_loaded_language) {
     return;
