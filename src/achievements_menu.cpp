@@ -131,19 +131,23 @@ AchievementsMenu& Achievements() {
   return instance;
 }
 
-// The bind's real key, used only to briefly re-arm bind_achievements for our
-// own synthetic toggle (see ToggleOverlayBindOnUIThread). Kept unbound the
-// rest of the time so it can't be pressed directly and Settings shows it as
-// unbound rather than a misleading "F7".
-constexpr const char* kAchievementsUnderlyingKey = "F7";
+// The key used only to briefly re-arm bind_achievements for our own synthetic
+// toggle (see ToggleOverlayBindOnUIThread). Kept unbound the rest of the time
+// so it can't be pressed directly and Settings shows it as unbound rather
+// than a misleading "F7". Not the SDK's default F7: the synthetic event goes
+// through the bind dispatcher, so it would also toggle any other bind on that
+// key (the item_inspector mod's default is F7). Pause is outside the SDK's
+// collision pool, so nothing gets moved onto it.
+constexpr const char* kAchievementsUnderlyingKey = "Pause";
 
 void AchievementsMenu::Bind(rex::ui::Window* window, rex::ui::WindowedAppContext* context,
                             rex::input::InputSystem* input_system) {
   window_ = window;
   context_ = context;
   input_ = input_system;
-  rex::cvar::SetFlagByName("bind_achievements", "");
 }
+
+void AchievementsMenu::ReleaseBindKey() { rex::cvar::SetFlagByName("bind_achievements", ""); }
 
 void AchievementsMenu::AttachWatcher(rex::ui::ImGuiDrawer* drawer) {
   if (drawer && !watcher_) {

@@ -146,6 +146,10 @@ class NocturnerecompApp : public rex::ReXApp {
     nocturne::RegisterLanguageOptionsListener(runtime()->mod_registry());
     nocturne::RegisterNativeStringListener(runtime()->mod_registry());
     nocturne::RegisterUiStringListener(runtime()->mod_registry());
+
+    // Same window, for keybinds: free the SDK's F7 achievements bind before the
+    // mods register theirs. See AchievementsMenu::ReleaseBindKey.
+    nocturne::AchievementsMenu::ReleaseBindKey();
   }
 
   bool SetupEnvironment() override {

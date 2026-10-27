@@ -23,8 +23,9 @@
 //
 // The bind is otherwise a live hotkey, letting a player pop the overlay
 // directly (skipping the XN_SYS_UI pause) and showing a misleading "F7" entry
-// in Settings even though the intended way in is the guest pause menu. Bind()
-// clears the bind_achievements cvar so it reads as unbound; our own toggle
+// in Settings even though the intended way in is the guest pause menu.
+// ReleaseBindKey() clears the bind_achievements cvar so it reads as unbound;
+// our own toggle
 // (ToggleOverlayBindOnUIThread) briefly re-arms it with its real key just long
 // enough to drive the synthetic key event, then clears it again.
 #pragma once
@@ -52,9 +53,14 @@ class AchievementsMenu {
   AchievementsMenu();
   ~AchievementsMenu();
 
+  // Clears the bind_achievements cvar (see the file comment above). Call from
+  // OnPostLoadXexImage: the SDK registers the bind on F7 before that, and mod
+  // plugins register theirs right after, so clearing it any later leaves F7
+  // looking taken and a mod asking for it gets moved to another key.
+  static void ReleaseBindKey();
+
   // Provide live UI objects. Call once setup completes (window/context from
   // OnPostSetup); the input system is polled for the controller close button.
-  // Also clears the bind_achievements cvar -- see the file comment above.
   void Bind(rex::ui::Window* window, rex::ui::WindowedAppContext* context,
             rex::input::InputSystem* input_system);
 
