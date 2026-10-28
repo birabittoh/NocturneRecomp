@@ -9,6 +9,7 @@
 #include "host_menu.h"
 #include "jp_artwork.h"
 #include "jp_voices.h"
+#include "target.h"
 #include "rando_runtime.h"
 #include "touch_input_driver.h"
 #include "ui_font.h"
@@ -145,8 +146,7 @@ constexpr std::array kGameDefaults = {
 // etc. no-op harmlessly for "vulkan_device" on a build without Vulkan.
 //
 // host_timer_resolution_ms is absent here on purpose: 5ms is right for
-// everyone, so it gets no curated row. It is listed in kAdvancedCvarNames
-// instead, where the generic widget exposes it as the raw millisecond value.
+// everyone, so it gets no curated row.
 // The enhancement tabs, in order: res/lang's [enhancements] section keys.
 // "Other" also holds the cosmetic and game mode settings.
 constexpr std::array<const char*, 4> kEnhancementTabs = {
@@ -162,7 +162,7 @@ constexpr std::array<const char*, 17> kBasicCvarNames = {
     "fullscreen",       "vsync",         "user_name",       "user_language",
     "gpu_backend",      "vulkan_device", "audio_mute",      "audio_volume",
     "graphics_style_enhanced", "touch_controls", "touch_movement", "touch_function_keys", "touch_scale",
-    "touch_opacity", "touch_hide_delay", "english_voices", "artwork"};
+    "touch_opacity", "touch_hide_delay", "voices", "artwork"};
 
 // audio_volume is stored (and applied to samples by the SDL audio driver) as
 // linear amplitude, but human loudness perception is roughly logarithmic --
@@ -207,21 +207,6 @@ bool IsKnownLanguageId(std::string_view id) {
   }
   return false;
 }
-
-// cvars rendered generically in the collapsed Advanced section, persisted to
-// the app's normal cvar config (nocturnerecomp.toml).
-constexpr std::array<const char*, 7> kAdvancedCvarNames = {
-    "post_process_shader_enabled",
-    "post_process_shader_path",
-    // Windows only, so absent from the registry elsewhere; DrawAdvancedRow and
-    // the generic Reset-All / save loops no-op on a name that is not
-    // registered, so listing it unconditionally is safe.
-    "host_timer_resolution_ms",
-    "shader_dump_enabled",
-    "texture_dump_enabled",
-    "texture_dump_format",
-    "texture_dump_skip_sizes",
-};
 
 std::vector<std::string> BasicCvarNames() {
   return std::vector<std::string>(kBasicCvarNames.begin(), kBasicCvarNames.end());
@@ -296,9 +281,6 @@ class CuratedSettingsDialog : public rex::ui::ImGuiDialog {
       for (const char* name : kBasicCvarNames) {
         rex::cvar::ResetToDefault(name);
       }
-      for (const char* name : kAdvancedCvarNames) {
-        rex::cvar::ResetToDefault(name);
-      }
       for (const auto& name : EnhancementCvarNames()) {
         rex::cvar::ResetToDefault(name);
       }
@@ -306,7 +288,6 @@ class CuratedSettingsDialog : public rex::ui::ImGuiDialog {
         rex::cvar::ResetToDefault(name);
       }
       SaveBasic();
-      SaveAdvanced();
       SaveEnhancements();
       SaveIntroSkips();
     }
@@ -361,25 +342,30 @@ class CuratedSettingsDialog : public rex::ui::ImGuiDialog {
       if (is_tracked(name))
         return true;
     }
-    for (const char* name : kAdvancedCvarNames) {
-      if (is_tracked(name))
-        return true;
-    }
     return false;
   }
 
   void DrawGeneralTab() {
     DrawUpdateSection();
 
-    DrawFullscreenRow();
-    DrawVsyncRow();
-    DrawGraphicsStyleRow();
+    ImGui::SeparatorText(Tr("settings", "section_game"));
+    DrawLanguageRow();
+    DrawReleaseChoiceRow("voices", Tr("settings", "voices"), JpVoicesAvailable());
+    DrawReleaseChoiceRow("artwork", Tr("settings", "artwork"), JpArtworkAvailable());
+    DrawUserNameRow();
+    DrawStartScreenRow();
+
+    ImGui::SeparatorText(Tr("settings", "section_audio"));
     DrawAudioMuteRow();
     DrawAudioVolumeRow();
-    DrawEnglishVoicesRow();
-    DrawArtworkRow();
-    DrawUserNameRow();
-    DrawLanguageRow();
+
+    ImGui::SeparatorText(Tr("settings", "section_graphics"));
+#if !REX_PLATFORM_ANDROID
+    // Android is always fullscreen.
+    DrawFullscreenRow();
+#endif
+    DrawVsyncRow();
+    DrawGraphicsStyleRow();
     // The native renderer reads both: gpu_backend picks D3D12 or Vulkan (only
     // Windows has the choice) and vulkan_device the adapter when Vulkan is in use.
 #ifdef _WIN32
@@ -392,18 +378,8 @@ class CuratedSettingsDialog : public rex::ui::ImGuiDialog {
       DrawVulkanDeviceRow();
 #endif
 
-    ImGui::Separator();
+    ImGui::SeparatorText(Tr("settings", "section_controls"));
     DrawTouchRows();
-
-    ImGui::Separator();
-    DrawStartScreenRow();
-
-    ImGui::Separator();
-    if (ImGui::CollapsingHeader(Tr("settings", "advanced"))) {
-      for (const char* name : kAdvancedCvarNames) {
-        DrawAdvancedRow(name);
-      }
-    }
   }
 
   // The on-screen pad (see touch_layout.h). Its sliders only show while it is on.
@@ -509,9 +485,6 @@ class CuratedSettingsDialog : public rex::ui::ImGuiDialog {
     const auto runtime = GetRandoRuntime().state();
     const float wrap_width = 400.0f;
     ImGui::PushTextWrapPos(ImGui::GetCursorPosX() + wrap_width);
-    if (section == kEnhancementTabs[0]) {
-      ImGui::TextUnformatted(Tr("enhancements", "intro"));
-    }
     if (!runtime.supported) {
       ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 0.85f, 0.2f, 1.0f));
       ImGui::TextUnformatted(runtime.unsupported_reason.c_str());
@@ -522,7 +495,6 @@ class CuratedSettingsDialog : public rex::ui::ImGuiDialog {
       ImGui::PopStyleColor();
     }
     ImGui::PopTextWrapPos();
-    ImGui::Separator();
 
     ImGui::BeginDisabled(!runtime.supported);
     const rando::Options* seed = runtime.active ? &runtime.active->options : nullptr;
@@ -736,15 +708,6 @@ class CuratedSettingsDialog : public rex::ui::ImGuiDialog {
     std::vector<std::string> names(kIntroSkipCvarNames.begin(), kIntroSkipCvarNames.end());
     rex::cvar::SaveConfigSubset(user_settings_path_, names);
   }
-  // Advanced rows used to persist to app_config_path_ (<game>.toml). That
-  // file is now read-only from the game's own UI (the "All Settings..."
-  // browser saves to settings.toml too, see above); <game>.toml can still be
-  // hand-edited for dev-only setup, but nothing here writes to it anymore.
-  void SaveAdvanced() {
-    std::vector<std::string> names(kAdvancedCvarNames.begin(), kAdvancedCvarNames.end());
-    rex::cvar::SaveConfigSubset(user_settings_path_, names);
-  }
-
   // Game self-update (see rex::system::AutoUpdater), surfaced here rather
   // than the SDK's mod manager overlay (F1) since a player who never touches
   // mods should still be told about an available update
@@ -867,25 +830,12 @@ class CuratedSettingsDialog : public rex::ui::ImGuiDialog {
     ImGui::PopID();
   }
 
-  // Only with both releases installed: otherwise there is one set of voices.
-  void DrawEnglishVoicesRow() {
-    const auto* entry = rex::cvar::GetFlagInfo("english_voices");
-    if (!entry || !JpVoicesAvailable())
-      return;
-    ImGui::TextUnformatted(Tr("settings", "english_voices"));
-    ImGui::SameLine(180.0f);
-    ImGui::PushID("english_voices");
-    if (rex::ui::DrawCvarWidget(*entry, 160.0f, /*persist=*/true)) {
-      SaveBasic();
-    }
-    ImGui::PopID();
-  }
-
-  // Only with both releases installed: otherwise there is one set of artwork.
-  // Applies live (see jp_artwork.h); "Auto" follows the language.
-  void DrawArtworkRow() {
-    const auto* entry = rex::cvar::GetFlagInfo("artwork");
-    if (!entry || !JpArtworkAvailable())
+  // Voices and artwork: whose release to use. Only with both installed is
+  // there a choice; otherwise the row is disabled and shows the one installed.
+  // Both apply live (see jp_voices.h, jp_artwork.h); "Auto" follows the language.
+  void DrawReleaseChoiceRow(const char* cvar, const char* label, bool available) {
+    const auto* entry = rex::cvar::GetFlagInfo(cvar);
+    if (!entry)
       return;
 
     static const std::array<std::string, 3> kValues = {"auto", "jp", "world"};
@@ -897,16 +847,18 @@ class CuratedSettingsDialog : public rex::ui::ImGuiDialog {
       return Tr("settings", "auto");
     };
 
-    const std::string current = entry->getter();
-    ImGui::TextUnformatted(Tr("settings", "artwork"));
+    const std::string current =
+        available ? entry->getter() : (TargetReleaseId() == "xbla-jp" ? "jp" : "world");
+    ImGui::TextUnformatted(label);
     ImGui::SameLine(180.0f);
     ImGui::SetNextItemWidth(160.0f);
-    ImGui::PushID("artwork");
+    ImGui::PushID(cvar);
+    ImGui::BeginDisabled(!available);
     if (ImGui::BeginCombo("##v", label_for(current).c_str())) {
       for (const auto& value : kValues) {
         const bool selected = value == current;
         if (ImGui::Selectable(label_for(value).c_str(), selected)) {
-          rex::cvar::SetFlagByName("artwork", value, /*persist=*/true);
+          rex::cvar::SetFlagByName(cvar, value, /*persist=*/true);
           SaveBasic();
         }
         if (selected)
@@ -914,6 +866,9 @@ class CuratedSettingsDialog : public rex::ui::ImGuiDialog {
       }
       ImGui::EndCombo();
     }
+    ImGui::EndDisabled();
+    if (!available && ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
+      ImGui::SetTooltip("%s", Tr("settings", "choice_needs_both"));
     ImGui::PopID();
   }
 
@@ -926,10 +881,6 @@ class CuratedSettingsDialog : public rex::ui::ImGuiDialog {
     const auto* entry = rex::cvar::GetFlagInfo("audio_volume");
     if (!entry)
       return;
-    const auto* mute_entry = rex::cvar::GetFlagInfo("audio_mute");
-    if (mute_entry && mute_entry->getter() == "true")
-      return;
-
     int percent = VolumePercentFromAmplitude(std::atof(entry->getter().c_str()));
 
     ImGui::TextUnformatted(Tr("settings", "volume"));
@@ -1111,30 +1062,6 @@ class CuratedSettingsDialog : public rex::ui::ImGuiDialog {
     ImGui::PopID();
   }
 #endif
-
-  void DrawAdvancedRow(const char* name) {
-    const auto* entry = rex::cvar::GetFlagInfo(name);
-    if (!entry)
-      return;
-
-    bool read_only = (entry->lifecycle == rex::cvar::Lifecycle::kInitOnly);
-    ImGui::PushID(name);
-    if (read_only)
-      ImGui::BeginDisabled();
-
-    ImGui::TextUnformatted(name);
-    if (!entry->description.empty() && ImGui::IsItemHovered()) {
-      ImGui::SetTooltip("%s", entry->description.c_str());
-    }
-    ImGui::SameLine(240.0f);
-    if (rex::ui::DrawCvarWidget(*entry, 160.0f, /*persist=*/true)) {
-      SaveAdvanced();
-    }
-
-    if (read_only)
-      ImGui::EndDisabled();
-    ImGui::PopID();
-  }
 
   rex::ui::Window* window_;
   std::filesystem::path user_settings_path_;

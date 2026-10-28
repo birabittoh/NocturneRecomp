@@ -24,13 +24,17 @@
 
 #include "target.h"
 
-REXCVAR_DEFINE_BOOL(english_voices, false, "Game",
-                    "Play World's English voices even when the JP release is installed");
+REXCVAR_DEFINE_STRING(voices, "auto", "Game",
+                      "Whose voices to play when both releases are installed: world, jp, or "
+                      "auto (JP's while the language is Japanese)")
+    .allowed({"auto", "jp", "world"});
 
 namespace nocturne {
 namespace {
 
 namespace fs = std::filesystem;
+
+constexpr uint32_t kLanguageJapanese = 2;
 
 constexpr const char* kGuestSoundPath = "game:\\DATA\\sound";
 constexpr const char* kMount = "\\Device\\NocturneJpSound";
@@ -193,6 +197,15 @@ bool BuildTables(const fs::path& world_sound, const fs::path& jp_sound) {
   return true;
 }
 
+bool WantJp() {
+  const std::string choice = REXCVAR_GET(voices);
+  if (choice == "jp")
+    return true;
+  if (choice == "world")
+    return false;
+  return rex::cvar::Query<uint32_t>("user_language") == kLanguageJapanese;
+}
+
 // Puts one release's byte counts in the tables and links DATA\sound to JP's
 // folder or not. Banks already loaded keep playing; each takes the choice
 // from its next load (a stage's on entering it, a character's or familiar's
@@ -253,15 +266,16 @@ void InstallJpVoices(rex::Runtime* runtime) {
   g_active = true;
   REXLOG_INFO("jp voices: {} available (wave buffers {:X} {:X} {:X} {:X})", jp_sound.string(),
               g_wave_buffer[0], g_wave_buffer[1], g_wave_buffer[2], g_wave_buffer[3]);
-  UseVoices(!REXCVAR_GET(english_voices));
-  rex::cvar::RegisterChangeCallback("english_voices",
-                                    [](std::string_view, std::string_view) { g_dirty.store(true); });
+  UseVoices(WantJp());
+  auto mark = [](std::string_view, std::string_view) { g_dirty.store(true); };
+  rex::cvar::RegisterChangeCallback("voices", mark);
+  rex::cvar::RegisterChangeCallback("user_language", mark);
 }
 
 void ApplyPendingVoices() {
   if (!g_active || !g_dirty.exchange(false))
     return;
-  UseVoices(!REXCVAR_GET(english_voices));
+  UseVoices(WantJp());
 }
 
 }  // namespace nocturne
