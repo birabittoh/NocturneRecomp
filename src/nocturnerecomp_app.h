@@ -314,6 +314,10 @@ class NocturnerecompApp : public rex::ReXApp {
     // the guest starts, so it is in place by the title's first font load.
     nocturne::InstallJapaneseFontOverlay(runtime());
 
+    // JP's fonts.zip has no table for the accented letters of the European
+    // languages; draw one (see latin1_font.h).
+    nocturne::InstallLatin1FontOverlay(runtime());
+
     // With World mounted, play JP's voice banks unless English ones are
     // forced (see jp_voices.h).
     nocturne::InstallJpVoices(runtime());

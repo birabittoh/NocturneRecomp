@@ -348,12 +348,14 @@ set(NOCTURNERECOMP_SOURCES
     src/fast_forward.cpp
     src/font_overlay.cpp
     src/font_patch.cpp
+    src/fonts_zip.cpp
     src/graphics_settings.cpp
     src/host_timer_resolution.cpp
     src/intro_skips.cpp
     src/jp_artwork.cpp
     src/jp_voices.cpp
     src/language_switch.cpp
+    src/latin1_font.cpp
     src/movie_player.cpp
     src/help_options_menu.cpp
     src/main_menu.cpp

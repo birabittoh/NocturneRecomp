@@ -7,6 +7,7 @@
 #include <memory>
 #include <string>
 #include <string_view>
+#include <utility>
 #include <vector>
 
 #include <rex/filesystem.h>
@@ -19,7 +20,9 @@
 #include <rex/runtime.h>
 
 #include "font_patch.h"
+#include "fonts_zip.h"
 #include "glyph_pack.generated.h"
+#include "latin1_font.h"
 #include "target.h"
 
 namespace nocturne {
@@ -33,6 +36,8 @@ constexpr const char* kGuestFontPath = "game:\\MEDIA\\font_ja.xpr";
 constexpr const char* kFontFileName = "font_ja.xpr";
 constexpr const char* kStringsFileName = "strings_ja.bin";
 constexpr const char* kOverlayMount = "\\Device\\NocturneMediaOverlay";
+constexpr const char* kGuestFontsZipPath = "game:\\DATA\\fonts\\fonts.zip";
+constexpr const char* kFontsOverlayMount = "\\Device\\NocturneFontsOverlay";
 
 // Serves a byte buffer we own.
 class MemoryFile : public rex::filesystem::File {
@@ -163,7 +168,7 @@ class MediaDirEntry : public rex::filesystem::Entry {
 class MediaOverlayDevice : public rex::filesystem::Device {
  public:
   explicit MediaOverlayDevice(const std::string& mount_path)
-      : Device(mount_path), name_("NocturneMediaOverlay") {
+      : Device(mount_path), name_(mount_path.substr(mount_path.rfind('\\') + 1)) {
     root_ = std::make_unique<MediaDirEntry>(this, "");
   }
 
@@ -210,6 +215,58 @@ std::vector<uint8_t> ReadHostFile(const std::filesystem::path& path) {
   in.seekg(0);
   in.read(reinterpret_cast<char*>(data.data()), static_cast<std::streamsize>(data.size()));
   return in ? data : std::vector<uint8_t>{};
+}
+
+// Shadows the guest directory at dir_device_path, whose files are in
+// host_dir, with a device mounted at `mount`: every file is mirrored except
+// `files`, which are served from memory. False when nothing was installed.
+bool ShadowDirectory(rex::filesystem::VirtualFileSystem* vfs, const std::string& dir_device_path,
+                     const std::filesystem::path& host_dir, const char* mount,
+                     std::vector<std::pair<std::string, std::vector<uint8_t>>> files) {
+  auto device = std::make_unique<MediaOverlayDevice>(mount);
+  MediaOverlayDevice* device_raw = device.get();
+  MediaDirEntry* root = device_raw->root();
+
+  std::error_code ec;
+  for (const auto& item : std::filesystem::directory_iterator(host_dir, ec)) {
+    if (ec) {
+      break;
+    }
+    if (!item.is_regular_file()) {
+      // MEDIA and DATA\fonts are flat in every layout we have seen; a
+      // subdirectory would need recursive mirroring, so bail rather than
+      // silently hide it.
+      REXLOG_WARN("font overlay: {} contains a subdirectory, not shadowing", host_dir.string());
+      return false;
+    }
+    const std::string name = item.path().filename().string();
+    if (std::any_of(files.begin(), files.end(), [&](const auto& f) {
+          return rex::string::utf8_equal_case(name, f.first);
+        })) {
+      continue;
+    }
+    root->Add(std::make_unique<HostEntry>(device_raw, root, name, item.path(),
+                                          static_cast<size_t>(item.file_size(ec))));
+  }
+  if (ec) {
+    REXLOG_WARN("font overlay: could not enumerate {}, not shadowing", host_dir.string());
+    return false;
+  }
+  for (auto& [name, file] : files) {
+    root->Add(std::make_unique<MemoryEntry>(device_raw, root, name, std::move(file)));
+  }
+
+  if (!vfs->RegisterDevice(std::move(device))) {
+    REXLOG_WARN("font overlay: could not register {}", mount);
+    return false;
+  }
+  // Shadow the directory, not the file -- see MediaDirEntry.
+  if (!vfs->RegisterSymbolicLink(dir_device_path, mount)) {
+    REXLOG_WARN("font overlay: could not link {} to {}", dir_device_path, mount);
+    vfs->UnregisterDevice(mount);
+    return false;
+  }
+  return true;
 }
 
 uint32_t Be32(const std::vector<uint8_t>& d, size_t at) {
@@ -446,56 +503,9 @@ unsigned InstallJapaneseFontOverlay(rex::Runtime* runtime) {
       strings.emplace_back(name, RelabelQuit(std::move(file), label));
   }
 
-  auto device = std::make_unique<MediaOverlayDevice>(kOverlayMount);
-  MediaOverlayDevice* device_raw = device.get();
-  MediaDirEntry* root = device_raw->root();
-
-  // Mirror every sibling so nothing else in MEDIA changes behaviour, then
-  // substitute the composed font.
-  size_t mirrored = 0;
-  std::error_code ec;
-  for (const auto& item : std::filesystem::directory_iterator(media_dir, ec)) {
-    if (ec) {
-      break;
-    }
-    if (!item.is_regular_file()) {
-      // MEDIA is flat in every layout we have seen; a subdirectory would need
-      // recursive mirroring, so bail rather than silently hide it.
-      REXLOG_WARN("font overlay: {} contains a subdirectory, not shadowing",
-                  media_dir.string());
-      return 0;
-    }
-    const std::string name = item.path().filename().string();
-    if (rex::string::utf8_equal_case(name, kFontFileName) ||
-        std::any_of(strings.begin(), strings.end(), [&](const auto& s) {
-          return rex::string::utf8_equal_case(name, s.first);
-        })) {
-      continue;
-    }
-    root->Add(std::make_unique<HostEntry>(device_raw, root, name, item.path(),
-                                          static_cast<size_t>(item.file_size(ec))));
-    ++mirrored;
-  }
-  if (ec || mirrored == 0) {
-    REXLOG_WARN("font overlay: could not enumerate {}, not shadowing", media_dir.string());
+  strings.emplace_back(kFontFileName, std::move(patched.image));
+  if (!ShadowDirectory(vfs, media_device_path, media_dir, kOverlayMount, std::move(strings)))
     return 0;
-  }
-  root->Add(std::make_unique<MemoryEntry>(device_raw, root, kFontFileName,
-                                          std::move(patched.image)));
-  for (auto& [name, file] : strings) {
-    root->Add(std::make_unique<MemoryEntry>(device_raw, root, name, std::move(file)));
-  }
-
-  if (!vfs->RegisterDevice(std::move(device))) {
-    REXLOG_WARN("font overlay: could not register the overlay device");
-    return 0;
-  }
-  // Shadow the directory, not the file -- see MediaDirEntry.
-  if (!vfs->RegisterSymbolicLink(media_device_path, kOverlayMount)) {
-    REXLOG_WARN("font overlay: could not register the overlay symlink");
-    vfs->UnregisterDevice(kOverlayMount);
-    return 0;
-  }
 
   // Verify through the same two-step the open path actually uses: resolve the
   // parent, then GetChild the filename. Resolving the full path would only
@@ -508,13 +518,61 @@ unsigned InstallJapaneseFontOverlay(rex::Runtime* runtime) {
     REXLOG_WARN("font overlay: open path still yields the unpatched font ({} bytes, "
                 "expected {})", child->size(), patched_size);
   } else {
-    REXLOG_INFO("font overlay: open path yields the composed font ({} bytes), "
-                "{} sibling(s) mirrored", child->size(), mirrored);
+    REXLOG_INFO("font overlay: open path yields the composed font ({} bytes)", child->size());
   }
 
   REXLOG_INFO("font overlay: added {} supplemental glyph(s) to font_ja.xpr, aliased {} fullwidth",
               patched.glyphs_added, patched.glyphs_aliased);
   return patched.glyphs_added;
+}
+
+bool InstallLatin1FontOverlay(rex::Runtime* runtime) {
+  auto* vfs = runtime ? runtime->file_system() : nullptr;
+  if (!vfs) {
+    return false;
+  }
+  const auto* zip_entry =
+      dynamic_cast<const rex::filesystem::HostPathEntry*>(vfs->ResolvePath(kGuestFontsZipPath));
+  if (!zip_entry || !zip_entry->parent()) {
+    REXLOG_DEBUG("latin1 font: {} is not a host file, skipping", kGuestFontsZipPath);
+    return false;
+  }
+  const std::filesystem::path zip_path = zip_entry->host_path();
+  const std::vector<uint8_t> zip = ReadHostFile(zip_path);
+  const std::vector<ZipEntry> entries = ParseZip(zip);
+  auto find = [&](std::string_view name) {
+    return std::find_if(entries.begin(), entries.end(), [&](const ZipEntry& e) {
+      return rex::string::utf8_equal_case(e.name, name);
+    });
+  };
+  if (entries.empty() || find(kLatin1FontName) != entries.end()) {
+    return false;  // World's, which has the table already
+  }
+  const auto game_font = find(kGameFontName);
+  std::vector<uint8_t> font;
+  if (game_font != entries.end())
+    font = Extract(zip, *game_font);
+  std::vector<uint8_t> served = zip;
+  for (const bool upres : {false, true}) {
+    const std::vector<uint8_t> table = BuildLatin1Font(font, upres);
+    if (table.empty() || served.empty())
+      break;
+    served = AddStoredEntry(served, upres ? kLatin1UpresFontName : kLatin1FontName, table);
+  }
+  if (ParseZip(served).size() != entries.size() + 2) {
+    REXLOG_WARN("latin1 font: could not draw the table from {}, accents stay blank",
+                zip_path.string());
+    return false;
+  }
+
+  std::vector<std::pair<std::string, std::vector<uint8_t>>> files;
+  files.emplace_back(zip_path.filename().string(), std::move(served));
+  if (!ShadowDirectory(vfs, zip_entry->parent()->absolute_path(), zip_path.parent_path(),
+                       kFontsOverlayMount, std::move(files)))
+    return false;
+  REXLOG_INFO("latin1 font: added {} and {} to {}", kLatin1FontName, kLatin1UpresFontName,
+              kGuestFontsZipPath);
+  return true;
 }
 
 }  // namespace nocturne

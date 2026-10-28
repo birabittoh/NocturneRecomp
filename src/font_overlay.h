@@ -34,4 +34,10 @@ namespace nocturne {
 // added, or 0 if the overlay was not installed.
 unsigned InstallJapaneseFontOverlay(rex::Runtime* runtime);
 
+// With JP's folder mounted, serves its DATAontsonts.zip with the
+// latin1.bin and latin1_upres.bin only World's has, drawn by BuildLatin1Font
+// (latin1_font.h), the same way: a shadow of the directory. Does nothing for
+// a fonts.zip that has them. Returns whether the overlay was installed.
+bool InstallLatin1FontOverlay(rex::Runtime* runtime);
+
 }  // namespace nocturne
