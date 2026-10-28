@@ -617,13 +617,14 @@ you're using anything new it added.
 
 Item/enemy names, descriptions, and similar flavor text aren't loaded from
 a separate asset file the VFS can overlay -- they're in the guest image's
-static data (`.rdata`), which is linked into the executable (built from
-`src/guest_data`, see `scripts/gen-guest-image.py`) and loaded into guest
-memory once at startup by the same loader that runs the game's code. Byte
+static data (`.rdata`), which the executable builds at startup from the
+installed release's `default.xex`, always in World's layout (see
+`scripts/guest_recipe.py`), and which is loaded into guest memory once by
+the same loader that runs the game's code. Byte
 layout and text encoding are documented in `extracted/README.md`.
 
-Since the image is linked in, a mod cannot replace `default.xex` (a mod's
-`game/default.xex` is ignored). Change one of those strings by patching
+Since the image is built by the executable, a mod cannot replace
+`default.xex` (a mod's `game/default.xex` is ignored). Change one of those strings by patching
 guest memory from a code mod: any number of mods can
 each own a different address with no conflict, the same way
 `src/ui_color` pokes the accent-color struct. Use
@@ -632,13 +633,14 @@ each own a different address with no conflict, the same way
 which use a "big first letter" font encoding -- see
 `extracted/README.md`) from `OnModuleLaunched()`. Requirements:
 
-1. **Take the guest address from the image's sources or a live process.**
-   `src/guest_data/strings.txt` lists the image's strings by guest address
-   (other data is in the other files there); a running process can be
-   scanned with `scripts/re/scan_guest_memory.py`. Don't compute it from an
-   offline-decrypted `default.xex`: the linked image is laid out the same,
-   but no title update is applied over it (TU1's changes are hooks in
-   `src/tu_hooks.cpp`), so a `default.xexp` doesn't move anything either.
+1. **Take the guest address from World's image or a live process.**
+   `scripts/guest_data.py extract-strings assets/default.xex` lists World's
+   strings by guest address in `assets/guest_data_src/strings.txt`; a
+   running process can be scanned with `scripts/re/scan_guest_memory.py`.
+   The image is laid out as World's `default.xex` even when it's built from
+   JP's, so take addresses from World's, never JP's. No title update is
+   applied over it (TU1's changes are hooks in `src/tu_hooks.cpp`), so a
+   `default.xexp` doesn't move anything either.
 2. **The target field is very likely in read-only memory.** Writing to it
    in-process access-violates (`0xC0000005`) unless the page is unlocked
    first: `runtime->memory()->LookupHeap(addr)->Protect(addr, size,

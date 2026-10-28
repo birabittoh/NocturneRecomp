@@ -203,43 +203,26 @@ add_custom_command(
     VERBATIM
 )
 
-# The guest image, linked in so the game is loaded without the game folder's
-# default.xex (src/guest_image.h), built from src/guest_data with no code
-# sections (scripts/gen-guest-image.py).
-option(NOCTURNE_EMBED_GUEST_IMAGE "Link the guest image built from source into the executable" ON)
+# The guest image, so the game is loaded without the game folder's
+# default.xex (src/guest_image.h). Only its XEX header and a recipe are linked
+# in: the data is put together at startup from the installed release's own
+# default.xex, World's or JP's (scripts/guest_recipe.py).
+option(NOCTURNE_EMBED_GUEST_IMAGE "Build the guest image at startup from the installed release" ON)
 if(NOCTURNE_EMBED_GUEST_IMAGE)
-    set(NOCTURNE_GUEST_IMAGE ${CMAKE_BINARY_DIR}/guest-image.xex)
-    file(GLOB NOCTURNE_GUEST_DATA_SOURCES CONFIGURE_DEPENDS
-        ${CMAKE_SOURCE_DIR}/src/guest_data/*.txt
-        ${CMAKE_SOURCE_DIR}/src/guest_data/*/*.txt)
-    # The data grids taken from the game (scripts/guest_data.py), into the
-    # gitignored assets/guest_data.
-    set(NOCTURNE_GUEST_DATA_STAMP ${CMAKE_BINARY_DIR}/guest-data.stamp)
-    add_custom_command(
-        OUTPUT ${NOCTURNE_GUEST_DATA_STAMP}
-        COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/scripts/guest_data.py
-            extract ${CMAKE_SOURCE_DIR}/assets/default.xex
-        COMMAND ${CMAKE_COMMAND} -E touch ${NOCTURNE_GUEST_DATA_STAMP}
-        DEPENDS
-            ${CMAKE_SOURCE_DIR}/scripts/guest_data.py
-            ${CMAKE_SOURCE_DIR}/src/guest_data/assets.txt
-            ${CMAKE_SOURCE_DIR}/src/guest_data/xdbf.txt
-            ${CMAKE_SOURCE_DIR}/assets/default.xex
-        COMMENT "Extracting the guest data grids"
-        VERBATIM
-    )
+    set(NOCTURNE_GUEST_IMAGE ${CMAKE_BINARY_DIR}/guest-recipe.bin)
     add_custom_command(
         OUTPUT ${NOCTURNE_GUEST_IMAGE}
-        COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/scripts/gen-guest-image.py
-            ${NOCTURNE_GUEST_IMAGE}
+        COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/scripts/guest_recipe.py
+            pack ${CMAKE_SOURCE_DIR}/assets/default.xex ${NOCTURNE_GUEST_IMAGE}
         DEPENDS
-            ${CMAKE_SOURCE_DIR}/scripts/gen-guest-image.py
-            ${CMAKE_SOURCE_DIR}/scripts/guest_data.py
+            ${CMAKE_SOURCE_DIR}/assets/default.xex
+            ${CMAKE_SOURCE_DIR}/scripts/guest_recipe.py
             ${CMAKE_SOURCE_DIR}/scripts/xex_header.py
-            ${NOCTURNE_GUEST_DATA_SOURCES}
-            ${CMAKE_SOURCE_DIR}/ext/KryptonRecomp/xex_image.py
-            ${NOCTURNE_GUEST_DATA_STAMP}
-        COMMENT "Building the guest image from source"
+            ${CMAKE_SOURCE_DIR}/src/guest_data/xex_header.txt
+            ${CMAKE_SOURCE_DIR}/src/guest_data/recipe.txt
+            ${CMAKE_SOURCE_DIR}/src/guest_data/fixups.txt
+            ${CMAKE_SOURCE_DIR}/src/guest_data/world_only.txt
+        COMMENT "Packing the guest image recipe"
         VERBATIM
     )
     set(NOCTURNE_GUEST_IMAGE_ASM ${CMAKE_BINARY_DIR}/guest-image.S)
@@ -256,11 +239,11 @@ if(NOCTURNE_EMBED_GUEST_IMAGE)
 #endif
 
 .p2align 4
-.global SYM(kGuestImageData)
-SYM(kGuestImageData):
+.global SYM(kGuestRecipeData)
+SYM(kGuestRecipeData):
 .incbin "@NOCTURNE_GUEST_IMAGE@"
-.global SYM(kGuestImageDataEnd)
-SYM(kGuestImageDataEnd):
+.global SYM(kGuestRecipeDataEnd)
+SYM(kGuestRecipeDataEnd):
 ]=] @ONLY)
     set_source_files_properties(${NOCTURNE_GUEST_IMAGE_ASM}
         PROPERTIES OBJECT_DEPENDS ${NOCTURNE_GUEST_IMAGE})

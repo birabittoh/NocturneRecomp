@@ -1,7 +1,10 @@
 #!/usr/bin/env python3
-"""Write the guest image the executable embeds (src/guest_image.h).
+"""Write the guest image from its decompiled data (scripts/guest_data.py).
 
-The image is built from src/guest_data alone, with no retail file: the XEX
+This is the image the executable loads, which scripts/guest_recipe.py derives
+its recipe from; the executable itself builds it at startup from the
+player's own default.xex (src/guest_image.h). The image is built from
+assets/guest_data_src with no retail file: the XEX
 header (xex_header.txt, scripts/xex_header.py) and every byte of data
 (scripts/guest_data.py; run its `extract` first for the grids, images and
 XDBF files it takes from the user's own default.xex). Code sections are

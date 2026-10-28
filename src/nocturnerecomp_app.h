@@ -120,9 +120,13 @@ class NocturnerecompApp : public rex::ReXApp {
   }
 
 #ifdef NOCTURNE_EMBED_GUEST_IMAGE
-  // The linked-in image is World's; JP runs on it too, with its own data.
+  // The image is World's, built from whichever release is installed; JP runs
+  // on it too, with its own data files.
   void OnLoadXexImage(std::string& xex_image) override {
-    xex_image = nocturne::MountGuestImage(runtime()->file_system());
+    std::string path = nocturne::MountGuestImage(runtime()->file_system(),
+                                                 nocturne::GameDataRoot() / "default.xex");
+    if (!path.empty())
+      xex_image = std::move(path);
   }
 #endif
 

@@ -1,10 +1,12 @@
 #!/usr/bin/env python3
 """The guest image's data as source.
 
-Until every byte of the image's data sections comes from here, the embedded
-image (scripts/gen-guest-image.py) is the retail one with these sources
-written over it; `check` measures how much of the data they account for and
-proves they reproduce it.
+The image's data decompiled, for reverse engineering: it is World's, so it
+lives in assets/guest_data_src/ (gitignored, like everything taken from the
+game) and isn't built into anything. scripts/gen-guest-image.py builds the
+image from it, which is what scripts/guest_recipe.py derives the recipe the
+executable ships against; `check` proves the sources reproduce the retail
+data.
 
 The data is the PlayStation game's, big endian with 32 bit pointers, in the
 layouts sotn-decomp (github.com/Xeeynamo/sotn-decomp) documents. Each stage
@@ -44,7 +46,7 @@ CLUTs: the color data of PAL_BULK descriptors (a stage's `cluts`: 5, then
 16 colors to a row, in assets/guest_data/cluts/, the PlayStation colors
 mapped as the catalog's palettes are.
 
-Catalog: data found by hand is listed in src/guest_data/assets.txt, one
+Catalog: data found by hand is listed in assets/guest_data_src/assets.txt, one
 `address kind name args` per line; its images (`rawgfx`, 1, 4 or 8 bits per
 pixel, 4 bit ones as 16 color grayscale PNGs) and palettes (`palette`, 16 bit
 PlayStation colors as RGBA, 16 to a row, the semi-transparency bit as alpha
@@ -53,39 +55,39 @@ PlayStation colors as RGBA, 16 to a row, the semi-transparency bit as alpha
 Sprites: SpriteParts {u16 count; parts of 11 u16: flags, x, y, width,
 height, clut, tileset, left, top, right, bottom} and the arrays of pointers to
 them (sprite sets, 0 for no frame, the frames stored before the array) are
-committed text, src/guest_data/sprites/<array address>.txt, one file per set
+text, assets/guest_data_src/sprites/<array address>.txt, one file per set
 holding the array and the frames it points at. `extract-sprites` finds the
 sets as runs of pointers to valid SpriteParts.
 
 Layouts: a room's entities, LayoutEntity {s16 x; s16 y; u16 id; u16 slot;
-u16 params} from a {-2, -2} entry to a {-1, -1} one, are committed text,
-src/guest_data/layouts.txt, the sentinels left out but for the start one's
+u16 params} from a {-2, -2} entry to a {-1, -1} one, are text,
+assets/guest_data_src/layouts.txt, the sentinels left out but for the start one's
 params (0 or 1). `extract-layouts` finds them by the sentinels.
 
 Stages: the structures an Overlay header leads to (its RoomHeaders, RoomDefs,
 LayerDefs, TileDefinitions, GfxBanks, CLUT descriptors and the pointer arrays
-listing them) are committed text, src/guest_data/stages.txt, pointers as
+listing them) are text, assets/guest_data_src/stages.txt, pointers as
 addresses.
 
-Strings: NUL terminated text, Shift-JIS, `address<TAB>text` lines in the
-committed src/guest_data/strings.txt.
+Strings: NUL terminated text, Shift-JIS, `address<TAB>text` lines in
+assets/guest_data_src/strings.txt.
 
-Tables: whatever nonzero data no other source holds is committed as words,
-src/guest_data/tables.txt (ES style): `@address` blocks of ints, floats, 0x
+Tables: whatever nonzero data no other source holds is kept as words,
+assets/guest_data_src/tables.txt (ES style): `@address` blocks of ints, floats, 0x
 hex and hi:lo halfword pairs, with x-prefixed hex for the bytes before the
 first and after the last whole word. `extract-tables` writes it from what the
 other sources leave out, so it runs after them.
 
 XDBF: the title's XDBF (0x831E0000, which the XEX resource header points
-the SDK at for achievements, strings and the XLAST) is committed text,
-src/guest_data/xdbf.txt: its entry and free tables, metadata sections as
+the SDK at for achievements, strings and the XLAST) is text,
+assets/guest_data_src/xdbf.txt: its entry and free tables, metadata sections as
 words and string tables as `id<TAB>text`. Its PNG images and the XLAST's gzip
 stream (a .NET GZipStream, which zlib can't reproduce) are extracted into
 assets/guest_data/xdbf/.
 
 Copies: on stage load, sub_8225FF58 memcpy()s each of the stage's tile maps
 from .rdata over its .data buffer, whose image contents are the same bytes.
-src/guest_data/copies.txt lists them, `destination<TAB>source<TAB>size`, the
+assets/guest_data_src/copies.txt lists them, `destination<TAB>source<TAB>size`, the
 .rdata block being written from the tile map it copies.
 
     python scripts/guest_data.py extract assets/default.xex
@@ -110,7 +112,7 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(ROOT, "ext", "KryptonRecomp"))
 from xex_image import XexImage  # noqa: E402
 
-SOURCE_DIR = os.path.join(ROOT, "src", "guest_data")
+SOURCE_DIR = os.path.join(ROOT, "assets", "guest_data_src")
 GRID_DIR = os.path.join(ROOT, "assets", "guest_data")
 COPIES_FILE = os.path.join(SOURCE_DIR, "copies.txt")
 CATALOG_FILE = os.path.join(SOURCE_DIR, "assets.txt")
@@ -520,7 +522,7 @@ def overlay_grids(image, base):
 
 
 def read_catalog():
-    """[(address, kind, name, [args])] from src/guest_data/assets.txt."""
+    """[(address, kind, name, [args])] from assets/guest_data_src/assets.txt."""
     out = []
     with open(CATALOG_FILE, encoding="utf-8") as f:
         for line in f.read().split("\n"):
@@ -673,7 +675,7 @@ def find_sprites(img, claimed):
 
 
 def write_sprites(img, arrays):
-    """One file per array in src/guest_data/sprites/: the array, then the
+    """One file per array in assets/guest_data_src/sprites/: the array, then the
     frames it points at."""
     os.makedirs(SPRITES_DIR, exist_ok=True)
     for array, words in sorted(arrays.items()):
