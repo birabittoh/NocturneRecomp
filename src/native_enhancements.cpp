@@ -5,7 +5,7 @@
 // there a change reaches the game on the next frame, except the game mode: a
 // running game keeps its own, so that one waits for the next new game (see
 // rando_runtime.h). The intro skips (intro_skips.cpp) follow at the end of
-// Other.
+// Other, as on the overlay.
 //
 // Labels are short: a row's label has to fit between the list's left edge and
 // the value arrows, about 20 Latin characters at the list's scale.
@@ -153,8 +153,8 @@ constexpr OptionRow kOtherRows[] = {
         .reset = &GetCvarDefault,
         .cvar = kGameModeCvar,
     },
-    // Not on the overlay's tabs (intro_skips.cpp). skip_intros takes effect at
-    // the next launch, skip_richter at the next new game.
+    // intro_skips.cpp. skip_intros takes effect at the next launch,
+    // skip_richter at the next new game.
     BoolRow(5, "skip_intros"),
     BoolRow(6, "skip_richter"),
 };
@@ -201,8 +201,8 @@ constexpr OptionsPage kPages[] = {
 }  // namespace
 
 const OptionsPage& EnhancementsOptionsPage() {
-  // Every bool cvar of the overlay's tabs has a row here, then its three
-  // others, then the two intro skips.
+  // Every enhancement toggle of the overlay's tabs has a row here, then its
+  // three others, then the two intro skips.
   static_assert(std::size(kQualityOfLifeRows) + std::size(kFixesRows) + std::size(kItemsRows) +
                     std::size(kOtherRows) ==
                 static_cast<size_t>(rando::Enhancement::kCount) + 5);

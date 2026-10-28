@@ -152,6 +152,12 @@ constexpr std::array kGameDefaults = {
 constexpr std::array<const char*, 4> kEnhancementTabs = {
     "section_quality_of_life", "section_fixes", "section_items_and_shop", "section_other"};
 
+// The intro skips (intro_skips.cpp), in the Other tab's More skips section. Not
+// enhancements: they work without the randomizer core, so they stay enabled
+// when it's unsupported. Label and description are res/lang's [enhancements]
+// <cvar> and <cvar>_desc.
+constexpr std::array<const char*, 2> kIntroSkipCvarNames = {"skip_intros", "skip_richter"};
+
 constexpr std::array<const char*, 17> kBasicCvarNames = {
     "fullscreen",       "vsync",         "user_name",       "user_language",
     "gpu_backend",      "vulkan_device", "audio_mute",      "audio_volume",
@@ -296,9 +302,13 @@ class CuratedSettingsDialog : public rex::ui::ImGuiDialog {
       for (const auto& name : EnhancementCvarNames()) {
         rex::cvar::ResetToDefault(name);
       }
+      for (const char* name : kIntroSkipCvarNames) {
+        rex::cvar::ResetToDefault(name);
+      }
       SaveBasic();
       SaveAdvanced();
       SaveEnhancements();
+      SaveIntroSkips();
     }
     ImGui::SameLine();
     // Opens the SDK's own full cvar browser (the same one bind_settings/F4
@@ -524,6 +534,34 @@ class CuratedSettingsDialog : public rex::ui::ImGuiDialog {
       DrawGameModeSection(seed);
     }
     ImGui::EndDisabled();
+    if (section == "section_other") {
+      ImGui::SeparatorText(Tr("enhancements", "section_more_skips"));
+      DrawIntroSkipToggles();
+    }
+  }
+
+  // skip_intros takes effect at the next launch, skip_richter at the next new
+  // game; their descriptions say so.
+  void DrawIntroSkipToggles() {
+    for (const char* cvar : kIntroSkipCvarNames) {
+      const auto* entry = rex::cvar::GetFlagInfo(cvar);
+      if (!entry) {
+        continue;
+      }
+      ImGui::PushID(cvar);
+      ImGui::BeginGroup();
+      bool on = entry->getter() == "true";
+      if (rex::ui::ToggleSwitch("##v", &on)) {
+        rex::cvar::SetFlagByName(cvar, on ? "true" : "false", /*persist=*/true);
+        SaveIntroSkips();
+      }
+      ImGui::SameLine();
+      ImGui::TextUnformatted(Tr("enhancements", cvar));
+      ImGui::EndGroup();
+      EnhancementTooltip(Tr("enhancements", (std::string(cvar) + "_desc").c_str()),
+                         SeedUse::kNone);
+      ImGui::PopID();
+    }
   }
 
   // The on/off rows of `section`: the list's entries from the one that opens
@@ -693,6 +731,10 @@ class CuratedSettingsDialog : public rex::ui::ImGuiDialog {
   void SaveBasic() { rex::cvar::SaveConfigSubset(user_settings_path_, BasicCvarNames()); }
   void SaveEnhancements() {
     rex::cvar::SaveConfigSubset(user_settings_path_, EnhancementCvarNames());
+  }
+  void SaveIntroSkips() {
+    std::vector<std::string> names(kIntroSkipCvarNames.begin(), kIntroSkipCvarNames.end());
+    rex::cvar::SaveConfigSubset(user_settings_path_, names);
   }
   // Advanced rows used to persist to app_config_path_ (<game>.toml). That
   // file is now read-only from the game's own UI (the "All Settings..."

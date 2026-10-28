@@ -108,6 +108,10 @@ for key in re.findall(r'"(section_\w+)"', enh):
 settings_src = (root / "src/settings.cpp").read_text(encoding="utf8")
 for table in re.findall(r'kEnhancementTabs\s*=\s*\{(.*?)\};', settings_src, re.S):
     used |= {("enhancements", key) for key in re.findall(r'"(section_\w+)"', table)}
+# The intro skips at the end of the overlay's Other tab (settings.cpp).
+for table in re.findall(r'kIntroSkipCvarNames\s*=\s*\{(.*?)\};', settings_src, re.S):
+    for cvar in re.findall(r'"(\w+)"', table):
+        used |= {("enhancements", cvar), ("enhancements", cvar + "_desc")}
 # The enhancements page's on/off rows, labelled by their cvar's name.
 native_enh = (root / "src/native_enhancements.cpp").read_text(encoding="utf8")
 for cvar in re.findall(r'\bBoolRow\(\s*\d+\s*,\s*"(\w+)"', native_enh):
