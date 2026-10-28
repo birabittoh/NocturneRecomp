@@ -405,6 +405,7 @@ void RandoMenu::Attach(rex::ui::ImGuiDrawer* drawer, const std::filesystem::path
     std::lock_guard lock(mutex_);
     user_root_ = user_data_root;
     rando::LoadOptionsFile(user_root_ / "randomizer.txt", &options_);
+    options_.seed.clear();  // from builds that saved it
   }
   ++revision_;
   dialog_ = std::make_unique<RandoMenuDialog>(drawer);
@@ -420,7 +421,10 @@ void RandoMenu::SetOptions(const rando::Options& options) {
     std::lock_guard lock(mutex_);
     options_ = options;
     if (!user_root_.empty()) {
-      rando::SaveOptionsFile(user_root_ / "randomizer.txt", options_);
+      // The seed is for this session only: the next launch rolls a new one.
+      rando::Options saved = options_;
+      saved.seed.clear();
+      rando::SaveOptionsFile(user_root_ / "randomizer.txt", saved);
     }
   }
   ++revision_;

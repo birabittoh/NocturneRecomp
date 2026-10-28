@@ -40,6 +40,8 @@ struct Options {
   // The upstream options that are also enhancements (fast warps, anti-freeze,
   // clock statue, boosted drop rates, map tracker) are not here: they apply
   // over any world from the enhancements, and can change while a game runs.
+  // Upstream's generation never draws from rand() for them, so leaving them
+  // out doesn't change the world a seed generates.
 
   bool operator==(const Options&) const = default;
 };
@@ -60,7 +62,9 @@ struct Preset {
 
 const std::vector<Preset>& Presets();
 
-// Options as "key=value" lines, the format of randomizer.txt. Loading leaves
+// Options as "key=value" lines, the format of randomizer.txt and of a save's
+// seed record (src/rando_runtime.h): everything Generate reads, so the same
+// lines generate the same run. The preset is saved by name. Loading leaves
 // options missing from the file as they were.
 bool LoadOptionsFile(const std::filesystem::path& path, Options* options);
 bool SaveOptionsFile(const std::filesystem::path& path, const Options& options,

@@ -41,7 +41,8 @@ class RandoMenu {
   void Attach(rex::ui::ImGuiDrawer* drawer, const std::filesystem::path& user_data_root);
 
   // The options the overlay and the main menu's Randomizer pages
-  // (native_randomizer.cpp) edit, as saved in randomizer.txt. Any thread.
+  // (native_randomizer.cpp) edit, saved in randomizer.txt without the seed,
+  // which lasts for the session. Any thread.
   rando::Options options() const;
   // Bumped by every change to options(), so an editor knows to reload.
   uint32_t options_revision() const { return revision_.load(); }

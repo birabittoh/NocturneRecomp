@@ -6,6 +6,7 @@
 #include <cinttypes>
 #include <cstring>
 #include <fstream>
+#include <iterator>
 #include <map>
 #include <utility>
 #include <vector>
@@ -53,6 +54,29 @@ void WriteGuest(rex::memory::Memory* memory, uint32_t guest, const uint8_t* data
   }
 }
 
+// A save record's game_mode= values, by rando::GameMode.
+constexpr const char* kGameModeKeys[] = {"normal", "bat_master", "leg_day", "richter"};
+static_assert(std::size(kGameModeKeys) == static_cast<size_t>(rando::GameMode::kCount));
+
+// The game mode a save record names; Normal when it names none.
+rando::GameMode ReadGameMode(const std::filesystem::path& path) {
+  std::ifstream f(path);
+  for (std::string line; std::getline(f, line);) {
+    if (!line.empty() && line.back() == '\r') {
+      line.pop_back();
+    }
+    if (line.rfind("game_mode=", 0) != 0) {
+      continue;
+    }
+    for (size_t i = 0; i < std::size(kGameModeKeys); ++i) {
+      if (line.compare(10, std::string::npos, kGameModeKeys[i]) == 0) {
+        return static_cast<rando::GameMode>(i);
+      }
+    }
+  }
+  return rando::GameMode::kNormal;
+}
+
 std::string HashText(uint64_t hash) {
   char buf[17];
   std::snprintf(buf, sizeof(buf), "%016" PRIx64, hash);
@@ -63,7 +87,6 @@ std::string HashText(uint64_t hash) {
 
 void RandoRuntime::Bind(rex::Runtime* runtime, const std::filesystem::path& user_data_root) {
   runtime_ = runtime;
-  active_path_ = user_data_root / "rando_active.txt";
   slots_dir_ = user_data_root / "rando_slots";
   g_membase = runtime->memory()->virtual_membase();
   rando_hooks::Init(g_membase);
@@ -87,55 +110,25 @@ void RandoRuntime::Bind(rex::Runtime* runtime, const std::filesystem::path& user
     }
   }
 
-  std::error_code ec;
   runtime->mod_registry()->RegisterTick([this] { Tick(); });
 
-  // The New Game seed from the last run: also the world a save made before
-  // per-slot binding expects. Regenerate it (well under a second) and apply
-  // it before any guest code runs. The enhancements go in with it.
-  const bool has_seed = std::filesystem::exists(active_path_, ec);
+  // Every launch starts as the vanilla game: a seed is chosen for one
+  // session, and a save brings its own back when loaded. Drop the New Game
+  // seed earlier builds kept between launches.
+  std::error_code ec;
+  std::filesystem::remove(user_data_root / "rando_active.txt", ec);
   if (!state().supported) {
-    if (has_seed) {
-      const std::string message = "Couldn't restore the active seed: " +
-                                  state().unsupported_reason;
-      REXLOG_WARN("[rando] {}", message);
-      std::lock_guard lock(mutex_);
-      state_.message = message;
-    }
     return;
   }
   std::lock_guard apply_lock(apply_mutex_);
-  auto fail = [&](const std::string& message) {
-    REXLOG_WARN("[rando] {} -- booting the vanilla game", message);
-    ApplyVanilla();
-    std::lock_guard lock(mutex_);
-    state_.message = message + " Booted the vanilla game.";
-  };
   std::string error;
-  if (!has_seed) {
-    if (!Apply(nullptr, &error)) {
-      REXLOG_WARN("[rando] couldn't apply the enhancements: {}", error);
-      failed_enhancements_ = CurrentEnhancements();
-      std::lock_guard lock(mutex_);
-      state_.message = "Couldn't apply the enhancements: " + error;
-    }
-    return;
-  }
-  auto seed = LoadSeedFile(active_path_, &error);
-  if (!seed) {
-    fail(error);
-    return;
-  }
-  if (!Apply(seed, &error)) {
-    fail("Couldn't apply the active seed: " + error);
-    return;
-  }
-  {
+  if (!Apply(nullptr, &error)) {
+    REXLOG_WARN("[rando] couldn't apply the enhancements: {}", error);
+    failed_enhancements_ = WantedEnhancements();
+    Revert();
     std::lock_guard lock(mutex_);
-    state_.new_game = seed;
+    state_.message = "Couldn't apply the enhancements: " + error;
   }
-  REXLOG_INFO("[rando] restored active seed \"{}\" ({})", seed->options.seed,
-              HashText(seed->patches.Hash()));
 }
 
 std::shared_ptr<const rando::Result> RandoRuntime::LoadSeedFile(const std::filesystem::path& path,
@@ -175,13 +168,17 @@ std::shared_ptr<const rando::Result> RandoRuntime::LoadSeedFile(const std::files
 }
 
 void RandoRuntime::WriteSeedFile(const std::filesystem::path& path,
-                                 const std::shared_ptr<const rando::Result>& seed) const {
+                                 const std::shared_ptr<const rando::Result>& seed,
+                                 rando::GameMode game_mode) const {
   std::error_code ec;
   std::filesystem::create_directories(path.parent_path(), ec);
+  const std::string mode_line =
+      std::string("game_mode=") + kGameModeKeys[static_cast<size_t>(game_mode)] + "\n";
   if (seed) {
-    rando::SaveOptionsFile(path, seed->options, "hash=" + HashText(seed->patches.Hash()) + "\n");
+    rando::SaveOptionsFile(path, seed->options,
+                           "hash=" + HashText(seed->patches.Hash()) + "\n" + mode_line);
   } else {
-    std::ofstream(path) << "vanilla=1\n";
+    std::ofstream(path) << "vanilla=1\n" << mode_line;
   }
 }
 
@@ -203,9 +200,18 @@ std::filesystem::path RandoRuntime::SlotPath(const std::string& slot) const {
   return slots_dir_ / (safe + ".txt");
 }
 
+rando::Enhancements RandoRuntime::WantedEnhancements() const {
+  rando::Enhancements e = CurrentEnhancements();
+  std::lock_guard lock(mutex_);
+  if (state_.game_mode) {
+    e.game_mode = *state_.game_mode;
+  }
+  return e;
+}
+
 bool RandoRuntime::ApplyWorld(std::shared_ptr<const rando::Result> seed, std::string* error) {
   const State current = state();
-  if (seed == current.active && CurrentEnhancements() == current.enhancements) {
+  if (seed == current.active && WantedEnhancements() == current.enhancements) {
     return true;
   }
   return Apply(std::move(seed), error);
@@ -215,7 +221,7 @@ void RandoRuntime::ApplyVanilla() {
   std::string error;
   if (!Apply(nullptr, &error)) {
     REXLOG_WARN("[rando] couldn't apply the enhancements: {}", error);
-    failed_enhancements_ = CurrentEnhancements();
+    failed_enhancements_ = WantedEnhancements();
     Revert();
   }
 }
@@ -231,7 +237,14 @@ void RandoRuntime::OnSaveLoading() {
   std::string message;
   std::error_code ec;
   std::lock_guard apply_lock(apply_mutex_);
-  if (!slot.empty() && std::filesystem::exists(path, ec) && !IsVanillaFile(path)) {
+  const bool has_record = !slot.empty() && std::filesystem::exists(path, ec);
+  // The game mode the save was played in, whatever the setting says now.
+  const rando::GameMode game_mode = has_record ? ReadGameMode(path) : rando::GameMode::kNormal;
+  {
+    std::lock_guard lock(mutex_);
+    state_.game_mode = game_mode;
+  }
+  if (has_record && !IsVanillaFile(path)) {
     std::string error;
     seed = LoadSeedFile(path, &error);
     if (!seed) {
@@ -243,8 +256,9 @@ void RandoRuntime::OnSaveLoading() {
     message = "Couldn't apply this save's seed: " + error + " Playing the vanilla game.";
     ApplyVanilla();
   }
-  REXLOG_INFO("[rando] loading save {}: {}", slot,
-              state().active ? "seed \"" + state().active->options.seed + "\"" : "vanilla");
+  REXLOG_INFO("[rando] loading save {}: {}, game mode {}", slot,
+              state().active ? "seed \"" + state().active->options.seed + "\"" : "vanilla",
+              kGameModeKeys[static_cast<size_t>(game_mode)]);
   std::lock_guard lock(mutex_);
   state_.message = std::move(message);
 }
@@ -254,9 +268,11 @@ void RandoRuntime::OnSaveWritten(const std::string& slot) {
     return;
   }
   const auto seed = state().active;
-  WriteSeedFile(SlotPath(slot), seed);
-  REXLOG_INFO("[rando] save {} bound to {}", slot,
-              seed ? "seed \"" + seed->options.seed + "\"" : "the vanilla game");
+  const rando::GameMode game_mode = WantedEnhancements().game_mode;
+  WriteSeedFile(SlotPath(slot), seed, game_mode);
+  REXLOG_INFO("[rando] save {} bound to {}, game mode {}", slot,
+              seed ? "seed \"" + seed->options.seed + "\"" : "the vanilla game",
+              kGameModeKeys[static_cast<size_t>(game_mode)]);
 }
 
 void RandoRuntime::OnSaveDeleted(const std::string& slot) {
@@ -290,10 +306,14 @@ bool RandoRuntime::InFrontEnd() const {
 }
 
 void RandoRuntime::Tick() {
-  // Back at the title: a loaded save may have brought its own seed in; New
-  // Game gets the chosen one again.
+  // Back at the title: a loaded save may have brought its own seed and game
+  // mode in; New Game gets the chosen seed and the setting's mode again.
   const bool front_end = InFrontEnd();
   if (front_end && !was_front_end_) {
+    {
+      std::lock_guard lock(mutex_);
+      state_.game_mode.reset();
+    }
     const auto new_game = state().new_game;
     std::string error;
     std::lock_guard apply_lock(apply_mutex_);
@@ -307,9 +327,14 @@ void RandoRuntime::Tick() {
   }
   if (!front_end && was_front_end_) {
     // Menu messages ("start a new game") are stale once a game starts; a
-    // save load sets its own afterwards.
+    // save load sets its own afterwards. The game mode is the game's from
+    // here on: the setting's, until a save brings its own (a load may already
+    // have).
     std::lock_guard lock(mutex_);
     state_.message.clear();
+    if (!state_.game_mode) {
+      state_.game_mode = CurrentEnhancements().game_mode;
+    }
   }
   was_front_end_ = front_end;
 
@@ -318,9 +343,10 @@ void RandoRuntime::Tick() {
   // save was written in, so nothing breaks if a game is running; this is the
   // guest thread between frames, so no guest code sees a half-written world.
   // Data the game already copied out of the image (a stage's layout, say)
-  // keeps its old bytes until the game loads it again.
+  // keeps its old bytes until the game loads it again. The game mode is the
+  // exception: a running game keeps its own (WantedEnhancements).
   const State current = state();
-  const rando::Enhancements wanted = CurrentEnhancements();
+  const rando::Enhancements wanted = WantedEnhancements();
   if (current.supported && !current.request_pending && wanted != current.enhancements) {
     std::string error;
     std::lock_guard apply_lock(apply_mutex_);
@@ -353,7 +379,6 @@ void RandoRuntime::Tick() {
     std::string error;
     std::lock_guard apply_lock(apply_mutex_);
     if (Apply(seed, &error)) {
-      WriteSeedFile(active_path_, seed);
       std::lock_guard lock(mutex_);
       state_.new_game = seed;
       message = "Seed \"" + seed->options.seed + "\" is active. Start a new game.";
@@ -365,8 +390,6 @@ void RandoRuntime::Tick() {
       std::lock_guard apply_lock(apply_mutex_);
       ApplyVanilla();
     }
-    std::error_code ec;
-    std::filesystem::remove(active_path_, ec);
     std::lock_guard lock(mutex_);
     state_.new_game.reset();
     message = "Back to the vanilla game.";
@@ -377,9 +400,10 @@ void RandoRuntime::Tick() {
 }
 
 bool RandoRuntime::Apply(std::shared_ptr<const rando::Result> seed, std::string* error) {
-  // The settings' enhancements, recorded as applied; the ones written are
-  // those the seed doesn't already have or clash with.
-  const rando::Enhancements enhancements = CurrentEnhancements();
+  // The settings' enhancements (with the running game's mode), recorded as
+  // applied; the ones written are those the seed doesn't already have or
+  // clash with.
+  const rando::Enhancements enhancements = WantedEnhancements();
   const rando::Enhancements written =
       EffectiveEnhancements(enhancements, seed ? &seed->options : nullptr);
   if (!seed && (written.Empty() || !base_)) {

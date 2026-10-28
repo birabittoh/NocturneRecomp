@@ -196,8 +196,14 @@ bool LoadOptionsFile(const std::filesystem::path& path, Options* o) {
     return false;
   }
   if (kv.count("preset")) {
-    int p = std::atoi(kv["preset"].c_str());
-    if (p >= 0 && p < static_cast<int>(Presets().size())) {
+    // By name, which is what the core goes by; an index from older files.
+    const auto& presets = Presets();
+    const std::string& value = kv["preset"];
+    const auto it = std::find_if(presets.begin(), presets.end(),
+                                 [&](const Preset& p) { return value == p.name; });
+    const int p = it != presets.end() ? static_cast<int>(it - presets.begin())
+                                      : std::atoi(value.c_str());
+    if (p >= 0 && p < static_cast<int>(presets.size())) {
       o->preset = p;
     }
   }
@@ -218,7 +224,9 @@ bool LoadOptionsFile(const std::filesystem::path& path, Options* o) {
 bool SaveOptionsFile(const std::filesystem::path& path, const Options& o,
                      const std::string& extra_lines) {
   std::ofstream f(path, std::ios::trunc);
-  f << "preset=" << o.preset << "\ncomplexity=" << o.complexity << "\nseed=" << o.seed << "\n";
+  const auto& presets = Presets();
+  f << "preset=" << presets[std::min<size_t>(o.preset, presets.size() - 1)].name
+    << "\ncomplexity=" << o.complexity << "\nseed=" << o.seed << "\n";
   ForEachFlag(o, [&](const char* key, bool v) { f << key << '=' << (v ? 1 : 0) << '\n'; });
   f << extra_lines;
   return static_cast<bool>(f);

@@ -506,7 +506,7 @@ class CuratedSettingsDialog : public rex::ui::ImGuiDialog {
       ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 0.85f, 0.2f, 1.0f));
       ImGui::TextUnformatted(runtime.unsupported_reason.c_str());
       ImGui::PopStyleColor();
-    } else if (CurrentEnhancements() != runtime.enhancements) {
+    } else if (GetRandoRuntime().WantedEnhancements() != runtime.enhancements) {
       ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 0.85f, 0.2f, 1.0f));
       ImGui::TextUnformatted(Tr("enhancements", "applying"));
       ImGui::PopStyleColor();
@@ -598,6 +598,15 @@ class CuratedSettingsDialog : public rex::ui::ImGuiDialog {
 
   void DrawGameModeSection(const rando::Options* seed) {
     const rando::GameMode mode = CurrentEnhancements().game_mode;
+    // A running game keeps the mode it was started or saved in.
+    const auto running = GetRandoRuntime().state().game_mode;
+    if (running && *running != mode) {
+      ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 0.85f, 0.2f, 1.0f));
+      ImGui::PushTextWrapPos(ImGui::GetCursorPosX() + 400.0f);
+      ImGui::Text(Tr("enhancements", "mode_running"), GameModeName(*running));
+      ImGui::PopTextWrapPos();
+      ImGui::PopStyleColor();
+    }
     const SeedUse mode_use = seed ? GameModeSeedUse(*seed, mode) : SeedUse::kNone;
     const char* kModeNote = Tr("enhancements", "mode_note");
     ImGui::BeginGroup();

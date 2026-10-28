@@ -25,20 +25,28 @@
 // Applying and reverting happen on the guest thread between frames (the mod
 // registry tick) and only at the title / main menu: the overlay posts a
 // request, the tick performs or rejects it. The chosen seed (what New Game
-// gets) is saved in the user data root and applied again at boot, before
-// guest code runs.
+// gets) lives for this session only: every launch starts as the vanilla game.
 //
-// Each save slot also remembers the world it was written in
-// (user_root/rando_slots/<slot>.txt). Loading a save applies that world on
+// Each save slot remembers the world it was written in
+// (user_root/rando_slots/<slot>.txt): every option the seed was generated
+// from (rando::SaveOptionsFile) and the hash of the result, which is all it
+// takes to generate the same run again. Loading a save applies that world on
 // the guest thread just before the game unpacks the save, whatever seed is
 // chosen for New Game; back at the title screen the New Game seed returns.
 // A save with no record (an imported one) loads as vanilla.
 //
+// The record also holds the game mode the save was played in (an
+// enhancement, but one that changes the game's rules: Richter, Bat Master,
+// Leg Day). A running game keeps its mode: a new game takes the setting's,
+// a loaded save its own, and changing the setting mid-game only affects the
+// next new game.
+//
 // The enhancements (src/enhancements.h) are written over whichever world is
 // in memory, vanilla or seed, so what guest memory holds is always one
 // composed PatchSet (rando::ComposeWorld). They are game settings, not part
-// of a seed or a save: a change made while a game runs is applied on the next
-// tick, where a seed waits for the title screen.
+// of a seed or a save (but for the game mode, above): a change made while a
+// game runs is applied on the next tick, where a seed waits for the title
+// screen.
 #pragma once
 
 #include <cstddef>
@@ -62,7 +70,7 @@ class RandoRuntime {
  public:
   // Call from OnPostLoadXexImage: the module is mapped and no guest code has
   // run. Keeps a copy of the image as the randomizer's base, registers the
-  // guest tick and applies the saved active seed, if any.
+  // guest tick and applies the enhancements over the vanilla game.
   void Bind(rex::Runtime* runtime, const std::filesystem::path& user_data_root);
 
   // The image as loaded, which seeds are generated from; null when the
@@ -92,6 +100,9 @@ class RandoRuntime {
     // What New Game gets (the overlay's choice); null: vanilla. Differs
     // from `active` only while a save bound to another world is loaded.
     std::shared_ptr<const rando::Result> new_game;
+    // The running game's mode, which overrides the setting's; none at the
+    // title / main menu, where the setting's mode is what New Game gets.
+    std::optional<rando::GameMode> game_mode;
     // Patched instructions no hook knows; those changes are inert.
     size_t inactive_code_patches = 0;
     // Outcome of the last request or of the boot-time restore.
@@ -104,6 +115,10 @@ class RandoRuntime {
   // have read the data a seed patches. Safe to call from any thread once
   // bound.
   bool InFrontEnd() const;
+
+  // The enhancements to have in memory: the settings', with the running
+  // game's mode in place of the setting's. Any thread.
+  rando::Enhancements WantedEnhancements() const;
 
  private:
   void Tick();
@@ -119,17 +134,18 @@ class RandoRuntime {
   // that fails.
   void ApplyVanilla();
 
-  // Seed files: options plus "hash=", or "vanilla=1". Loading regenerates
-  // the seed (cached) and refuses it if the hash no longer matches.
+  // Seed files: options plus "hash=", or "vanilla=1"; then "game_mode=".
+  // Loading regenerates the seed (cached) and refuses it if the hash no
+  // longer matches.
   std::shared_ptr<const rando::Result> LoadSeedFile(const std::filesystem::path& path,
                                                     std::string* error);
   void WriteSeedFile(const std::filesystem::path& path,
-                     const std::shared_ptr<const rando::Result>& seed) const;
+                     const std::shared_ptr<const rando::Result>& seed,
+                     rando::GameMode game_mode) const;
   static bool IsVanillaFile(const std::filesystem::path& path);
   std::filesystem::path SlotPath(const std::string& slot) const;
 
   rex::Runtime* runtime_ = nullptr;
-  std::filesystem::path active_path_;
   std::filesystem::path slots_dir_;
   std::shared_ptr<const rando::BaseXex> base_;  // set by Bind, then constant
 
