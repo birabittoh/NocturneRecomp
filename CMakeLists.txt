@@ -203,6 +203,69 @@ add_custom_command(
     VERBATIM
 )
 
+# The guest image, linked in so the game is loaded without the game folder's
+# default.xex (src/guest_image.h), built from src/guest_data with no code
+# sections (scripts/gen-guest-image.py).
+option(NOCTURNE_EMBED_GUEST_IMAGE "Link the guest image built from source into the executable" ON)
+if(NOCTURNE_EMBED_GUEST_IMAGE)
+    set(NOCTURNE_GUEST_IMAGE ${CMAKE_BINARY_DIR}/guest-image.xex)
+    file(GLOB NOCTURNE_GUEST_DATA_SOURCES CONFIGURE_DEPENDS
+        ${CMAKE_SOURCE_DIR}/src/guest_data/*.txt
+        ${CMAKE_SOURCE_DIR}/src/guest_data/*/*.txt)
+    # The data grids taken from the game (scripts/guest_data.py), into the
+    # gitignored assets/guest_data.
+    set(NOCTURNE_GUEST_DATA_STAMP ${CMAKE_BINARY_DIR}/guest-data.stamp)
+    add_custom_command(
+        OUTPUT ${NOCTURNE_GUEST_DATA_STAMP}
+        COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/scripts/guest_data.py
+            extract ${CMAKE_SOURCE_DIR}/assets/default.xex
+        COMMAND ${CMAKE_COMMAND} -E touch ${NOCTURNE_GUEST_DATA_STAMP}
+        DEPENDS
+            ${CMAKE_SOURCE_DIR}/scripts/guest_data.py
+            ${CMAKE_SOURCE_DIR}/src/guest_data/assets.txt
+            ${CMAKE_SOURCE_DIR}/src/guest_data/xdbf.txt
+            ${CMAKE_SOURCE_DIR}/assets/default.xex
+        COMMENT "Extracting the guest data grids"
+        VERBATIM
+    )
+    add_custom_command(
+        OUTPUT ${NOCTURNE_GUEST_IMAGE}
+        COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/scripts/gen-guest-image.py
+            ${NOCTURNE_GUEST_IMAGE}
+        DEPENDS
+            ${CMAKE_SOURCE_DIR}/scripts/gen-guest-image.py
+            ${CMAKE_SOURCE_DIR}/scripts/guest_data.py
+            ${CMAKE_SOURCE_DIR}/scripts/xex_header.py
+            ${NOCTURNE_GUEST_DATA_SOURCES}
+            ${CMAKE_SOURCE_DIR}/ext/KryptonRecomp/xex_image.py
+            ${NOCTURNE_GUEST_DATA_STAMP}
+        COMMENT "Building the guest image from source"
+        VERBATIM
+    )
+    set(NOCTURNE_GUEST_IMAGE_ASM ${CMAKE_BINARY_DIR}/guest-image.S)
+    file(CONFIGURE OUTPUT ${NOCTURNE_GUEST_IMAGE_ASM} CONTENT [=[
+#if defined(__APPLE__)
+#define SYM(name) _##name
+.section __TEXT,__const
+#elif defined(_WIN32)
+#define SYM(name) name
+.section .rdata,"dr"
+#else
+#define SYM(name) name
+.section .rodata
+#endif
+
+.p2align 4
+.global SYM(kGuestImageData)
+SYM(kGuestImageData):
+.incbin "@NOCTURNE_GUEST_IMAGE@"
+.global SYM(kGuestImageDataEnd)
+SYM(kGuestImageDataEnd):
+]=] @ONLY)
+    set_source_files_properties(${NOCTURNE_GUEST_IMAGE_ASM}
+        PROPERTIES OBJECT_DEPENDS ${NOCTURNE_GUEST_IMAGE})
+endif()
+
 # The guest shader pack: translate the shader files in assets/MEDIA with
 # KryptonRecomp, compile them with DXC, and pack the results. The generator also
 # writes a `.S` that `.incbin`s the pack into read-only data, so there is no
@@ -357,6 +420,9 @@ set(NOCTURNERECOMP_SOURCES
 if(ANDROID)
     list(APPEND NOCTURNERECOMP_SOURCES src/platform/android_gpu_driver.cpp)
 endif()
+if(NOCTURNE_EMBED_GUEST_IMAGE)
+    list(APPEND NOCTURNERECOMP_SOURCES src/guest_image.cpp ${NOCTURNE_GUEST_IMAGE_ASM})
+endif()
 
 if(WIN32)
     add_executable(nocturnerecomp WIN32 ${NOCTURNERECOMP_SOURCES} ${NOCTURNE_ICON_RC})
@@ -387,6 +453,9 @@ else()
 endif()
 
 rexglue_setup_target(nocturnerecomp)
+if(NOCTURNE_EMBED_GUEST_IMAGE)
+    target_compile_definitions(nocturnerecomp PRIVATE NOCTURNE_EMBED_GUEST_IMAGE=1)
+endif()
 
 target_link_libraries(nocturnerecomp PRIVATE plume)
 

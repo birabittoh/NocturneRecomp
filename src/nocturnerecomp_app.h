@@ -42,6 +42,9 @@
 #include "fonts.generated.h"
 #include "game_data.h"
 #include "graphics_settings.h"
+#ifdef NOCTURNE_EMBED_GUEST_IMAGE
+#include "guest_image.h"
+#endif
 #include "host_menu.h"
 #include "language_switch.h"
 #include "native_options.h"
@@ -113,6 +116,16 @@ class NocturnerecompApp : public rex::ReXApp {
     config.graphics = nullptr;
     config.gpu_plugin.clear();
   }
+
+#ifdef NOCTURNE_EMBED_GUEST_IMAGE
+  // The linked-in image is World's; another release still loads its own.
+  void OnLoadXexImage(std::string& xex_image) override {
+    const std::string& release = nocturne::TargetReleaseId();
+    if (release.empty() || release == "xbla-world") {
+      xex_image = nocturne::MountGuestImage(runtime()->file_system());
+    }
+  }
+#endif
 
   // The module is mapped and every function has its default dispatcher
   // entry, but no guest code has run: the point to restore the active

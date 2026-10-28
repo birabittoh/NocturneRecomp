@@ -207,7 +207,7 @@ running at process exit; use `OnShutdown()` instead.
   rather than last-one-wins.
 - **`src/xex_patch_potion/`** and **`src/xex_patch_red_rust/`**:
   two independent, no-UI mods that each patch a different item
-  name/description baked into `default.xex`'s static data directly in
+  name/description baked into the guest image's static data directly in
   guest memory at startup, and coexist with no conflict. See
   [Patching static game text/data](#patching-static-game-textdata) below,
   and `src/common/include/rexmod/text_patch.h` for the shared helper
@@ -576,25 +576,15 @@ you're using anything new it added.
 ## Patching static game text/data
 
 Item/enemy names, descriptions, and similar flavor text aren't loaded from
-a separate asset file the VFS can overlay -- they're baked into
-`default.xex`'s static data (`.rdata`), copied into guest memory once at
-startup by the same loader that runs the game's code. Byte layout, text
-encoding, and the AES/compression format `default.xex` ships in on disk
-are documented in `extracted/README.md`.
+a separate asset file the VFS can overlay -- they're in the guest image's
+static data (`.rdata`), which is linked into the executable (built from
+`src/guest_data`, see `scripts/gen-guest-image.py`) and loaded into guest
+memory once at startup by the same loader that runs the game's code. Byte
+layout and text encoding are documented in `extracted/README.md`.
 
-Two ways to change one of these strings:
-
-**Replace `default.xex` itself** (`mods/<name>/game/default.xex`).
-`XexModule::ReadImage` in the SDK doesn't verify a signature on the base
-image load, and accepts a plain, unencrypted/uncompressed XEX2 file
-(`scripts/re/rebuild_xex_unencrypted.py` builds one). A mod's
-`game/default.xex` **replaces the whole file** with no merging: if two
-mods each ship one, `enabled_mods` order picks a single winner and the
-other mod's edits are gone, whether or not they touched the same bytes.
-Use this only when a mod is the sole thing expected to touch game text,
-or needs a structural change a same-length string swap can't do.
-
-**Patch guest memory from a code mod instead**: any number of mods can
+Since the image is linked in, a mod cannot replace `default.xex` (a mod's
+`game/default.xex` is ignored). Change one of those strings by patching
+guest memory from a code mod: any number of mods can
 each own a different address with no conflict, the same way
 `src/ui_color` pokes the accent-color struct. Use
 `src/common/include/rexmod/text_patch.h`'s `ApplyTextPatch`
@@ -602,14 +592,13 @@ each own a different address with no conflict, the same way
 which use a "big first letter" font encoding -- see
 `extracted/README.md`) from `OnModuleLaunched()`. Requirements:
 
-1. **The guest address must come from scanning a live, running process**
-   (`scripts/re/scan_guest_memory.py`), not from offline-decrypting
-   `default.xex` and computing a file offset. A title that ships a
-   `default.xexp` (a title-update delta patch -- check the startup log
-   for `XEX patch applied successfully`) has that patch applied over the
-   base image on every launch, which can shift addresses after the
-   patched region by an amount offline decryption of the base file alone
-   won't account for.
+1. **Take the guest address from the image's sources or a live process.**
+   `src/guest_data/strings.txt` lists the image's strings by guest address
+   (other data is in the other files there); a running process can be
+   scanned with `scripts/re/scan_guest_memory.py`. Don't compute it from an
+   offline-decrypted `default.xex`: the linked image is laid out the same,
+   but no title update is applied over it (TU1's changes are hooks in
+   `src/tu_hooks.cpp`), so a `default.xexp` doesn't move anything either.
 2. **The target field is very likely in read-only memory.** Writing to it
    in-process access-violates (`0xC0000005`) unless the page is unlocked
    first: `runtime->memory()->LookupHeap(addr)->Protect(addr, size,
