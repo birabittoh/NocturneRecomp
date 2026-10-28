@@ -2,7 +2,8 @@
 // (Help & Options -> Enhancements): every setting of the overlay's
 // Enhancements tabs (settings.cpp), as native rows. Same cvars, same order, one
 // page per tab with Other holding the cosmetic and game mode rows, and like
-// there a change only reaches the game at the title screen (see
+// there a change reaches the game on the next frame, except the game mode: a
+// running game keeps its own, so that one waits for the next new game (see
 // rando_runtime.h). The intro skips (intro_skips.cpp) follow at the end of
 // Other.
 //

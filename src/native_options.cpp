@@ -1055,13 +1055,53 @@ void CopyEntryToVanilla(uint8_t* base, uint32_t row) {
   }
 }
 
-// Rebinds the list to the rows in view after a scroll: the same bind the
-// screen does, minus the re-seeding our bind hook adds, since the values have
-// to survive scrolling out of view and back.
+// Rebinds the list to the rows in view after a scroll or a relayout: the same
+// bind the screen does, minus the re-seeding our bind hook adds, since the
+// values have to survive scrolling out of view and back. Rows a shorter
+// layout hid are shown again, and the rows past a layout's end hidden.
 void BindVisibleRows(PPCContext& ctx, uint8_t* base) {
   WriteEntries(base);
   CallGuest(ctx, base, g_original_bind_rows_fn, g_list, g_entries, VisibleRowCount());
+  for (uint32_t row = 0; row < ListCapacity(); ++row) {
+    const bool shown = row < VisibleRowCount();
+    SetWidgetVisible(ctx, base, RowLabelWidget(base, row), shown);
+    SetWidgetVisible(ctx, base, RowValueWidget(base, row), shown);
+  }
+  // The rows the screen's Activate disables and only re-enables when the page
+  // it opened on uses them (NativeOptions_SettingsActivate): a layout that
+  // grew into them needs them cyclable again.
+  if (g_enable_row_fn) {
+    for (uint32_t row = kGatedFirstRow; row <= kGatedLastRow && row < VisibleRowCount(); ++row) {
+      CallGuest(ctx, base, g_enable_row_fn, g_list, row);
+    }
+  }
   RenderRows(ctx, base);
+}
+
+void ApplyPageChrome(PPCContext& ctx, uint8_t* base);
+
+// Lays out a page whose rows depend on its values (OptionsPage::relayout)
+// again, and when its rows changed, reseeds them from their `get` and
+// rebinds. The selection stays on its list row while that row still exists.
+// Returns whether the rows changed.
+bool RelayoutPage(PPCContext& ctx, uint8_t* base) {
+  if (!Page().relayout || !Page().relayout()) {
+    return false;
+  }
+  const uint32_t visible = VisibleRowCount();
+  g_scroll = std::min(g_scroll, Page().total_rows - visible);
+  const uint32_t selected = Read32BE(base, g_list + kListSelectedRow);
+  if (visible > 0 && selected >= visible) {
+    Write32BE(base, g_list + kListSelectedRow, visible - 1);
+  }
+  for (uint32_t i = 0; i < Page().row_count; ++i) {
+    if (IsRowActive(Page().rows[i]) && !IsLabelOnly(Page().rows[i])) {
+      SeedRow(i);
+    }
+  }
+  BindVisibleRows(ctx, base);
+  ApplyPageChrome(ctx, base);
+  return true;
 }
 
 // ---------------------------------------------------------------------------
@@ -1189,6 +1229,8 @@ extern "C" void NativeOptions_CycleRow(PPCContext& ctx, uint8_t* base) {
     row.commit(row, g_values[index]);
   }
   RenderRow(ctx, base, static_cast<uint32_t>(index));
+  // Rows that only matter for some values of this one come and go.
+  RelayoutPage(ctx, base);
 }
 
 // Up/down past the first or last row in view of a page that doesn't fit.
@@ -1322,7 +1364,14 @@ extern "C" void NativeOptions_SettingsActivate(PPCContext& ctx, uint8_t* base) {
     return;
   }
   for (uint32_t row = kGatedFirstRow; row <= kGatedLastRow; ++row) {
-    CallGuest(ctx, base, g_enable_row_fn, list, row);
+    if (list != g_list || row < VisibleRowCount()) {
+      CallGuest(ctx, base, g_enable_row_fn, list, row);
+    } else {
+      // A page this short (a randomizer page with only the Game row) didn't
+      // bind the row: enabling it would show it, blank and out of reach.
+      SetWidgetVisible(ctx, base, RowLabelWidget(base, row), false);
+      SetWidgetVisible(ctx, base, RowValueWidget(base, row), false);
+    }
   }
   ApplyPageChrome(ctx, base);
 }
@@ -1620,7 +1669,9 @@ void ResetPageToDefaults(PPCContext& ctx, uint8_t* base) {
       row.commit(row, g_values[i]);
     }
   }
-  BindVisibleRows(ctx, base);
+  if (!RelayoutPage(ctx, base)) {
+    BindVisibleRows(ctx, base);
+  }
 }
 
 // A commits every row of ours. B rolls back the live ones: they have been

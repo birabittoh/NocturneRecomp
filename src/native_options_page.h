@@ -122,6 +122,14 @@ struct OptionsPage {
 
   // Runs on A once every row of the page has been committed.
   void (*accept)() = nullptr;
+
+  // A page whose rows depend on its own values (options that only matter for
+  // some choices of another): asked again after every change and after X, it
+  // lays its rows out afresh in `rows`/`row_count`/`total_rows` and returns
+  // true when they changed, for the screen to rebind them. Its rows should be
+  // `live`, so that what it lays out from is the value just chosen. It may
+  // also change its title and prompt, which the screen then redraws.
+  bool (*relayout)() = nullptr;
 };
 
 // Every row on a unique, in-range line; label-only rows only on stock lines of
