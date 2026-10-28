@@ -802,6 +802,8 @@ PPCFunc* g_find_image_fn = nullptr;
 // screen it belongs to. See NativeOptions_PromptBarLayout.
 std::array<uint32_t, 3> g_stock_prompts = {};
 uint32_t g_custom_prompt = 0;
+// A text-only prompt widget next to the title, for the page's credit.
+uint32_t g_credit = 0;
 uint32_t g_custom_prompt_screen = 0;
 
 // The settings screen and the user who last opened it, captured by
@@ -1416,7 +1418,8 @@ uint32_t PromptWidth(PPCContext& ctx, uint8_t* base, uint32_t prompt) {
 // is the text itself -- the stock prompts take a string-table id, and there is
 // no id for this -- so it goes in as literal UTF-16 and the text scale is
 // copied off a stock prompt, which the by-id setter would have supplied.
-uint32_t CreateCustomPrompt(PPCContext& ctx, uint8_t* base, uint32_t screen) {
+uint32_t CreateCustomPrompt(PPCContext& ctx, uint8_t* base, uint32_t screen,
+                            const char16_t* text, bool with_glyph) {
   if (!g_alloc_fn || !g_prompt_ctor_fn || !g_find_image_fn) {
     return 0;
   }
@@ -1437,7 +1440,8 @@ uint32_t CreateCustomPrompt(PPCContext& ctx, uint8_t* base, uint32_t screen) {
   }
 
   const uint32_t bank = Read32BE(base, kImageBankPtrAddr);
-  const uint32_t image = CallGuest(ctx, base, g_find_image_fn, bank, kYGlyphNameAddr);
+  const uint32_t image =
+      with_glyph ? CallGuest(ctx, base, g_find_image_fn, bank, kYGlyphNameAddr) : 0;
   if (image && g_prompt_set_glyph_fn) {
     CallGuest(ctx, base, g_prompt_set_glyph_fn, prompt, image);
   }
@@ -1445,13 +1449,13 @@ uint32_t CreateCustomPrompt(PPCContext& ctx, uint8_t* base, uint32_t screen) {
     CallGuest(ctx, base, g_prompt_show_glyph_fn, prompt, 0);
   }
 
-  SetWidgetText(ctx, base, prompt, kCustomPromptLabel.Get());
+  SetWidgetText(ctx, base, prompt, text);
 
   if (g_prompt_text_offset_fn) {
     saved = ctx;
     ctx.r3.u32 = prompt;
-    ctx.r4.u32 = kPromptTextDx;
-    ctx.r5.u32 = kPromptTextDy;
+    ctx.r4.u32 = with_glyph ? kPromptTextDx : 0;
+    ctx.r5.u32 = with_glyph ? kPromptTextDy : 0;
     g_prompt_text_offset_fn(ctx, base);
     ctx = saved;
   }
@@ -1544,7 +1548,10 @@ extern "C" void NativeOptions_SettingsBuild(PPCContext& ctx, uint8_t* base) {
   // The builder runs once per screen object, but guard anyway: a second prompt
   // on the same screen would be invisible extra work at best.
   if (g_custom_prompt_screen != screen) {
-    g_custom_prompt = CreateCustomPrompt(ctx, base, screen);
+    g_custom_prompt =
+        CreateCustomPrompt(ctx, base, screen, kCustomPromptLabel.Get(), /*with_glyph=*/true);
+    g_credit = CreateCustomPrompt(ctx, base, screen, u"", /*with_glyph=*/false);
+    SetWidgetVisible(ctx, base, g_credit, false);
     g_custom_prompt_screen = g_custom_prompt ? screen : 0;
   }
   LayoutPromptBar(ctx, base);
@@ -1879,10 +1886,36 @@ void SelectSettingsPage(SettingsPage page) {
 namespace {
 
 // Centres a title widget on x=320 by its measured width, as every screen's
-// Activate does.
+// Activate does. A page with a credit puts it just right of the title, at its
+// height; the title stays centred on its own.
+constexpr int32_t kCreditGap = 12;
 void CentreTitle(PPCContext& ctx, uint8_t* base, uint32_t title) {
   const auto width = static_cast<int32_t>(CallGuest(ctx, base, g_text_width_fn, title));
-  Write32BE(base, title + kWidgetXOffset, static_cast<uint32_t>(kTitleCenterX - width / 2));
+  const bool credit = g_credit && g_prompt_set_pos_fn && Page().credit.key != nullptr;
+  if (g_credit) {
+    SetWidgetVisible(ctx, base, g_credit, credit);
+  }
+  if (credit) {
+    SetWidgetText(ctx, base, g_credit, Page().credit.Get());
+  }
+  const int32_t x = kTitleCenterX - width / 2;
+  Write32BE(base, title + kWidgetXOffset, static_cast<uint32_t>(x));
+  if (credit) {
+    // The right edge of the anchor title, measured by trying its text on the
+    // widget and putting the page's back.
+    int32_t anchor_width = width;
+    if (Page().credit_anchor.key && Page().title.key) {
+      SetTextWidgetText(ctx, base, title, Page().credit_anchor.Get());
+      anchor_width = static_cast<int32_t>(CallGuest(ctx, base, g_text_width_fn, title));
+      SetTextWidgetText(ctx, base, title, Page().title.Get());
+    }
+    PPCContext saved = ctx;
+    ctx.r3.u32 = g_credit;
+    ctx.r4.u32 = static_cast<uint32_t>(kTitleCenterX + anchor_width / 2 + kCreditGap);
+    ctx.r5.u32 = Read32BE(base, title + kWidgetYOffset);
+    g_prompt_set_pos_fn(ctx, base);
+    ctx = saved;
+  }
 }
 
 // Redoes the tail of the screen's Activate (sub_825B43E0) that sets and
@@ -1938,6 +1971,9 @@ void ApplyPageChrome(PPCContext& ctx, uint8_t* base) {
     }
   }
   LayoutPromptBar(ctx, base);
+  if (g_credit && g_settings_screen && !Page().title.key) {
+    SetWidgetVisible(ctx, base, g_credit, false);  // a stock page has no credit
+  }
 }
 
 // Opens another page of a group on the open screen (the shoulder buttons).
