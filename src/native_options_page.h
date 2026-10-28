@@ -107,6 +107,10 @@ struct OptionsPage {
   // Replaces the screen's title. A null key keeps the game's own.
   NativeText title;
 
+  // The row arrows on either side of the title, hinting at the shoulder
+  // buttons: there is another page to go to.
+  bool title_arrows = false;
+
   // Every row is this page's own: the stock Graphics/Volume model is neither
   // shown nor mirrored, and X resets the rows themselves instead of the
   // game's settings.
@@ -120,13 +124,10 @@ struct OptionsPage {
   NativeText prompt_text;
   uint32_t prompt_glyph = 0;
 
-  // Text drawn to the right of the title, whatever the rows do (a credit). A
-  // null key shows none.
+  // Text drawn to the right of the title, whatever the rows do (a credit),
+  // past where the title's right arrow goes so it stays put with or without
+  // it. A null key shows none.
   NativeText credit;
-  // The title the credit lines up with: it sits where it would after this
-  // text, so it stays put when the page's own title changes (with or without
-  // the < > that hint at another page). A null key uses the title as it is.
-  NativeText credit_anchor;
 
   // Runs on A once every row of the page has been committed.
   void (*accept)() = nullptr;

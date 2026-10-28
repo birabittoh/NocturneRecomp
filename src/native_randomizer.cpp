@@ -228,7 +228,6 @@ constexpr uint32_t kVisibleRows = 7;
 constexpr uint32_t kLeftBumperGlyph = 0x82012F50u;  // "BTN_LB"
 constexpr NativeText kChangePagePrompt{"change_page_prompt"};
 constexpr NativeText kCredit{"rando_credit"};
-constexpr NativeText kSeedTitle{"rando_title_seed"};
 
 // A on any page: the options as edited, then the Game row's choice.
 void Accept() {
@@ -267,7 +266,6 @@ constexpr OptionsPage MakePage(NativeText title) {
       .owns_all_rows = true,
       .prompt_glyph = kLeftBumperGlyph,
       .credit = kCredit,
-      .credit_anchor = kSeedTitle,
       .accept = &Accept,
       .relayout = &Relayout,
   };
@@ -277,9 +275,8 @@ constexpr OptionsPage MakePage(NativeText title) {
 // one after the other.
 std::array<OptionRow, std::size(kSeedRows)> g_seed_page_rows;
 std::array<OptionRow, std::size(kShuffleRows)> g_shuffle_page_rows;
-constexpr NativeText kSinglePageTitle{"rando_title"};
 OptionsPage g_pages[] = {
-    MakePage(kSeedTitle),
+    MakePage(NativeText{"rando_title"}),
     MakePage(NativeText{"rando_title_shuffle"}),
 };
 
@@ -335,13 +332,13 @@ bool Relayout() {
   });
   LayOut(kShuffleRows, g_shuffle_page_rows, g_pages[1],
          [&](const OptionRow&) { return shown.shuffle; });
-  // The shoulder buttons' prompt, and the < > around the title that hint at
-  // them, while there is another page to go to.
+  // The shoulder buttons' prompt, and the arrows around the title that hint
+  // at them, while there is another page to go to.
   const bool paged = g_pages[1].row_count > 0;
   for (OptionsPage& page : g_pages) {
     page.prompt_text = paged ? kChangePagePrompt : NativeText{};
+    page.title_arrows = paged;
   }
-  g_pages[0].title = paged ? kSeedTitle : kSinglePageTitle;
   return true;
 }
 

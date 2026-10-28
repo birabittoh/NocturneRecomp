@@ -157,6 +157,7 @@ constexpr uint32_t kPromptShowGlyphFnAddr = 0x825D2010u;  // (prompt)
 constexpr uint32_t kPromptTextOffsetFnAddr = 0x825D2018u; // (prompt, dx, dy)
 constexpr uint32_t kPromptSetPosFnAddr = 0x825D1FA8u;     // (prompt, x, y)
 constexpr uint32_t kTextWidthFnAddr = 0x825CF008u;        // (text_widget) -> pixels
+constexpr uint32_t kImageWidgetCtorFnAddr = 0x825D0C48u;  // (widget, parent, x, y, image)
 constexpr uint32_t kFindImageFnAddr = 0x825CEB68u;        // (image_bank, name) -> image
 
 // A prompt is a glyph widget plus a text widget, with the text drawn at a
@@ -287,6 +288,14 @@ constexpr uint32_t kArrowRightX = 525;
 constexpr uint32_t kWidgetXOffset = 4;
 constexpr uint32_t kWidgetYOffset = 8;
 constexpr uint32_t kArrowYBias = 2;
+
+// An image widget, as the builder makes the arrows: its size, and the image's
+// width as the constructor copies it in. The arrows' image names in the
+// guest image ("arrowsLTn" and its right-hand twin).
+constexpr uint32_t kImageWidgetSize = 612;
+constexpr uint32_t kImageWidgetWidthOffset = 536;
+constexpr uint32_t kLeftArrowImageName = 0x82013984u;
+constexpr uint32_t kRightArrowImageName = 0x82013978u;
 
 // The app object and its menu latch (kAppObjectPtrAddr, InGameLatchAddress)
 // live in game_state.h.
@@ -796,6 +805,7 @@ PPCFunc* g_prompt_text_offset_fn = nullptr;
 PPCFunc* g_prompt_set_pos_fn = nullptr;
 PPCFunc* g_text_width_fn = nullptr;
 PPCFunc* g_find_image_fn = nullptr;
+PPCFunc* g_image_widget_ctor_fn = nullptr;
 
 // The settings screen's three stock prompts, left to right (X, A, B), captured
 // during the build; and the fourth ("Custom", for Y) this file adds, with the
@@ -804,6 +814,9 @@ std::array<uint32_t, 3> g_stock_prompts = {};
 uint32_t g_custom_prompt = 0;
 // A text-only prompt widget next to the title, for the page's credit.
 uint32_t g_credit = 0;
+// The arrows either side of a paged title (OptionsPage::title_arrows), left
+// then right, on the same screen as g_credit.
+std::array<uint32_t, 2> g_title_arrows = {};
 uint32_t g_custom_prompt_screen = 0;
 
 // The settings screen and the user who last opened it, captured by
@@ -1412,6 +1425,30 @@ uint32_t PromptWidth(PPCContext& ctx, uint8_t* base, uint32_t prompt) {
   return glyph_width + text_width;
 }
 
+// Makes an image widget on `screen` showing the named image, the way the
+// builder makes the row arrows.
+uint32_t CreateImageWidget(PPCContext& ctx, uint8_t* base, uint32_t screen, uint32_t image_name) {
+  if (!g_alloc_fn || !g_find_image_fn || !g_image_widget_ctor_fn) {
+    return 0;
+  }
+  const uint32_t image =
+      CallGuest(ctx, base, g_find_image_fn, Read32BE(base, kImageBankPtrAddr), image_name);
+  const uint32_t memory = image ? CallGuest(ctx, base, g_alloc_fn, kImageWidgetSize, 0) : 0;
+  if (!memory) {
+    return 0;
+  }
+  PPCContext saved = ctx;
+  ctx.r3.u32 = memory;
+  ctx.r4.u32 = screen;
+  ctx.r5.u32 = 0;
+  ctx.r6.u32 = 0;
+  ctx.r7.u32 = image;
+  g_image_widget_ctor_fn(ctx, base);
+  const uint32_t widget = ctx.r3.u32;
+  ctx = saved;
+  return widget;
+}
+
 // Builds the "Custom" prompt, mirroring the builder's own recipe for the three
 // stock ones: allocate, construct, point it at a glyph from the image bank,
 // set the text, offset the text from the glyph, colour it. The only departure
@@ -1552,6 +1589,11 @@ extern "C" void NativeOptions_SettingsBuild(PPCContext& ctx, uint8_t* base) {
         CreateCustomPrompt(ctx, base, screen, kCustomPromptLabel.Get(), /*with_glyph=*/true);
     g_credit = CreateCustomPrompt(ctx, base, screen, u"", /*with_glyph=*/false);
     SetWidgetVisible(ctx, base, g_credit, false);
+    g_title_arrows = {CreateImageWidget(ctx, base, screen, kLeftArrowImageName),
+                      CreateImageWidget(ctx, base, screen, kRightArrowImageName)};
+    for (uint32_t arrow : g_title_arrows) {
+      SetWidgetVisible(ctx, base, arrow, false);
+    }
     g_custom_prompt_screen = g_custom_prompt ? screen : 0;
   }
   LayoutPromptBar(ctx, base);
@@ -1923,9 +1965,12 @@ void SelectSettingsPage(SettingsPage page) {
 namespace {
 
 // Centres a title widget on x=320 by its measured width, as every screen's
-// Activate does. A page with a credit puts it just right of the title, at its
-// height; the title stays centred on its own.
+// Activate does. A paged title gets the row arrows either side of it, and a
+// page with a credit puts it right of where the right arrow goes, at the
+// title's height; the title stays centred on its own.
 constexpr int32_t kCreditGap = 12;
+constexpr int32_t kTitleArrowGap = 10;
+constexpr int32_t kTitleArrowYBias = 2;
 void CentreTitle(PPCContext& ctx, uint8_t* base, uint32_t title) {
   const auto width = static_cast<int32_t>(CallGuest(ctx, base, g_text_width_fn, title));
   const bool credit = g_credit && g_prompt_set_pos_fn && Page().credit.key != nullptr;
@@ -1936,20 +1981,29 @@ void CentreTitle(PPCContext& ctx, uint8_t* base, uint32_t title) {
     SetWidgetText(ctx, base, g_credit, Page().credit.Get());
   }
   const int32_t x = kTitleCenterX - width / 2;
+  const auto y = static_cast<int32_t>(Read32BE(base, title + kWidgetYOffset));
   Write32BE(base, title + kWidgetXOffset, static_cast<uint32_t>(x));
-  if (credit) {
-    // The right edge of the anchor title, measured by trying its text on the
-    // widget and putting the page's back.
-    int32_t anchor_width = width;
-    if (Page().credit_anchor.key && Page().title.key) {
-      SetTextWidgetText(ctx, base, title, Page().credit_anchor.Get());
-      anchor_width = static_cast<int32_t>(CallGuest(ctx, base, g_text_width_fn, title));
-      SetTextWidgetText(ctx, base, title, Page().title.Get());
+
+  const uint32_t right_arrow = g_title_arrows[1];
+  const int32_t right_arrow_width =
+      right_arrow ? static_cast<int32_t>(Read32BE(base, right_arrow + kImageWidgetWidthOffset)) : 0;
+  for (int i = 0; i < 2; ++i) {
+    const uint32_t arrow = g_title_arrows[i];
+    if (!arrow) {
+      continue;
     }
+    SetWidgetVisible(ctx, base, arrow, Page().title_arrows);
+    const auto arrow_width = static_cast<int32_t>(Read32BE(base, arrow + kImageWidgetWidthOffset));
+    const int32_t arrow_x = i == 0 ? x - kTitleArrowGap - arrow_width : x + width + kTitleArrowGap;
+    Write32BE(base, arrow + kWidgetXOffset, static_cast<uint32_t>(arrow_x));
+    Write32BE(base, arrow + kWidgetYOffset, static_cast<uint32_t>(y + kTitleArrowYBias));
+  }
+
+  if (credit) {
     PPCContext saved = ctx;
     ctx.r3.u32 = g_credit;
-    ctx.r4.u32 = static_cast<uint32_t>(kTitleCenterX + anchor_width / 2 + kCreditGap);
-    ctx.r5.u32 = Read32BE(base, title + kWidgetYOffset);
+    ctx.r4.u32 = static_cast<uint32_t>(x + width + kTitleArrowGap + right_arrow_width + kCreditGap);
+    ctx.r5.u32 = static_cast<uint32_t>(y);
     g_prompt_set_pos_fn(ctx, base);
     ctx = saved;
   }
@@ -2008,8 +2062,12 @@ void ApplyPageChrome(PPCContext& ctx, uint8_t* base) {
     }
   }
   LayoutPromptBar(ctx, base);
-  if (g_credit && g_settings_screen && !Page().title.key) {
-    SetWidgetVisible(ctx, base, g_credit, false);  // a stock page has no credit
+  if (g_settings_screen && !Page().title.key) {
+    // A stock page has no credit and no title arrows.
+    SetWidgetVisible(ctx, base, g_credit, false);
+    for (uint32_t arrow : g_title_arrows) {
+      SetWidgetVisible(ctx, base, arrow, false);
+    }
   }
 }
 
@@ -2140,6 +2198,7 @@ void NativeOptions::Bind(rex::Runtime* runtime) {
   g_prompt_text_offset_fn = dispatcher->GetFunction(kPromptTextOffsetFnAddr);
   g_prompt_set_pos_fn = dispatcher->GetFunction(kPromptSetPosFnAddr);
   g_text_width_fn = dispatcher->GetFunction(kTextWidthFnAddr);
+  g_image_widget_ctor_fn = dispatcher->GetFunction(kImageWidgetCtorFnAddr);
   g_find_image_fn = dispatcher->GetFunction(kFindImageFnAddr);
   g_alloc_fn = dispatcher->GetFunction(kAllocFnAddr);
   if (!g_alloc_fn) {

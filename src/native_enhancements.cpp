@@ -175,6 +175,7 @@ constexpr OptionsPage MakePage(const OptionRow (&rows)[N], NativeText title) {
       .total_rows = static_cast<uint32_t>(N),
       .visible_rows = kVisibleRows,
       .title = title,
+      .title_arrows = true,
       .owns_all_rows = true,
       .prompt_text = kChangePagePrompt,
       .prompt_glyph = kLeftBumperGlyph,
@@ -190,7 +191,6 @@ static_assert(std::size(kQualityOfLifeRows) <= kVisibleRows &&
                   std::size(kOtherRows) <= kVisibleRows,
               "each page fits the screen without scrolling");
 
-// The titles carry < > to hint at the shoulder buttons.
 constexpr OptionsPage kPages[] = {
     MakePage(kQualityOfLifeRows, NativeText{"enh_title_qol"}),
     MakePage(kFixesRows, NativeText{"enh_title_fixes"}),
