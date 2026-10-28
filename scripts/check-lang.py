@@ -51,6 +51,8 @@ for code, table in langs.items():
 used = set()
 sources = [p for p in (root / "src").rglob("*") if p.suffix in (".cpp", ".h")]
 pat_tr = re.compile(r'\bTr(?:Or|Current|Args)?\(\s*"(\w+)"\s*,\s*"(\w+)"')
+# A key picked by a condition: Tr("section", cond ? "a" : "b", ...).
+pat_tr_choice = re.compile(r'\bTr(?:Or|Current|Args)?\(\s*"(\w+)"\s*,[^,"?]*\?\s*"(\w+)"\s*:\s*"(\w+)"')
 pat_native = re.compile(r'\bTrNative(?:Current)?\(\s*"(\w+)"')
 # native_ui.h's NativeText, as `NativeText name{"key"}` or `NativeText{"key"}`.
 pat_native_text = re.compile(r'\bNativeText(?:\s+\w+(?:\[[^\]]*\])?)?\s*\{\s*"(\w+)"')
@@ -58,6 +60,8 @@ for path in sources:
     text = path.read_text(encoding="utf8", errors="replace")
     for sec, key in pat_tr.findall(text):
         used.add((sec, key))
+    for sec, a, b in pat_tr_choice.findall(text):
+        used |= {(sec, a), (sec, b)}
     for key in pat_native.findall(text) + pat_native_text.findall(text):
         used.add(("native", key))
 
@@ -82,6 +86,19 @@ saves_src = (installer / "saves_screen.cpp").read_text(encoding="utf8")
 used |= {("saves", key) for key in re.findall(r'\b(?:S|Fill)\(\s*"(\w+)"', saves_src)}
 mods_src = (installer / "mods_screen.cpp").read_text(encoding="utf8")
 used |= {("sdk_ui", key) for key in re.findall(r'\b(?:T|Fmt)\(\s*"(\w+)"', mods_src)}
+# The SDK's own overlays read [sdk_ui] too (SdkUiText), by UiText("key", ...).
+# Those keys are optional: the SDK has its own English for the ones we leave
+# out. Its source is the sibling checkout; without it, the table can't be
+# checked for unused keys.
+sdk_used = set()
+sdk_src = root.parent / "rexglue-sdk" / "src"
+if sdk_src.is_dir():
+    for path in sdk_src.rglob("*.cpp"):
+        text = path.read_text(encoding="utf8", errors="replace")
+        sdk_used |= {("sdk_ui", key) for key in re.findall(r'\bUiText\(\s*"(\w+)"', text)}
+else:
+    print(f"note: {sdk_src} not found; [sdk_ui] keys only the SDK reads aren't checked")
+    sdk_used = {("sdk_ui", key) for key in en.get("sdk_ui", {})}
 enh = (root / "src/enhancements.cpp").read_text(encoding="utf8")
 for cvar in re.findall(r'\{Enhancement::\w+,\s*"(enh_\w+)"', enh):
     used |= {("enhancements", cvar), ("enhancements", cvar + "_desc")}
@@ -102,7 +119,7 @@ for prefix, extra in (("mode_", "_desc"), ("color_", "")):
 
 for key in sorted(used - en_flat.keys() - OPTIONAL):
     report(f"en: used but missing [{key[0]}] {key[1]}")
-for key in sorted(en_flat.keys() - used):
+for key in sorted(en_flat.keys() - used - sdk_used):
     report(f"en: unused [{key[0]}] {key[1]}")
 
 print(f"{len(langs)} languages, {len(en_flat)} English keys, {problems} problem(s)")
