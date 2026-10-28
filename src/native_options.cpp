@@ -1610,6 +1610,39 @@ extern "C" void NativeOptions_PostEvent(PPCContext& ctx, uint8_t* base) {
   }
 }
 
+// Moves the right arrow past the end of the selected row's value when the
+// value is too long for the stock gap (a randomizer seed name runs well past
+// it, and the arrow then lands on top of the text). Runs after the screen's
+// update, which puts the arrow back at its fixed x every frame, so a short
+// value gets the stock position again.
+constexpr int32_t kRightArrowGap = 6;
+void PushRightArrowPastValue(PPCContext& ctx, uint8_t* base, uint32_t screen) {
+  if (!g_text_width_fn) {
+    return;
+  }
+  const uint32_t selected = Read32BE(base, g_list + kListSelectedRow);
+  if (selected >= VisibleRowCount() || FindActiveValueRow(selected + g_scroll) < 0) {
+    return;
+  }
+  const uint32_t arrow = Read32BE(base, screen + kScreenRightArrowOffset);
+  const uint32_t value_widget = RowValueWidget(base, selected);
+  if (!arrow || !value_widget) {
+    return;
+  }
+  const auto value_x = static_cast<int32_t>(Read32BE(base, value_widget + kWidgetXOffset));
+  // The value widget holds its text in an inner text widget, which is what
+  // gets measured.
+  const uint32_t text = Read32BE(base, value_widget + kWidgetInnerTextOffset);
+  if (!text) {
+    return;
+  }
+  const auto width = static_cast<int32_t>(CallGuest(ctx, base, g_text_width_fn, text));
+  const int32_t x = value_x + width + kRightArrowGap;
+  if (x > static_cast<int32_t>(Read32BE(base, arrow + kWidgetXOffset))) {
+    Write32BE(base, arrow + kWidgetXOffset, static_cast<uint32_t>(x));
+  }
+}
+
 // Gives list row 2 the left/right arrows every other row gets.
 //
 // The screen's per-frame update (sub_825B4CC0) hides both arrow widgets
@@ -1631,6 +1664,9 @@ extern "C" void NativeOptions_SettingsUpdate(PPCContext& ctx, uint8_t* base) {
   }
 
   if (!submenu_row_selected) {
+    if (ours) {
+      PushRightArrowPastValue(ctx, base, screen);
+    }
     return;
   }
 
@@ -1651,6 +1687,7 @@ extern "C" void NativeOptions_SettingsUpdate(PPCContext& ctx, uint8_t* base) {
     Write32BE(base, arrows[i] + kWidgetXOffset, xs[i]);
     Write32BE(base, arrows[i] + kWidgetYOffset, y);
   }
+  PushRightArrowPastValue(ctx, base, screen);
 }
 
 // Puts every live row back to the value the screen opened with.
