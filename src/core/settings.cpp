@@ -18,7 +18,6 @@
 #include <algorithm>
 #include <array>
 #include <cmath>
-#include <random>
 #include <cstdio>
 #include <cstdlib>
 #include <optional>
@@ -542,14 +541,11 @@ class CuratedSettingsDialog : public rex::ui::ImGuiDialog {
     const rando::Options* seed = runtime.active ? &runtime.active->options : nullptr;
     DrawEnhancementToggles(section, seed);
     if (section == "section_other") {
-      ImGui::SeparatorText(Tr("enhancements", "section_cosmetic"));
       DrawCosmeticSection(seed);
-      ImGui::SeparatorText(Tr("enhancements", "section_game_mode"));
       DrawGameModeSection(seed);
     }
     ImGui::EndDisabled();
     if (section == "section_other") {
-      ImGui::SeparatorText(Tr("enhancements", "section_more_skips"));
       DrawIntroSkipToggles();
     }
   }
@@ -617,30 +613,6 @@ class CuratedSettingsDialog : public rex::ui::ImGuiDialog {
 
   void DrawCosmeticSection(const rando::Options* seed) {
     const rando::Enhancements current = CurrentEnhancements();
-    ImGui::PushID(kAlchemyVatsCvar);
-    const SeedUse vats_use = seed ? AlchemyVatsSeedUse(*seed) : SeedUse::kNone;
-    const bool vats_forced = vats_use == SeedUse::kIncluded;
-    bool shuffle_vats = vats_forced || current.alchemy_vats != 0;
-    ImGui::BeginGroup();
-    ImGui::BeginDisabled(vats_forced);
-    if (rex::ui::ToggleSwitch("##v", &shuffle_vats)) {
-      SetAlchemyVatsShuffle(shuffle_vats ? NewShuffleSeed() : 0);
-    }
-    ImGui::EndDisabled();
-    ImGui::SameLine();
-    ImGui::TextUnformatted(Tr("enhancements", "shuffle_vats"));
-    DrawSeedMarker(vats_use);
-    ImGui::EndGroup();
-    EnhancementTooltip(Tr("enhancements", "shuffle_vats_desc"), vats_use);
-    if (shuffle_vats && !vats_forced) {
-      ImGui::SameLine();
-      if (ImGui::SmallButton(Tr("enhancements", "reshuffle"))) {
-        SetAlchemyVatsShuffle(NewShuffleSeed());
-      }
-    }
-    ImGui::PopID();
-
-    ImGui::Spacing();
     ImGui::TextUnformatted(Tr("enhancements", "wing_smash_color"));
     ImGui::SameLine(Px(180.0f));
     ImGui::SetNextItemWidth(Px(160.0f));
@@ -734,20 +706,6 @@ class CuratedSettingsDialog : public rex::ui::ImGuiDialog {
     }
     ImGui::PopTextWrapPos();
     ImGui::EndTooltip();
-  }
-
-  void SetAlchemyVatsShuffle(uint32_t shuffle) {
-    rex::cvar::SetFlagByName(kAlchemyVatsCvar, std::to_string(shuffle), /*persist=*/true);
-    SaveEnhancements();
-  }
-
-  // A nonzero rand() seed for the vat shuffle.
-  static uint32_t NewShuffleSeed() {
-    uint32_t v = 0;
-    while (!v) {
-      v = std::random_device{}();
-    }
-    return v;
   }
 
   void SaveBasic() { rex::cvar::SaveConfigSubset(user_settings_path_, BasicCvarNames()); }
