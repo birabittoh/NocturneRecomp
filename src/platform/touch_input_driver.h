@@ -266,6 +266,8 @@ class TouchInputDriver final : public InputDriver, public rex::ui::WindowInputLi
   void UpdateDeviceSensors();
 
   // Adds the device's gyro to the pad. state_mutex_ must be held.
+  /// is_active(), or the Guide is up.
+  bool AcceptsInput() const;
   bool ApplyDeviceGyro(X_INPUT_GAMEPAD* gamepad);
 
   // Live state of one stick, in surface pixels.

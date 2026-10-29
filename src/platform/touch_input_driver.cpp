@@ -30,6 +30,7 @@
 #include <rex/runtime.h>
 #include <rex/system/kernel_state.h>
 #include <rex/ui/keybinds.h>
+#include <rexglue_guide/guide.h>
 
 // Touch controls only make sense where there is a touch screen and no
 // keyboard, so they default on for Android and off elsewhere. They stay
@@ -312,6 +313,11 @@ bool TouchInputDriver::IsEnabled() const {
   return layout_provider_ != nullptr;
 }
 
+// The overlays' gate, except the Guide's: it covers the screen with a window
+// that captures the mouse, but is driven like a controller, and reads this
+// pad through the title's XamInputGetState like any other.
+bool TouchInputDriver::AcceptsInput() const { return is_active() || rexglue_guide::IsOpen(); }
+
 void TouchInputDriver::PublishFastForward() {
   bool held = false;
   for (size_t i = 0; i < layout_.controls.size(); ++i) {
@@ -398,7 +404,7 @@ void TouchInputDriver::HandleTouchEvent(rex::ui::TouchEvent& e, std::string* bin
   // A release is always processed: the gate can close between a press and its
   // release (the controls are switched off, an overlay takes the input), and a
   // finger dropped that way would stay held and its stick drawn for good.
-  if (!releasing && (!REXCVAR_GET(touch_controls) || !is_active())) {
+  if (!releasing && (!REXCVAR_GET(touch_controls) || !AcceptsInput())) {
     return;
   }
 
@@ -517,7 +523,7 @@ bool TouchInputDriver::GetVisualState(TouchVisualState* out_state) {
     return false;
   }
   const bool keep_visible = NowMs() < g_keep_visible_until_ms.load(std::memory_order_relaxed);
-  if (!is_active() && !keep_visible) {
+  if (!AcceptsInput() && !keep_visible) {
     // Events stop arriving while the gate is shut, so a finger that was down
     // when it closed has no way to report its release. Drop them here, on the
     // frame that notices, rather than leaving a stick drawn.

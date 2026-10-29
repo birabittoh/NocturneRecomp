@@ -357,7 +357,11 @@ class NocturnerecompApp : public rex::ReXApp {
     // On-screen pad. Registered on every platform; the touch_controls cvar (on
     // by default only on Android) decides whether it is shown.
     if (input_sys) {
-      auto touch = std::make_unique<nocturne::touch::TouchInputDriver>(nullptr, 0);
+      // Above the ImGui drawer's z-order (64), so a press on the pad reaches
+      // the driver even over an overlay window, such as the Guide's, that
+      // would otherwise take every touch. Touches it lets through (gated off,
+      // or nowhere on the pad) still fall to ImGui.
+      auto touch = std::make_unique<nocturne::touch::TouchInputDriver>(nullptr, 65);
       touch->Setup();
       touch->SetLayoutProvider(&nocturne::BuildTouchLayout);
       touch_controls_overlay_ = std::make_unique<nocturne::touch::TouchControlsOverlay>(
