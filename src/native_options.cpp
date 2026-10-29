@@ -817,6 +817,14 @@ uint32_t g_credit = 0;
 // The arrows either side of a paged title (OptionsPage::title_arrows), left
 // then right, on the same screen as g_credit.
 std::array<uint32_t, 2> g_title_arrows = {};
+// Text-only prompt widgets, one per line, for the page's
+// OptionsPage::description, on the same screen as g_credit; and the text they
+// show while shown.
+constexpr uint32_t kDescriptionMaxLines = 40;
+std::array<uint32_t, kDescriptionMaxLines> g_description_lines = {};
+bool g_description_shown = false;
+std::u16string g_description_warning;
+std::u16string g_description_text;
 uint32_t g_custom_prompt_screen = 0;
 
 // The settings screen and the user who last opened it, captured by
@@ -1569,6 +1577,184 @@ void LayoutPromptBar(PPCContext& ctx, uint8_t* base) {
   }
 }
 
+// The page's description (OptionsPage::description), in a column left
+// of the list: the 4:3 panel the screen is laid out in leaves the sides of the
+// widescreen frame free (it spans about x=-105..745), and the column takes the
+// left one, from the list's top down to the stone border above the prompt
+// bar (y=367). The text is word-wrapped to the column by measuring it, and
+// shrunk until it all fits.
+constexpr int32_t kDescriptionLeft = -90;
+constexpr int32_t kDescriptionRight = 100;
+constexpr int32_t kDescriptionTop = 150;
+constexpr int32_t kDescriptionBottom = 360;
+constexpr float kDescriptionMaxScale = 0.6f;
+constexpr float kDescriptionMinScale = 0.35f;
+// Line advance per unit of text scale, and the extra gap between paragraphs
+// as a fraction of a line.
+constexpr float kDescriptionLineHeight = 34.0f;
+constexpr float kDescriptionParagraphGap = 0.4f;
+constexpr uint32_t kDescriptionWarningColour = 0xFFFF5040u;
+
+struct DescriptionLine {
+  std::u16string text;
+  bool warning = false;
+  bool paragraph_start = false;
+};
+
+// How wide `text` draws at `scale`, measured on `widget`.
+int32_t MeasureText(PPCContext& ctx, uint8_t* base, uint32_t widget, const std::u16string& text,
+                    float scale) {
+  SetWidgetText(ctx, base, widget, text.c_str());
+  SetWidgetScale(ctx, base, widget, scale);
+  return static_cast<int32_t>(PromptWidth(ctx, base, widget));
+}
+
+// Breaks one paragraph into lines no wider than `width`: at spaces, or
+// anywhere in a word too long for a line of its own (Japanese has no spaces).
+void WrapParagraph(PPCContext& ctx, uint8_t* base, uint32_t scratch, std::u16string_view paragraph,
+                   float scale, int32_t width, bool warning, std::vector<DescriptionLine>& out) {
+  auto fits = [&](const std::u16string& text) {
+    return MeasureText(ctx, base, scratch, text, scale) <= width;
+  };
+  bool first = true;
+  std::u16string line;
+  auto flush = [&] {
+    out.push_back({std::move(line), warning, first});
+    line.clear();
+    first = false;
+  };
+  size_t at = 0;
+  while (at < paragraph.size()) {
+    const size_t space = paragraph.find(u' ', at);
+    const size_t end = space == std::u16string_view::npos ? paragraph.size() : space;
+    const std::u16string word(paragraph.substr(at, end - at));
+    at = end + 1;
+    if (word.empty()) {
+      continue;
+    }
+    std::u16string candidate = line.empty() ? word : line + u' ' + word;
+    if (fits(candidate)) {
+      line = std::move(candidate);
+      continue;
+    }
+    if (!line.empty()) {
+      flush();
+    }
+    if (fits(word)) {
+      line = word;
+      continue;
+    }
+    for (char16_t c : word) {
+      if (!line.empty() && !fits(line + c)) {
+        flush();
+      }
+      line += c;
+    }
+  }
+  if (!line.empty() || first) {
+    flush();
+  }
+}
+
+std::vector<DescriptionLine> WrapDescription(PPCContext& ctx, uint8_t* base, float scale) {
+  std::vector<DescriptionLine> lines;
+  const uint32_t scratch = g_description_lines[0];
+  const int32_t width = kDescriptionRight - kDescriptionLeft;
+  if (!g_description_warning.empty()) {
+    WrapParagraph(ctx, base, scratch, g_description_warning, scale, width, true, lines);
+  }
+  std::u16string_view text = g_description_text;
+  while (!text.empty()) {
+    const size_t end = std::min(text.find(u'\n'), text.size());
+    WrapParagraph(ctx, base, scratch, text.substr(0, end), scale, width, false, lines);
+    text.remove_prefix(std::min(end + 1, text.size()));
+  }
+  return lines;
+}
+
+// How far down line `i` goes from the line before it.
+float DescriptionAdvance(const std::vector<DescriptionLine>& lines, size_t i, float scale) {
+  return kDescriptionLineHeight * scale *
+         (lines[i].paragraph_start ? 1.0f + kDescriptionParagraphGap : 1.0f);
+}
+
+float DescriptionHeight(const std::vector<DescriptionLine>& lines, float scale) {
+  float height = lines.empty() ? 0.0f : kDescriptionLineHeight * scale;
+  for (size_t i = 1; i < lines.size(); ++i) {
+    height += DescriptionAdvance(lines, i, scale);
+  }
+  return height;
+}
+
+void HideDescription(PPCContext& ctx, uint8_t* base) {
+  for (uint32_t line : g_description_lines) {
+    SetWidgetVisible(ctx, base, line, false);
+  }
+  g_description_shown = false;
+}
+
+// Lays g_description_warning and g_description_text out on the line widgets.
+void ShowDescription(PPCContext& ctx, uint8_t* base) {
+  float scale = kDescriptionMaxScale;
+  std::vector<DescriptionLine> lines = WrapDescription(ctx, base, scale);
+  while ((DescriptionHeight(lines, scale) > kDescriptionBottom - kDescriptionTop ||
+          lines.size() > kDescriptionMaxLines) &&
+         scale * 0.9f >= kDescriptionMinScale) {
+    scale *= 0.9f;
+    lines = WrapDescription(ctx, base, scale);
+  }
+  const uint32_t normal_colour = Read32BE(base, kPromptColourAddr);
+  float y = kDescriptionTop;
+  for (size_t i = 0; i < g_description_lines.size(); ++i) {
+    const uint32_t widget = g_description_lines[i];
+    if (i >= lines.size()) {
+      SetWidgetVisible(ctx, base, widget, false);
+      continue;
+    }
+    if (i > 0) {
+      y += DescriptionAdvance(lines, i, scale);
+    }
+    SetWidgetText(ctx, base, widget, lines[i].text.c_str());
+    SetWidgetScale(ctx, base, widget, scale);
+    if (g_set_widget_colour_fn) {
+      CallGuest(ctx, base, g_set_widget_colour_fn, widget,
+                lines[i].warning ? kDescriptionWarningColour : normal_colour);
+    }
+    PPCContext saved = ctx;
+    ctx.r3.u32 = widget;
+    ctx.r4.u32 = static_cast<uint32_t>(kDescriptionLeft);
+    ctx.r5.u32 = static_cast<uint32_t>(std::lround(y));
+    g_prompt_set_pos_fn(ctx, base);
+    ctx = saved;
+    SetWidgetVisible(ctx, base, widget, true);
+  }
+  g_description_shown = true;
+}
+
+// Every frame: the page's description while it has one, laid out again only
+// when its text changes (a new value, a language switch).
+void UpdateDescription(PPCContext& ctx, uint8_t* base, uint32_t screen) {
+  if (screen != g_custom_prompt_screen || !g_description_lines[0] || !g_prompt_set_pos_fn ||
+      !g_text_width_fn) {
+    return;
+  }
+  const PageDescription description =
+      Page().description ? Page().description() : PageDescription{};
+  if (description.warning.empty() && description.text.empty()) {
+    if (g_description_shown) {
+      HideDescription(ctx, base);
+    }
+    return;
+  }
+  if (g_description_shown && description.warning == g_description_warning &&
+      description.text == g_description_text) {
+    return;
+  }
+  g_description_warning = description.warning;
+  g_description_text = description.text;
+  ShowDescription(ctx, base);
+}
+
 // Adds the "Custom" prompt for Y and re-spaces the bar to fit four.
 //
 // Runs after the builder rather than inside it because the builder is where
@@ -1601,6 +1787,11 @@ extern "C" void NativeOptions_SettingsBuild(PPCContext& ctx, uint8_t* base) {
     for (uint32_t arrow : g_title_arrows) {
       SetWidgetVisible(ctx, base, arrow, false);
     }
+    for (uint32_t& line : g_description_lines) {
+      line = CreateCustomPrompt(ctx, base, screen, u"", /*with_glyph=*/false);
+      SetWidgetVisible(ctx, base, line, false);
+    }
+    g_description_shown = false;
     g_custom_prompt_screen = g_custom_prompt ? screen : 0;
   }
   LayoutPromptBar(ctx, base);
@@ -1710,6 +1901,9 @@ extern "C" void NativeOptions_SettingsUpdate(PPCContext& ctx, uint8_t* base) {
 
   if (g_original_settings_update_fn) {
     g_original_settings_update_fn(ctx, base);
+  }
+  if (ours) {
+    UpdateDescription(ctx, base, screen);
   }
 
   // A locked row (OptionRow::locked) can't be cycled, so it gets no arrows.

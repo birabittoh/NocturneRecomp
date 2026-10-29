@@ -170,6 +170,11 @@ class RandoMenuDialog : public rex::ui::ImGuiDialog {
     ImGui::Separator();
     ImGui::TextUnformatted(preset.name);
     ImGui::BeginChild("##log", ImVec2(0, 0), ImGuiChildFlags_Borders);
+    if (preset.requires_glitches) {
+      ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 0.4f, 0.3f, 1.0f));
+      ImGui::TextWrapped("%s", Tr("randomizer", "requires_glitches"));
+      ImGui::PopStyleColor();
+    }
     for (const char* line : preset.description) {
       ImGui::TextWrapped("%s", line);
     }

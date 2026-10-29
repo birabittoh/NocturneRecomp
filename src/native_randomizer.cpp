@@ -50,6 +50,7 @@ constexpr NativeText kEquipment{"rando_equipment"};
 constexpr NativeText kDrops{"rando_drops"};
 constexpr NativeText kShop{"rando_shop"};
 constexpr NativeText kCandles{"rando_candles"};
+constexpr NativeText kRequiresGlitches{"rando_requires_glitches"};
 
 // --- The options being edited -------------------------------------------------
 
@@ -95,6 +96,30 @@ const char16_t* PresetText(int32_t index) {
 const rando::Preset& CurrentPreset() {
   const auto& presets = rando::Presets();
   return presets[std::min<size_t>(g_options.preset, presets.size() - 1)];
+}
+
+// Both pages' description: the chosen preset's lines, as one paragraph each,
+// behind a warning for the presets that can't be beaten without glitches.
+// Nothing for the vanilla game.
+PageDescription PresetDescription() {
+  if (!g_game) {
+    return {};
+  }
+  static std::u16string text;
+  static const rando::Preset* cached = nullptr;
+  const rando::Preset& preset = CurrentPreset();
+  if (cached != &preset) {
+    cached = &preset;
+    text.clear();
+    for (const char* line : preset.description) {
+      if (!text.empty()) {
+        text += u'\n';
+      }
+      text += Utf8ToUtf16(line);
+    }
+  }
+  const char16_t* warning = preset.requires_glitches ? kRequiresGlitches.Get() : nullptr;
+  return {warning ? warning : u"", text};
 }
 
 // What the overlay does on picking a preset: its own minimum complexity, and
@@ -269,6 +294,7 @@ constexpr OptionsPage MakePage(NativeText title) {
       .credit = kCredit,
       .accept = &Accept,
       .relayout = &Relayout,
+      .description = &PresetDescription,
   };
 }
 

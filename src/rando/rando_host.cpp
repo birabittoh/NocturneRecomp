@@ -144,19 +144,22 @@ const std::vector<Preset>& Presets() {
         "This preset requires the use of different Glitches to complete. This includes Shift "
         "Lines, Reverse Shift Lines, Fire Boomerang Jumps, and more. The logic is similar to the "
         "current PSX randomizer's Glitch preset.",
-        "Starting Gear: Random + Fire Boomerang & Library Card.", "Equipment Location checks!"}},
+        "Starting Gear: Random + Fire Boomerang & Library Card.", "Equipment Location checks!"},
+       true},
       {"NoLogic", true, false, 0, true,
        {"Minimum Complexity = 1",
         "Another glitch preset. In this preset you start with Soul of Wolf, Leap Stone, Fire "
         "Boomerangs, Axe Lord Armor, Duplicator, Manna Prism, Shield Rod, and Shaman Shield. "
         "Relics can be anywhere as there is no location logic.",
-        "Guarded Location checks!"}},
+        "Guarded Location checks!"},
+       true},
       {"NoLogicEq", true, false, 0, true,
        {"Minimum Complexity = 1",
         "Another glitch preset. In this preset you start with Soul of Wolf, Leap Stone, Fire "
         "Boomerangs, Axe Lord Armor, Duplicator, Manna Prism, Shield Rod, and Shaman Shield. "
         "Relics can be anywhere as there is no location logic.",
-        "Equipment Location checks!"}},
+        "Equipment Location checks!"},
+       true},
       {"Bingo", false, false, 0, false,
        {"Vanilla Relics, start with Holy Glasses, no random Library Card or Duplicator drops from "
         "enemies. Be aware all check box options other than Randomize Relics still work for "

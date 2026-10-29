@@ -58,6 +58,8 @@ struct Preset {
   // Switch the six checkboxes on when the preset is selected.
   bool sets_normal_options;
   std::vector<const char*> description;
+  // Can't be finished without glitches (shift lines, boomerang jumps...).
+  bool requires_glitches = false;
 };
 
 const std::vector<Preset>& Presets();

@@ -7,6 +7,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <string_view>
 
 #include "native_ui.h"
 
@@ -99,6 +100,14 @@ struct OptionRow {
   bool (*locked)(const OptionRow& row) = nullptr;
 };
 
+// Text shown in a column left of the list (OptionsPage::description).
+// `warning` leads it in a warning colour; `text`'s paragraphs are separated by
+// '\n'. Both empty shows nothing.
+struct PageDescription {
+  std::u16string_view warning;
+  std::u16string_view text;
+};
+
 struct OptionsPage {
   const OptionRow* rows;
   uint32_t row_count;
@@ -145,6 +154,10 @@ struct OptionsPage {
   // `live`, so that what it lays out from is the value just chosen. It may
   // also change its title and prompt, which the screen then redraws.
   bool (*relayout)() = nullptr;
+
+  // Optional: text for the column left of the list, asked again every frame,
+  // so it follows the rows' values (the randomizer's preset description).
+  PageDescription (*description)() = nullptr;
 };
 
 // Every row on a unique, in-range line; label-only rows only on stock lines of
