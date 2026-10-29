@@ -21,7 +21,6 @@
 #include <mutex>
 #include <optional>
 #include <string>
-#include <vector>
 
 #include <rex/cvar.h>
 #include <rex/logging.h>
@@ -29,8 +28,6 @@
 #include <rex/ppc/context.h>
 #include <rex/runtime.h>
 #include <rex/system/function_dispatcher.h>
-#include <rex/system/kernel_state.h>
-#include <rex/system/xam/user_profile.h>
 #include <rex/system/mod_registry.h>
 #include <rex/system/mod_storage.h>
 
@@ -107,13 +104,6 @@ constexpr uint32_t kWriteProfileSettingsFnAddr = 0x82580680u;
 // The signed-in player. Passing -1 makes the writer fall back to slot 4, which
 // isn't a real user.
 constexpr uint32_t kProfileUserIndex = 0;
-// Where that writer leaves the packed settings, per user: the size at
-// data_ptr + 4 * (8550 + user), the bytes at data_ptr + 34220 + 1000 * user.
-constexpr uint32_t kPackedSettingsSizeOffset = 4 * 8550;
-constexpr uint32_t kPackedSettingsOffset = 34220;
-constexpr uint32_t kPackedSettingsStride = 1000;
-// The title-specific profile setting the packed settings are stored under.
-constexpr uint32_t kTitleSettingsProfileId = 0x63E83FFFu;
 // Sanity bound on base_index before it's multiplied into a write address --
 // mirrors the mod's own kMaxSettingsEntryIndex guard against aiming a byte
 // write at garbage read before the settings system has initialized.
@@ -598,40 +588,14 @@ void LatchStyle(bool enhanced) {
   SaveStyleCvar();
 }
 
-// Saves the current settings to the player's profile. The game's writer does
-// the packing, but its own XamUserWriteProfileSettings call can't be relied on
-// to land: it never fills in the setting's data.type, and the SDK skips a
-// setting whose type reads as unset, so whether it saves depends on whatever
-// was left on the stack (it happens to work from the game's own menu, not
-// from here). So the packed bytes are stored through the SDK directly.
+// Saves the current settings to the player's profile, the way the settings
+// screen's own Accept does. The writer's return value isn't checked: when the
+// packed settings match its cached copy it returns an uninitialized local.
 void WriteStyleToProfile(PPCContext& ctx, uint8_t* base, uint32_t settings_base) {
   if (!g_write_profile_settings_fn) {
     return;
   }
-  auto* ks = rex::system::kernel_state();
-  if (!ks || !ks->user_profile()) {
-    return;
-  }
-  const uint32_t data_ptr = Read32BE(base, settings_base + kStyleDataPtrOffset);
-  const uint32_t size_addr = data_ptr + kPackedSettingsSizeOffset + 4 * kProfileUserIndex;
-
-  // The writer's return value can't tell "packed" from "bailed out early" (no
-  // signed-in user, or the game refusing to write right now): when the packed
-  // bytes match its cached copy it returns an uninitialized local. The size
-  // slot can -- packing always rewrites it, and an early bail never touches it.
-  const uint32_t previous_size = Read32BE(base, size_addr);
-  Write32BE(base, size_addr, 0);
   CallGuest(ctx, base, g_write_profile_settings_fn, settings_base, kProfileUserIndex);
-  const uint32_t size = Read32BE(base, size_addr);
-  if (size == 0 || size > kPackedSettingsStride) {
-    Write32BE(base, size_addr, previous_size);
-    REXLOG_WARN("[graphics_settings] game declined to pack settings for the profile");
-    return;
-  }
-  const uint8_t* packed =
-      base + data_ptr + kPackedSettingsOffset + kPackedSettingsStride * kProfileUserIndex;
-  ks->user_profile()->AddSetting(std::make_unique<rex::system::xam::UserProfile::BinarySetting>(
-      kTitleSettingsProfileId, std::vector<uint8_t>(packed, packed + size)));
   REXLOG_INFO("[graphics_settings] saved graphics style to profile (enhanced={})",
               g_pending_style != 0);
 }
