@@ -3,8 +3,8 @@
 # into nocturnerecomp_tu_hooks.toml. Both groups belong to the credits song swap
 # ("I Am the Wind" -> "Admiration of Clan"), which needs the update's
 # lament.WMA (copyrighted, cannot be shipped). The C++ is still in
-# src/tu_hooks.cpp (marked DISABLED); the replacement credits text
-# is the DISABLED entry in src/tu_dialogue_patch.h.
+# src/hooks/tu_hooks.cpp (marked DISABLED); the replacement credits text
+# is the DISABLED entry in src/hooks/tu_dialogue_patch.h.
 
 # DISABLED (needs lament.WMA, which cannot be shipped): the credits music
 # change: TuLamentTrackRedirect here and TuSoundTestTrackName below.

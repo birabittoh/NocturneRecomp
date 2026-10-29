@@ -3,7 +3,7 @@
 
 The executable runs World's code, so the image it loads has World's layout.
 None of World's data is shipped to build it: the image is put together at
-startup (src/guest_image.cpp) from whichever release the player installed.
+startup (src/core/guest_image.cpp) from whichever release the player installed.
 With World's default.xex the data is already where it belongs; JP's holds
 almost all of it too, at other addresses, since JP is a separate build of
 the same game. The recipe says where:

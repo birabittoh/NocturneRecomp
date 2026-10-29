@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Embeds res/lang/*.toml into src/lang.generated.h, English first.
+"""Embeds res/lang/*.toml into src/gen/lang.generated.h, English first.
 
 Run by CMake before compiling; the .toml files are the checked-in source of
 truth, the header is a gitignored build artifact.
@@ -8,7 +8,7 @@ import os
 
 ROOT = os.path.normpath(os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
 LANG_DIR = os.path.join(ROOT, "res", "lang")
-OUT_PATH = os.path.join(ROOT, "src", "lang.generated.h")
+OUT_PATH = os.path.join(ROOT, "src", "gen", "lang.generated.h")
 
 
 def main():

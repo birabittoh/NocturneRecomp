@@ -33,15 +33,15 @@
 #include <rex/ui/immediate_drawer.h>
 #include <rex/ui/windowed_app_context.h>
 
-#include "images.generated.h"
+#include "gen/images.generated.h"
 #include "intro_music.h"
 #include "mods_screen.h"
 #include "saves_screen.h"
 #include "intro_text.h"
-#include "version.generated.h"
+#include "gen/version.generated.h"
 #include "native_renderer_plume.h"
 #include "release_id.h"
-#include "settings.h"
+#include "core/settings.h"
 
 REXCVAR_DECLARE(bool, auto_update_enabled);
 

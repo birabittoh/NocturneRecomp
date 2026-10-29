@@ -78,7 +78,7 @@ address = 0x825C2CD0
 name = "LeaderboardEventSigninBypass"
 jump_address_on_true = 0x825C2D0C
 
-# skip_intros / skip_richter (src/intro_skips.cpp).
+# skip_intros / skip_richter (src/hooks/intro_skips.cpp).
 # Boot logos page update (sub_825C64D0): zero its fade timers on entry.
 [[midasm_hook]]
 address = 0x825C64D0
@@ -102,11 +102,11 @@ name = "SkipRichterAfterInit"
 
 # ---------------------------------------------------------------------------
 # Function wraps. Each hook sits on a function's first instruction and runs the
-# replacement in src/*.cpp through nocturne::fnhook::Enter (src/function_hooks.h);
+# replacement in src/*.cpp through nocturne::fnhook::Enter (src/core/function_hooks.h);
 # the replacement calls the original body back through a one-shot pass-through.
 # ---------------------------------------------------------------------------
 
-# Achievements screen (src/achievements_screen.cpp)
+# Achievements screen (src/screens/achievements_screen.cpp)
 [[midasm_hook]]
 address = 0x825B6ED0
 name = "AchievementsScreen_ScreenEventHook"
@@ -125,7 +125,7 @@ name = "AchievementsScreen_ScreenUpdateHook"
 registers = ["r3"]
 return_on_true = true
 
-# Settings screen (src/native_options.cpp)
+# Settings screen (src/screens/native_options.cpp)
 [[midasm_hook]]
 address = 0x825D32B0
 name = "NativeOptions_ListSetupHook"
@@ -192,7 +192,7 @@ name = "NativeOptions_SettingsUpdateHook"
 registers = ["r3"]
 return_on_true = true
 
-# Help & Options -> Enhancements (src/help_options_menu.cpp): the main-menu
+# Help & Options -> Enhancements (src/screens/help_options_menu.cpp): the main-menu
 # screen's list setup, builder, event handler and update, and the pause-menu
 # screen's Activate and event handler.
 [[midasm_hook]]
@@ -231,7 +231,7 @@ name = "HelpOptions_PauseEventHook"
 registers = ["r3"]
 return_on_true = true
 
-# Main menu -> Randomizer (src/main_menu.cpp): the main menu's builder,
+# Main menu -> Randomizer (src/screens/main_menu.cpp): the main menu's builder,
 # Activate, event handler and update, and the menu-list layout it uses. Its
 # list setup goes through HelpOptions_MenuListSetupHook above.
 [[midasm_hook]]
@@ -258,7 +258,7 @@ name = "MainMenu_UpdateHook"
 registers = ["r3"]
 return_on_true = true
 
-# Live language switch (src/language_switch.cpp): the option-list item text
+# Live language switch (src/screens/language_switch.cpp): the option-list item text
 # setters, (list, index, string_id[, x, y]), recorded so a switch can replay
 # them and have the list re-measure and re-centre each item itself.
 [[midasm_hook]]
@@ -285,7 +285,7 @@ name = "LanguageSwitch_ListItemTextCentered2Hook"
 registers = ["r3"]
 return_on_true = true
 
-# Stretch / timestep presets (src/graphics_settings.cpp)
+# Stretch / timestep presets (src/screens/graphics_settings.cpp)
 [[midasm_hook]]
 address = 0x825BB2B0
 name = "GraphicsSettings_PercentToRectHook"

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Embeds the PNGs in res/ as byte arrays into src/images.generated.h.
+"""Embeds the PNGs in res/ as byte arrays into src/gen/images.generated.h.
 
 Every res/*.png is listed by file stem in kResImages, so code can look up art
 that a checkout may not have: the start screen draws res/background.png and
@@ -13,7 +13,7 @@ import os
 
 ROOT = os.path.normpath(os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
 RES_DIR = os.path.join(ROOT, "res")
-OUT_PATH = os.path.join(ROOT, "src", "images.generated.h")
+OUT_PATH = os.path.join(ROOT, "src", "gen", "images.generated.h")
 
 
 def emit_array(f, ident, data):

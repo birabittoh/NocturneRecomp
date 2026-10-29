@@ -6,7 +6,7 @@
 // that file (MakeBaseXex), the core's XB_Randomize patches that buffer (its
 // stdio is redirected, see rando_core.cpp), and the result is the list of
 // guest byte runs it changed (PatchSet) plus the spoiler log. Applying a
-// PatchSet to the running game is src/rando_runtime.h's job.
+// PatchSet to the running game is src/rando/rando_runtime.h's job.
 //
 // The core is a pile of globals (one run at a time, not re-entrant), so
 // Generator is a singleton driving it from one worker thread.
@@ -67,7 +67,7 @@ struct Preset {
 const std::vector<Preset>& Presets();
 
 // Options as "key=value" lines, the format of randomizer.txt and of a save's
-// seed record (src/rando_runtime.h): everything Generate reads, so the same
+// seed record (src/rando/rando_runtime.h): everything Generate reads, so the same
 // lines generate the same run. The preset is saved by name. Loading leaves
 // options missing from the file as they were.
 bool LoadOptionsFile(const std::filesystem::path& path, Options* options);
@@ -200,7 +200,7 @@ inline constexpr int kWingSmashColorCount = 8;
 // `location_set` is the seed's Result::location_set (empty for vanilla), for
 // the map tracker. Shares the core with Generate. The caller leaves out
 // enhancements the seed already has or that clash with it (see
-// EffectiveEnhancements in src/enhancements.h).
+// EffectiveEnhancements in src/rando/enhancements.h).
 std::shared_ptr<const PatchSet> ComposeWorld(const BaseXex& base, const PatchSet* seed,
                                              const std::string& location_set,
                                              const Enhancements& enhancements,

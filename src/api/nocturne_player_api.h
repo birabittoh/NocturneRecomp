@@ -5,7 +5,7 @@
 //
 // This exists so a mod never has to know a single guest address. The layout
 // and how each row was confirmed are written up next to the offsets in
-// src/player_status.cpp.
+// src/game/player_status.cpp.
 //
 // A mod does NOT link against this project. Copy this header into the mod and
 // resolve the entry points at runtime out of the host executable:

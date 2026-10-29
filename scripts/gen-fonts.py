@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Embeds the TTF files in src/fonts/ as byte arrays into src/fonts.generated.h.
+"""Embeds the TTF files in src/fonts/ as byte arrays into src/gen/fonts.generated.h.
 
 Run automatically by CMake (see CMakeLists.txt) before compiling; the raw .ttf
 files are the checked-in source of truth, the header is a gitignored build
@@ -9,7 +9,7 @@ import os
 
 ROOT = os.path.normpath(os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
 FONTS_DIR = os.path.join(ROOT, "src", "fonts")
-OUT_PATH = os.path.join(ROOT, "src", "fonts.generated.h")
+OUT_PATH = os.path.join(ROOT, "src", "gen", "fonts.generated.h")
 
 # (source file, C identifier prefix, human-readable name, license note)
 FONTS = [

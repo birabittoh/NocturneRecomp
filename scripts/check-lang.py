@@ -67,7 +67,7 @@ for path in sources:
 
 # Keys composed at run time.
 # settings.cpp's ConfirmRestart takes its text keys as defaulted parameters.
-settings_src = (root / "src/settings.cpp").read_text(encoding="utf8")
+settings_src = (root / "src/core/settings.cpp").read_text(encoding="utf8")
 for key in re.findall(r'\b\w+_key\s*=\s*"(\w+)"', settings_src):
     used.add(("settings", key))
 for args in re.findall(r'\bConfirmRestart\(\s*"\w+"\s*,\s*\w+\s*,([^)]*)\)', settings_src):
@@ -99,13 +99,13 @@ if sdk_src.is_dir():
 else:
     print(f"note: {sdk_src} not found; [sdk_ui] keys only the SDK reads aren't checked")
     sdk_used = {("sdk_ui", key) for key in en.get("sdk_ui", {})}
-enh = (root / "src/enhancements.cpp").read_text(encoding="utf8")
+enh = (root / "src/rando/enhancements.cpp").read_text(encoding="utf8")
 for cvar in re.findall(r'\{Enhancement::\w+,\s*"(enh_\w+)"', enh):
     used |= {("enhancements", cvar), ("enhancements", cvar + "_desc")}
 for key in re.findall(r'"(section_\w+)"', enh):
     used.add(("enhancements", key))
 # The overlay's enhancement tabs, labelled by section key (settings.cpp).
-settings_src = (root / "src/settings.cpp").read_text(encoding="utf8")
+settings_src = (root / "src/core/settings.cpp").read_text(encoding="utf8")
 for table in re.findall(r'kEnhancementTabs\s*=\s*\{(.*?)\};', settings_src, re.S):
     used |= {("enhancements", key) for key in re.findall(r'"(section_\w+)"', table)}
 # The intro skips at the end of the overlay's Other tab (settings.cpp).
@@ -117,7 +117,7 @@ rando_host = (root / "src/rando/rando_host.cpp").read_text(encoding="utf8")
 for key in re.findall(r'\{"[^"]+",\s*"(\w+)",\s*(?:true|false)', rando_host):
     used.add(("rando_presets", key))
 # The enhancements page's on/off rows, labelled by their cvar's name.
-native_enh = (root / "src/native_enhancements.cpp").read_text(encoding="utf8")
+native_enh = (root / "src/screens/native_enhancements.cpp").read_text(encoding="utf8")
 for cvar in re.findall(r'\bBoolRow\(\s*\d+\s*,\s*"(\w+)"', native_enh):
     used.add(("native", cvar))
 for prefix, extra in (("mode_", "_desc"), ("color_", "")):

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Embeds the game's title icon as a byte array into src/icon.generated.h.
+"""Embeds the game's title icon as a byte array into src/gen/icon.generated.h.
 
 Run automatically by CMake (see CMakeLists.txt) before compiling. The icon is
 extracted directly from assets/default.xex (the XEX resource table holds an
@@ -13,8 +13,8 @@ import sys
 
 ROOT = os.path.normpath(os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
 XEX_PATH = os.path.join(ROOT, "assets", "default.xex")
-OUT_PATH = os.path.join(ROOT, "src", "icon.generated.h")
-OUT_ICO_PATH = os.path.join(ROOT, "src", "icon.generated.ico")
+OUT_PATH = os.path.join(ROOT, "src", "gen", "icon.generated.h")
+OUT_ICO_PATH = os.path.join(ROOT, "src", "gen", "icon.generated.ico")
 
 XEX_HEADER_RESOURCE_INFO = 0x000002FF
 XEX_HEADER_FILE_FORMAT_INFO = 0x000003FF

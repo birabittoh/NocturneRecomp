@@ -3,7 +3,7 @@
 # ---------------------------------------------------------------------------
 # Title Update 1 ports: the code changes of assets/default.xexp, re-created
 # as hooks on the vanilla image. Each entry is documented at its hook in
-# src/tu_hooks.cpp.
+# src/hooks/tu_hooks.cpp.
 # ---------------------------------------------------------------------------
 
 # sub_82231A50: new "flag clear -> state 3" check on the state machine's three

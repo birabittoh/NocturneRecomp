@@ -3,13 +3,13 @@
 
 This is the image the executable loads, which scripts/guest_recipe.py derives
 its recipe from; the executable itself builds it at startup from the
-player's own default.xex (src/guest_image.h). The image is built from
+player's own default.xex (src/core/guest_image.h). The image is built from
 assets/guest_data_src with no retail file: the XEX
 header (xex_header.txt, scripts/xex_header.py) and every byte of data
 (scripts/guest_data.py; run its `extract` first for the grids, images and
 XDBF files it takes from the user's own default.xex). Code sections are
 empty: codegen already compiled them, and the game never reads them. The
-randomizer's code patches are compiled hooks too (src/rando_hooks.h), and it
+randomizer's code patches are compiled hooks too (src/rando/rando_hooks.h), and it
 finds the instructions it patches by the bytes it writes, not by what the
 image holds. The import thunk words in .text are the header's, since the SDK
 reads them at load to pair imports. Zero runs are elided by the XEX "basic"

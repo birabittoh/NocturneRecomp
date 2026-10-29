@@ -3,7 +3,7 @@
 // See native_renderer_plume.h.
 
 #include "native_renderer_draw.h"
-#include "settings.h"
+#include "core/settings.h"
 #include "native_renderer_plume.h"
 
 #include <algorithm>

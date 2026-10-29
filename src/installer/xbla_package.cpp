@@ -13,7 +13,7 @@
 #include <rex/logging.h>
 #include <rex/ui/progress_window.h>
 
-#include "icon.generated.h"
+#include "gen/icon.generated.h"
 #include "intro_text.h"
 #include "progress_theme.h"
 

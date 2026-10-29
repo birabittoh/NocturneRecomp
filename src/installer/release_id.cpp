@@ -8,7 +8,7 @@ namespace {
 
 // The World default.xex is the file the guest image is built from. The JP
 // package is different code (18 MB against 15 MB), so it runs on World's
-// linked-in image with its own data (src/xact_compat.cpp reads its sound
+// linked-in image with its own data (src/hooks/xact_compat.cpp reads its sound
 // banks). Both ship all six languages' strings_*.bin.
 constexpr std::array kReleases = {
     Release{"xbla-world", "Castlevania: Symphony of the Night (Xbox Live Arcade, World)",

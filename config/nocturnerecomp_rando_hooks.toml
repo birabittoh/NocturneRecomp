@@ -1,6 +1,6 @@
 # Randomizer code patches: one hook per patched instruction (or run of
 # instructions). Written by scripts/gen-rando-hooks.py --write-toml; see
-# src/rando_hooks.h.
+# src/rando/rando_hooks.h.
 
 [[midasm_hook]]
 address = 0x8223AD30

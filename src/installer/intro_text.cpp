@@ -8,8 +8,8 @@
 
 #include <rex/cvar.h>
 
-#include "lang.generated.h"
-#include "settings.h"
+#include "gen/lang.generated.h"
+#include "core/settings.h"
 
 namespace nocturne {
 namespace {

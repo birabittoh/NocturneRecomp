@@ -21,10 +21,10 @@
 #include "document_picker.h"
 
 #include "intro_music.h"
-#include "settings.h"
-#include "target.h"
+#include "core/settings.h"
+#include "core/target.h"
 #include "intro_text.h"
-#include "version.generated.h"
+#include "gen/version.generated.h"
 
 namespace nocturne {
 namespace {

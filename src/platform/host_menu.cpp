@@ -16,8 +16,8 @@
 #include <string>
 #include <vector>
 
-#include "settings.h"
-#include "ui_text.h"
+#include "core/settings.h"
+#include "ui/ui_text.h"
 #endif
 
 namespace nocturne {

@@ -103,16 +103,19 @@ if(NOCTURNE_VERSION STREQUAL "")
 endif()
 string(REGEX REPLACE "^v" "" NOCTURNE_VERSION "${NOCTURNE_VERSION}")
 configure_file(
-    ${CMAKE_SOURCE_DIR}/src/version.generated.h.in
-    ${CMAKE_SOURCE_DIR}/src/version.generated.h
+    ${CMAKE_SOURCE_DIR}/src/core/version.generated.h.in
+    ${CMAKE_SOURCE_DIR}/src/gen/version.generated.h
     @ONLY
 )
 
 # Embedded overlay fonts: src/fonts/*.ttf are the checked-in source of truth;
-# src/fonts.generated.h is a gitignored build artifact regenerated whenever a
+# src/gen/fonts.generated.h is a gitignored build artifact regenerated whenever a
 # .ttf or the generator script changes.
 find_package(Python3 COMPONENTS Interpreter REQUIRED)
-set(NOCTURNE_FONTS_HEADER ${CMAKE_SOURCE_DIR}/src/fonts.generated.h)
+# Generated headers land here (gitignored).
+file(MAKE_DIRECTORY ${CMAKE_SOURCE_DIR}/src/gen)
+
+set(NOCTURNE_FONTS_HEADER ${CMAKE_SOURCE_DIR}/src/gen/fonts.generated.h)
 add_custom_command(
     OUTPUT ${NOCTURNE_FONTS_HEADER}
     COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/scripts/gen-fonts.py
@@ -121,15 +124,15 @@ add_custom_command(
         ${CMAKE_SOURCE_DIR}/src/fonts/PTSerif-Regular.ttf
         ${CMAKE_SOURCE_DIR}/src/fonts/DotGothic16-Subset.ttf
         ${CMAKE_SOURCE_DIR}/src/fonts/Roboto-Medium.ttf
-    COMMENT "Generating src/fonts.generated.h"
+    COMMENT "Generating src/gen/fonts.generated.h"
     VERBATIM
 )
 
 # Interface text, one file per language (res/lang/*.toml, the checked-in source
-# of truth); src/lang.generated.h is a gitignored build artifact. The files are
+# of truth); src/gen/lang.generated.h is a gitignored build artifact. The files are
 # globbed and listed in a file the command depends on, so adding a language
 # regenerates the header.
-set(NOCTURNE_LANG_HEADER ${CMAKE_SOURCE_DIR}/src/lang.generated.h)
+set(NOCTURNE_LANG_HEADER ${CMAKE_SOURCE_DIR}/src/gen/lang.generated.h)
 file(GLOB NOCTURNE_LANG_SOURCES CONFIGURE_DEPENDS ${CMAKE_SOURCE_DIR}/res/lang/*.toml)
 set(NOCTURNE_LANG_LIST ${CMAKE_BINARY_DIR}/lang_sources.txt)
 string(REPLACE ";" "\n" _lang_list "${NOCTURNE_LANG_SOURCES}")
@@ -141,7 +144,7 @@ add_custom_command(
         ${CMAKE_SOURCE_DIR}/scripts/gen-lang.py
         ${NOCTURNE_LANG_LIST}
         ${NOCTURNE_LANG_SOURCES}
-    COMMENT "Generating src/lang.generated.h"
+    COMMENT "Generating src/gen/lang.generated.h"
     VERBATIM
 )
 
@@ -149,10 +152,10 @@ add_custom_command(
 # characters the achievement strings use, and it is the player's own extracted
 # copyrighted asset, so we ship our own art for the 27 that need it (the other
 # 6 are fullwidth forms aliased onto stock ASCII glyphs) and compose the two in
-# memory at load time (see src/font_patch.cpp). The PNGs in
+# memory at load time (see src/text/font_patch.cpp). The PNGs in
 # src/fonts/glyphs_ja/ are the checked-in source of truth;
-# src/glyph_pack.generated.h is a gitignored build artifact.
-set(NOCTURNE_GLYPHS_HEADER ${CMAKE_SOURCE_DIR}/src/glyph_pack.generated.h)
+# src/gen/glyph_pack.generated.h is a gitignored build artifact.
+set(NOCTURNE_GLYPHS_HEADER ${CMAKE_SOURCE_DIR}/src/gen/glyph_pack.generated.h)
 # CONFIGURE_DEPENDS so dropping a newly drawn glyph into the folder (or taking
 # one out) re-runs the generator on the next build instead of needing a manual
 # CMake reconfigure.
@@ -164,32 +167,32 @@ add_custom_command(
         ${CMAKE_SOURCE_DIR}/scripts/gen-glyphs.py
         ${CMAKE_SOURCE_DIR}/src/fonts/glyphs_ja/metrics.toml
         ${NOCTURNE_GLYPH_ART}
-    COMMENT "Generating src/glyph_pack.generated.h"
+    COMMENT "Generating src/gen/glyph_pack.generated.h"
     VERBATIM
 )
 
 # Embedded window icon: extracted directly from assets/default.xex (already a
 # required codegen input) so no extra asset needs to be checked in or fetched.
-# src/icon.generated.h is a gitignored build artifact regenerated whenever the
+# src/gen/icon.generated.h is a gitignored build artifact regenerated whenever the
 # XEX or the generator script changes.
-set(NOCTURNE_ICON_HEADER ${CMAKE_SOURCE_DIR}/src/icon.generated.h)
-set(NOCTURNE_ICON_ICO ${CMAKE_SOURCE_DIR}/src/icon.generated.ico)
+set(NOCTURNE_ICON_HEADER ${CMAKE_SOURCE_DIR}/src/gen/icon.generated.h)
+set(NOCTURNE_ICON_ICO ${CMAKE_SOURCE_DIR}/src/gen/icon.generated.ico)
 add_custom_command(
     OUTPUT ${NOCTURNE_ICON_HEADER} ${NOCTURNE_ICON_ICO}
     COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/scripts/gen-icon.py
     DEPENDS
         ${CMAKE_SOURCE_DIR}/scripts/gen-icon.py
         ${CMAKE_SOURCE_DIR}/assets/default.xex
-    COMMENT "Generating src/icon.generated.h and src/icon.generated.ico"
+    COMMENT "Generating src/gen/icon.generated.h and src/gen/icon.generated.ico"
     VERBATIM
 )
 
-# The randomizer's code patches compiled into hooks (see src/rando_hooks.h):
+# The randomizer's code patches compiled into hooks (see src/rando/rando_hooks.h):
 # translated from the instructions in assets/default.xex and the core's code
-# caves. src/rando_hooks.generated.cpp is a gitignored build artifact; the
+# caves. src/gen/rando_hooks.generated.cpp is a gitignored build artifact; the
 # generator also checks that config/nocturnerecomp_rando_hooks.toml (which codegen
 # reads) is current.
-set(NOCTURNE_RANDO_HOOKS ${CMAKE_SOURCE_DIR}/src/rando_hooks.generated.cpp)
+set(NOCTURNE_RANDO_HOOKS ${CMAKE_SOURCE_DIR}/src/gen/rando_hooks.generated.cpp)
 add_custom_command(
     OUTPUT ${NOCTURNE_RANDO_HOOKS}
     COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/scripts/gen-rando-hooks.py
@@ -199,12 +202,12 @@ add_custom_command(
         ${CMAKE_SOURCE_DIR}/ext/SOTN_XB_RANDO/Source/xb_rando.cpp
         ${CMAKE_SOURCE_DIR}/config/nocturnerecomp_rando_hooks.toml
         ${CMAKE_SOURCE_DIR}/assets/default.xex
-    COMMENT "Generating src/rando_hooks.generated.cpp"
+    COMMENT "Generating src/gen/rando_hooks.generated.cpp"
     VERBATIM
 )
 
 # The guest image, so the game is loaded without the game folder's
-# default.xex (src/guest_image.h). Only its XEX header and a recipe are linked
+# default.xex (src/core/guest_image.h). Only its XEX header and a recipe are linked
 # in: the data is put together at startup from the installed release's own
 # default.xex, World's or JP's (scripts/guest_recipe.py).
 option(NOCTURNE_EMBED_GUEST_IMAGE "Build the guest image at startup from the installed release" ON)
@@ -297,7 +300,7 @@ add_custom_command(
 # Start screen art: every res/*.png, embedded by file stem (see
 # scripts/gen-images.py). None ships yet; dropping res/background.png or
 # res/logo.png in is picked up on the next configure.
-set(NOCTURNE_IMAGES_HEADER ${CMAKE_SOURCE_DIR}/src/images.generated.h)
+set(NOCTURNE_IMAGES_HEADER ${CMAKE_SOURCE_DIR}/src/gen/images.generated.h)
 file(GLOB NOCTURNE_IMAGE_SOURCES CONFIGURE_DEPENDS ${CMAKE_SOURCE_DIR}/res/*.png)
 set(NOCTURNE_IMAGE_LIST ${CMAKE_BINARY_DIR}/image_sources.txt)
 string(REPLACE ";" "
@@ -311,7 +314,7 @@ add_custom_command(
         ${CMAKE_SOURCE_DIR}/scripts/gen-images.py
         ${NOCTURNE_IMAGE_LIST}
         ${NOCTURNE_IMAGE_SOURCES}
-    COMMENT "Generating src/images.generated.h"
+    COMMENT "Generating src/gen/images.generated.h"
     VERBATIM
 )
 
@@ -322,9 +325,9 @@ add_custom_command(
 # to it in an out-of-source build.
 if(WIN32)
     set(NOCTURNE_ICON_ICO_PATH ${NOCTURNE_ICON_ICO})
-    set(NOCTURNE_ICON_RC ${CMAKE_SOURCE_DIR}/src/nocturnerecomp.generated.rc)
+    set(NOCTURNE_ICON_RC ${CMAKE_SOURCE_DIR}/src/gen/nocturnerecomp.generated.rc)
     configure_file(
-        ${CMAKE_SOURCE_DIR}/src/nocturnerecomp.rc.in
+        ${CMAKE_SOURCE_DIR}/src/core/nocturnerecomp.rc.in
         ${NOCTURNE_ICON_RC}
         @ONLY
     )
@@ -337,42 +340,42 @@ endif()
 
 # Sources
 set(NOCTURNERECOMP_SOURCES
-    src/main.cpp
-    src/nocturnerecomp_hooks.cpp
-    src/tu_hooks.cpp
-    src/xact_compat.cpp
-    src/accent_color.cpp
-    src/achievement_icons.cpp
-    src/achievements_menu.cpp
-    src/achievements_screen.cpp
-    src/fast_forward.cpp
-    src/font_overlay.cpp
-    src/font_patch.cpp
-    src/fonts_zip.cpp
-    src/graphics_settings.cpp
-    src/host_timer_resolution.cpp
-    src/intro_skips.cpp
-    src/jp_artwork.cpp
-    src/jp_voices.cpp
-    src/language_switch.cpp
-    src/latin1_font.cpp
-    src/movie_player.cpp
-    src/help_options_menu.cpp
-    src/main_menu.cpp
-    src/native_enhancements.cpp
-    src/native_randomizer.cpp
-    src/native_options.cpp
-    src/native_ui.cpp
-    src/player_status.cpp
-    src/enhancements.cpp
-    src/rando_menu.cpp
-    src/rando_runtime.cpp
-    src/rando_hooks.generated.cpp
+    src/core/main.cpp
+    src/core/nocturnerecomp_hooks.cpp
+    src/hooks/tu_hooks.cpp
+    src/hooks/xact_compat.cpp
+    src/game/accent_color.cpp
+    src/screens/achievement_icons.cpp
+    src/ui/achievements_menu.cpp
+    src/screens/achievements_screen.cpp
+    src/game/fast_forward.cpp
+    src/text/font_overlay.cpp
+    src/text/font_patch.cpp
+    src/text/fonts_zip.cpp
+    src/screens/graphics_settings.cpp
+    src/core/host_timer_resolution.cpp
+    src/hooks/intro_skips.cpp
+    src/jp/jp_artwork.cpp
+    src/jp/jp_voices.cpp
+    src/screens/language_switch.cpp
+    src/text/latin1_font.cpp
+    src/jp/movie_player.cpp
+    src/screens/help_options_menu.cpp
+    src/screens/main_menu.cpp
+    src/screens/native_enhancements.cpp
+    src/screens/native_randomizer.cpp
+    src/screens/native_options.cpp
+    src/ui/native_ui.cpp
+    src/game/player_status.cpp
+    src/rando/enhancements.cpp
+    src/rando/rando_menu.cpp
+    src/rando/rando_runtime.cpp
+    src/gen/rando_hooks.generated.cpp
     src/rando/rando_core.cpp
     src/rando/rando_host.cpp
-    src/room_presence.cpp
-    src/settings.cpp
-    src/target.cpp
+    src/game/room_presence.cpp
+    src/core/settings.cpp
+    src/core/target.cpp
     src/installer/game_data.cpp
     src/installer/game_library.cpp
     src/installer/install_pipeline.cpp
@@ -388,8 +391,8 @@ set(NOCTURNERECOMP_SOURCES
     src/platform/host_menu.cpp
     src/platform/touch_controls_overlay.cpp
     src/platform/touch_input_driver.cpp
-    src/ui_text.cpp
-    src/video_mode.cpp
+    src/ui/ui_text.cpp
+    src/core/video_mode.cpp
     src/gpu/guest_shaders.cpp
     src/gpu/native_renderer.cpp
     src/gpu/native_renderer_d3d.cpp
@@ -410,7 +413,7 @@ if(ANDROID)
     list(APPEND NOCTURNERECOMP_SOURCES src/platform/android_gpu_driver.cpp)
 endif()
 if(NOCTURNE_EMBED_GUEST_IMAGE)
-    list(APPEND NOCTURNERECOMP_SOURCES src/guest_image.cpp ${NOCTURNE_GUEST_IMAGE_ASM})
+    list(APPEND NOCTURNERECOMP_SOURCES src/core/guest_image.cpp ${NOCTURNE_GUEST_IMAGE_ASM})
 endif()
 
 if(WIN32)

@@ -13,7 +13,7 @@ NocturneRecomp.code-workspace
 
 # rexglue migration backups
 CMakeLists.txt.bak
-src/main.cpp.bak
+src/core/main.cpp.bak
 
 # Generated recomp sources
 /generated/
@@ -23,25 +23,25 @@ src/main.cpp.bak
 /build/
 
 # Embedded fonts header, rebuilt from src/fonts/*.ttf by scripts/gen-fonts.py
-/src/fonts.generated.h
-/src/glyph_pack.generated.h
-/src/lang.generated.h
+/src/gen/fonts.generated.h
+/src/gen/glyph_pack.generated.h
+/src/gen/lang.generated.h
 
 # Embedded icon header/ico, rebuilt from assets/default.xex by scripts/gen-icon.py
-/src/icon.generated.h
-/src/icon.generated.ico
-/src/images.generated.h
+/src/gen/icon.generated.h
+/src/gen/icon.generated.ico
+/src/gen/images.generated.h
 
 # Randomizer patch hooks, rebuilt from assets/default.xex by scripts/gen-rando-hooks.py
-/src/rando_hooks.generated.cpp
+/src/gen/rando_hooks.generated.cpp
 
 # Windows exe-icon resource script, rewritten by CMake with an absolute path
-# to src/icon.generated.ico (see CMakeLists.txt)
-/src/nocturnerecomp.generated.rc
+# to src/gen/icon.generated.ico (see CMakeLists.txt)
+/src/gen/nocturnerecomp.generated.rc
 
 # Project version header, rewritten from the nearest git tag on every CMake
 # configure (see CMakeLists.txt)
-/src/version.generated.h
+/src/gen/version.generated.h
 
 # Runtime artifacts — binary, logs, and bundled shared libraries
 /sdk/

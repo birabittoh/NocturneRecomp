@@ -10,7 +10,7 @@
 #include <string_view>
 
 #include "install_pipeline.h"
-#include "ui_text.h"
+#include "ui/ui_text.h"
 
 namespace nocturne {
 

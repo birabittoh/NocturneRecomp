@@ -1,5 +1,5 @@
 # The JP release's story movies, included by nocturnerecomp_manifest.toml.
-# See src/movie_player.cpp.
+# See src/jp/movie_player.cpp.
 
 # Title dispatcher sub_822521C0, mode 5 (`b sub_8224ED70`): OPN_WS before the
 # prologue; true returns from the dispatcher while it plays.

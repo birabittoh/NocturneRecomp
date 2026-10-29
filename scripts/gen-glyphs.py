@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Bakes the supplemental Japanese glyph art in src/fonts/glyphs_ja/ into
-src/glyph_pack.generated.h.
+src/gen/glyph_pack.generated.h.
 
 Why this exists
 ---------------
@@ -48,7 +48,7 @@ import zlib
 
 ROOT = os.path.normpath(os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
 ART_DIR = os.path.join(ROOT, "src", "fonts", "glyphs_ja")
-OUT_PATH = os.path.join(ROOT, "src", "glyph_pack.generated.h")
+OUT_PATH = os.path.join(ROOT, "src", "gen", "glyph_pack.generated.h")
 METRICS_PATH = os.path.join(ART_DIR, "metrics.toml")
 
 # The font_ja.xpr cell height, from the FontData header at 0x84 (28.0). Glyph
@@ -240,7 +240,7 @@ def main():
         "",
         "#include <cstdint>",
         "",
-        "#include \"font_glyph_pack.h\"",
+        "#include \"text/font_glyph_pack.h\"",
         "",
         "namespace nocturne {",
         "",

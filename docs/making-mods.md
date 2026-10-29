@@ -332,7 +332,7 @@ game_version = "1.0.0"   # or, equivalently: game_version = ">= 1.0.0"
 ```
 
 This is checked against the build's own version (`nocturnerecomp_app.h`'s
-`OnPreSetup` sets it from `src/version.generated.h`: the CI tag, else the
+`OnPreSetup` sets it from `src/gen/version.generated.h`: the CI tag, else the
 newest reachable `v*` git tag at CMake configure time -- see `CMakeLists.txt`)
 and is likewise a hard failure only when the build is actually older; if no
 tag is reachable, the version is empty and the check is accepted with a
@@ -452,7 +452,7 @@ the game's own routine, and the game-clear flag that gates Richter mode. The gam
 tick; the header names them too. The raw struct address is still registered
 as `"player.status"`, and `"app.state"` holds the app's current / game /
 front-end state pointers. The layout and its confidence notes live in the
-base game's `src/player_status.cpp`. NocturneRecomp-Mods' `src/item_inspector/`
+base game's `src/game/player_status.cpp`. NocturneRecomp-Mods' `src/item_inspector/`
 (F7) shows all of this live, and `src/player_stats/` (F6) edits the stats
 through it.
 
@@ -473,7 +473,7 @@ See `src/event_pong/`, `src/blackboard/`, and
 `src/bus_inspector/` for the pattern.
 
 **Adding a Language dropdown entry**: the curated Settings overlay's
-Language row (`src/settings.cpp`) is app code, not SDK code, so it isn't
+Language row (`src/core/settings.cpp`) is app code, not SDK code, so it isn't
 something a mod can reach through `RegisterAddress`/`FindAddress`. Instead
 NocturneRecomp itself subscribes, from `OnPostLoadXexImage()` (after
 `Runtime` exists but before any mod's `OnCreateDialogs` runs), to a
@@ -498,7 +498,7 @@ id (already built in, or already published by an earlier-loaded mod) is
 dropped with a WARN log, same first-wins rule as `RegisterAddress`.
 
 The in-game native options screen (main menu or pause -> help & options ->
-settings, `src/native_options.cpp`) offers the same Language row, built from
+settings, `src/screens/native_options.cpp`) offers the same Language row, built from
 the same list, so a language added this way shows up there too, with no
 separate registration needed.
 
@@ -639,7 +639,7 @@ which use a "big first letter" font encoding -- see
    running process can be scanned with `scripts/re/scan_guest_memory.py`.
    The image is laid out as World's `default.xex` even when it's built from
    JP's, so take addresses from World's, never JP's. No title update is
-   applied over it (TU1's changes are hooks in `src/tu_hooks.cpp`), so a
+   applied over it (TU1's changes are hooks in `src/hooks/tu_hooks.cpp`), so a
    `default.xexp` doesn't move anything either.
 2. **The target field is very likely in read-only memory.** Writing to it
    in-process access-violates (`0xC0000005`) unless the page is unlocked
