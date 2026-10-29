@@ -79,11 +79,12 @@ const char16_t* SeedText(int32_t choice) {
 }
 
 // Room for every preset (rando::Presets(), whose count is only known at run
-// time); the row offers as many as there are.
-constexpr uint32_t kMaxPresets = 16;
+// time); the row offers as many as there are. It once held 16 of the 17,
+// leaving the last one out of reach.
+constexpr uint32_t kMaxPresets = 32;
 
 uint32_t PresetCount() {
-  return static_cast<uint32_t>(rando::Presets().size());
+  return static_cast<uint32_t>(std::min<size_t>(rando::Presets().size(), kMaxPresets));
 }
 
 const char16_t* PresetText(int32_t index) {

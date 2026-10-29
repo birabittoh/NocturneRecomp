@@ -9,6 +9,7 @@
 
 #include <algorithm>
 #include <chrono>
+#include <cctype>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -62,9 +63,18 @@ uint32_t ReadBE32(const uint8_t* p) {
 
 }  // namespace
 
+// Upstream's preset order, which files from before the reorder saved the
+// preset's index in.
+constexpr const char* kLegacyPresetOrder[] = {
+    "Standard", "O.G.",          "Guarded O.G.", "Lycanthrope", "Nimble",      "Warlock",
+    "Bat Master", "Adventure",   "Expedition",   "Bounty Hunter", "Hitman",    "Richter Rando",
+    "Glitch",   "NoLogic",       "NoLogicEq",    "Bingo",       "LegDay"};
+
 const std::vector<Preset>& Presets() {
-  // Mirrors Show_Preset_Description in upstream main.cpp: the order, which
-  // controls each preset fixes, and the text it shows.
+  // Mirrors Show_Preset_Description in upstream main.cpp: which controls
+  // each preset fixes, and the text it shows. The order is the one MottZilla
+  // suggested for this port rather than upstream's: the general presets
+  // first, the glitch ones last, so nobody starts on one by accident.
   static const std::vector<Preset> presets = {
       {"Standard", false, true, 6, false,
        {"Minimum Complexity = User Choice", kNormal1,
@@ -95,15 +105,10 @@ const std::vector<Preset>& Presets() {
         "All Bat Abilities upgraded. Bat form can open doors. Pressing Y Cancels Wing Smash. "
         "Holding Y moves bat at normal speed.",
         "Starting Gear: Random.", "Designed by: MT_Fun & MottZilla"}},
-      {"Adventure", true, true, 8, false,
-       {"Minimum Complexity = User Choice. 8 Default.",
-        "Normal Randomizer with Equipment Location checks. Takes longer to complete.",
-        "Starting Gear: Random."}},
-      {"Expedition", true, false, 0, true,
-       {"Minimum Complexity = 7", "Start with Soul of Bat, Gravity Boots, and Leap Stone.",
-        "Starting Gear: Mana Prism, Buffalo Star, Dragon Helm, Alucard Mail, Twilight Cloak, and "
-        "Duplicator.",
-        "Equipment Location checks!"}},
+      {"LegDay", true, false, 0, true,
+       {"Minimum Complexity = 7", "Infinite Leap Stone jumping. Super Backdash.",
+        "BETA VERSION! Door behavior incomplete!", "Starting Gear: Random.",
+        "Designed by: MT_Fun & MottZilla"}},
       {"Bounty Hunter", true, false, 0, true,
        {"Minimum Complexity = 5",
         "The 5 Vlad relics are dropped from 5 randomly picked enemies. You must find the 5 Familiar "
@@ -125,6 +130,15 @@ const std::vector<Preset>& Presets() {
         "Quick Tips:", "Library Card Teleport with Faerie Scroll or Library Card.",
         "Hold LB+RB and Press B.", "Use Food by holding Up and Pressing RT.",
         "See READTHIS.TXT in SOTN_XB_RANDO for more info."}},
+      {"Adventure", true, true, 8, false,
+       {"Minimum Complexity = User Choice. 8 Default.",
+        "Normal Randomizer with Equipment Location checks. Takes longer to complete.",
+        "Starting Gear: Random."}},
+      {"Expedition", true, false, 0, true,
+       {"Minimum Complexity = 7", "Start with Soul of Bat, Gravity Boots, and Leap Stone.",
+        "Starting Gear: Mana Prism, Buffalo Star, Dragon Helm, Alucard Mail, Twilight Cloak, and "
+        "Duplicator.",
+        "Equipment Location checks!"}},
       {"Glitch", true, false, 0, true,
        {"Minimum Complexity = 5",
         "This preset requires the use of different Glitches to complete. This includes Shift "
@@ -148,10 +162,6 @@ const std::vector<Preset>& Presets() {
         "enemies. Be aware all check box options other than Randomize Relics still work for "
         "Bingo.",
         "For Bingo Board Play Only."}},
-      {"LegDay", true, false, 0, true,
-       {"Minimum Complexity = 7", "Infinite Leap Stone jumping. Super Backdash.",
-        "BETA VERSION! Door behavior incomplete!", "Starting Gear: Random.",
-        "Designed by: MT_Fun & MottZilla"}},
   };
   return presets;
 }
@@ -199,12 +209,16 @@ bool LoadOptionsFile(const std::filesystem::path& path, Options* o) {
     // By name, which is what the core goes by; an index from older files.
     const auto& presets = Presets();
     const std::string& value = kv["preset"];
+    std::string name = value;
+    const int legacy = std::atoi(value.c_str());
+    if (!value.empty() && std::isdigit(static_cast<unsigned char>(value[0])) && legacy >= 0 &&
+        legacy < static_cast<int>(std::size(kLegacyPresetOrder))) {
+      name = kLegacyPresetOrder[legacy];
+    }
     const auto it = std::find_if(presets.begin(), presets.end(),
-                                 [&](const Preset& p) { return value == p.name; });
-    const int p = it != presets.end() ? static_cast<int>(it - presets.begin())
-                                      : std::atoi(value.c_str());
-    if (p >= 0 && p < static_cast<int>(presets.size())) {
-      o->preset = p;
+                                 [&](const Preset& p) { return name == p.name; });
+    if (it != presets.end()) {
+      o->preset = static_cast<int>(it - presets.begin());
     }
   }
   if (kv.count("complexity")) {
