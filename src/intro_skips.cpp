@@ -6,7 +6,7 @@
 //                 Richter prologue.
 //
 // Both only take paths the game itself has. The hooks are wired up in
-// nocturnerecomp_config.toml.
+// config/nocturnerecomp_config.toml.
 #include "generated/nocturnerecomp_init.h"
 
 #include <cstdint>

@@ -89,7 +89,7 @@ def compute_codegen_hash(manifest, manifest_path):
         while chunk := f.read(1 << 20):
             h.update(chunk)
 
-    # 2. Include files (e.g. nocturnerecomp_config.toml)
+    # 2. Include files (e.g. config/nocturnerecomp_config.toml)
     for inc in manifest["entrypoint"].get("includes", []):
         with open(inc, "rb") as f:
             h.update(f.read())

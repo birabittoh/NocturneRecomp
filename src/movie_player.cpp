@@ -58,7 +58,7 @@
 // game's layers are drawn in, so it follows the player's stretch and the
 // border outside the box stays on screen. Start skips it, as in JP. A folder without the movie files (World) runs the vanilla code.
 //
-// Hooks wired up in nocturnerecomp_movie_hooks.toml.
+// Hooks wired up in config/nocturnerecomp_movie_hooks.toml.
 // ---------------------------------------------------------------------------
 
 REXCVAR_DECLARE(bool, skip_richter);  // intro_skips.cpp

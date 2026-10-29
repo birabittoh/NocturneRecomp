@@ -27,7 +27,7 @@ hands the third to the hook on the next word (FORWARD below).
 Inputs: assets/default.xex (the instructions at the sites, the function
 bounds) and the core's source (the caves). Outputs:
   src/rando_hooks.generated.cpp   built into the exe (gitignored)
-  nocturnerecomp_rando_hooks.toml the hooks, included by the manifest; checked
+  config/nocturnerecomp_rando_hooks.toml the hooks, included by the manifest; checked
                                   in, since codegen reads it. Rewritten with
                                   --write-toml, otherwise only verified.
 
@@ -50,11 +50,11 @@ from xex_image import XexImage  # noqa: E402
 XEX_PATH = os.path.join(ROOT, "assets", "default.xex")
 CORE_PATH = os.path.join(ROOT, "ext", "SOTN_XB_RANDO", "Source", "xb_rando.cpp")
 CPP_PATH = os.path.join(ROOT, "src", "rando_hooks.generated.cpp")
-TOML_PATH = os.path.join(ROOT, "nocturnerecomp_rando_hooks.toml")
+TOML_PATH = os.path.join(ROOT, "config", "nocturnerecomp_rando_hooks.toml")
 
 # address: "imm" (any immediate in the original instruction) and/or whole words.
 # "tu": the Title Update 1 port already hooks this instruction with the same
-# change (nocturnerecomp_tu_hooks.toml), so the site gets no hook of its own.
+# change (config/nocturnerecomp_tu_hooks.toml), so the site gets no hook of its own.
 SITES = """
 0x8223AD30 imm
 0x8223AD34 imm
@@ -598,7 +598,7 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--xex", default=XEX_PATH)
     ap.add_argument("--write-toml", action="store_true",
-                    help="rewrite nocturnerecomp_rando_hooks.toml instead of checking it")
+                    help="rewrite config/nocturnerecomp_rando_hooks.toml instead of checking it")
     args = ap.parse_args()
 
     img = XexImage.load(args.xex)

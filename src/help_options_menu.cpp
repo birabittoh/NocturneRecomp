@@ -229,7 +229,7 @@ void RefreshHelpOptionsText(PPCContext& ctx, uint8_t* base) {
 
 }  // namespace nocturne
 
-// Entry hooks, wired up in nocturnerecomp_config.toml.
+// Entry hooks, wired up in config/nocturnerecomp_config.toml.
 bool HelpOptions_MenuListSetupHook(PPCRegister& r3) {
   return nocturne::fnhook::Enter(r3, nocturne::kMenuListSetupFnAddr,
                                  &nocturne::HelpOptions_MenuListSetup);

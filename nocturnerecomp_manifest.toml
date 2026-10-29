@@ -10,11 +10,11 @@ name = "nocturnerecomp"
 file_path = "assets/default.xex"
 out_directory_path = "generated"
 includes = [
-  "nocturnerecomp_config.toml",
-  "nocturnerecomp_d3d9.toml",
-  "nocturnerecomp_tu_hooks.toml",
-  "nocturnerecomp_rando_hooks.toml",
-  "nocturnerecomp_xact_hooks.toml",
-  "nocturnerecomp_jp_voices_hooks.toml",
-  "nocturnerecomp_movie_hooks.toml",
+  "config/nocturnerecomp_config.toml",
+  "config/nocturnerecomp_d3d9.toml",
+  "config/nocturnerecomp_tu_hooks.toml",
+  "config/nocturnerecomp_rando_hooks.toml",
+  "config/nocturnerecomp_xact_hooks.toml",
+  "config/nocturnerecomp_jp_voices_hooks.toml",
+  "config/nocturnerecomp_movie_hooks.toml",
 ]

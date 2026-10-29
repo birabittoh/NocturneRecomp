@@ -1002,7 +1002,7 @@ void AchievementsScreen::Bind(rex::Runtime* runtime) {
     return;
   }
 
-  // The screen's handlers are hooked at codegen time (nocturnerecomp_config.toml); from here on
+  // The screen's handlers are hooked at codegen time (config/nocturnerecomp_config.toml); from here on
   // failures are survivable: the screen still opens and still backs out, it just has nothing on it.
   available_ = true;
 
@@ -1030,7 +1030,7 @@ void AchievementsScreen::Bind(rex::Runtime* runtime) {
 
 }  // namespace nocturne
 
-// Entry hooks, wired up in nocturnerecomp_config.toml.
+// Entry hooks, wired up in config/nocturnerecomp_config.toml.
 bool AchievementsScreen_ScreenEventHook(PPCRegister& r3) {
   return nocturne::fnhook::Enter(r3, nocturne::kScreenEventFnAddr, &nocturne::AchievementsScreen_ScreenEvent);
 }

@@ -2425,7 +2425,7 @@ void NativeOptions::Bind(rex::Runtime* runtime) {
     REXLOG_WARN("[native_options] guest alloc unavailable; extra rows will misbehave");
   }
 
-  // The screen's functions are hooked at codegen time (nocturnerecomp_config.toml).
+  // The screen's functions are hooked at codegen time (config/nocturnerecomp_config.toml).
   REXLOG_INFO("[native_options] hooks installed ({} settings row(s), {} enhancements row(s))",
               kSettingsPage.row_count, EnhancementsOptionsPage().row_count);
 }
@@ -2437,7 +2437,7 @@ NativeOptions& GetNativeOptions() {
 
 }  // namespace nocturne
 
-// Entry hooks, wired up in nocturnerecomp_config.toml.
+// Entry hooks, wired up in config/nocturnerecomp_config.toml.
 bool NativeOptions_ListSetupHook(PPCRegister& r3) {
   return nocturne::fnhook::Enter(r3, nocturne::kListSetupFnAddr, &nocturne::NativeOptions_ListSetup);
 }

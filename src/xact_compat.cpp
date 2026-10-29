@@ -17,7 +17,7 @@
 // stays where it is, so its offsets stay valid. Version 41 banks pass
 // through untouched, and a converted header reads as 41, so it's idempotent.
 //
-// Wired up in nocturnerecomp_xact_hooks.toml.
+// Wired up in config/nocturnerecomp_xact_hooks.toml.
 // ---------------------------------------------------------------------------
 
 namespace {

@@ -76,7 +76,7 @@ enum : uint32_t {
 constexpr uint64_t kUploadAlignment = 256;
 constexpr uint64_t kArenaBlockBytes = 4ull << 20;
 
-// The device object, NR's layout (see HANDOFF / nocturnerecomp_d3d9.toml). The
+// The device object, NR's layout (see HANDOFF / config/nocturnerecomp_d3d9.toml). The
 // register shadows are blocks ascending in register order, so a register's
 // shadow is base + 4 * (reg - first): RB_DEPTHCONTROL (0x2200) is +10420 and
 // RB_ALPHA_REF (0x210E) +10372, both observed.

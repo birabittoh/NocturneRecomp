@@ -187,7 +187,7 @@ add_custom_command(
 # The randomizer's code patches compiled into hooks (see src/rando_hooks.h):
 # translated from the instructions in assets/default.xex and the core's code
 # caves. src/rando_hooks.generated.cpp is a gitignored build artifact; the
-# generator also checks that nocturnerecomp_rando_hooks.toml (which codegen
+# generator also checks that config/nocturnerecomp_rando_hooks.toml (which codegen
 # reads) is current.
 set(NOCTURNE_RANDO_HOOKS ${CMAKE_SOURCE_DIR}/src/rando_hooks.generated.cpp)
 add_custom_command(
@@ -197,7 +197,7 @@ add_custom_command(
         ${CMAKE_SOURCE_DIR}/scripts/gen-rando-hooks.py
         ${CMAKE_SOURCE_DIR}/ext/KryptonRecomp/xex_image.py
         ${CMAKE_SOURCE_DIR}/ext/SOTN_XB_RANDO/Source/xb_rando.cpp
-        ${CMAKE_SOURCE_DIR}/nocturnerecomp_rando_hooks.toml
+        ${CMAKE_SOURCE_DIR}/config/nocturnerecomp_rando_hooks.toml
         ${CMAKE_SOURCE_DIR}/assets/default.xex
     COMMENT "Generating src/rando_hooks.generated.cpp"
     VERBATIM

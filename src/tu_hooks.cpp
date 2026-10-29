@@ -17,7 +17,7 @@
 // Everything below re-creates, on the *vanilla* image, a behaviour change the
 // title update (assets/default.xexp) makes to the game code, so the update
 // package is no longer needed for it. Each hook names the vanilla address it
-// is wired to in nocturnerecomp_tu_hooks.toml; the patched-image equivalent is
+// is wired to in config/nocturnerecomp_tu_hooks.toml; the patched-image equivalent is
 // given for cross-reference with the title update's own codegen output.
 // ---------------------------------------------------------------------------
 
@@ -154,7 +154,7 @@ bool TuStatusIs1Or8(PPCRegister& r3) {
   return r3.s32 == 1 || r3.s32 == 8;
 }
 
-// DISABLED: the hooks below are not wired in nocturnerecomp_tu_hooks.toml (the
+// DISABLED: the hooks below are not wired in config/nocturnerecomp_tu_hooks.toml (the
 // replacement lament.WMA is copyrighted and cannot be shipped); the cvar is no
 // longer exposed in the settings overlay.
 //

@@ -15,7 +15,7 @@
 // get JP's file sizes while JP's voices play (World's otherwise), the four
 // wave bank buffers are allocated big enough for either release, and sound
 // banks are read into buffers of our own (see the hooks in
-// nocturnerecomp_jp_voices_hooks.toml).
+// config/nocturnerecomp_jp_voices_hooks.toml).
 //
 // Nothing happens when JP is not installed, or when JP is the mounted folder
 // already (its voices are then the only ones there are): JpVoicesAvailable()

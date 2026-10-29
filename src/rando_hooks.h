@@ -1,7 +1,7 @@
 // The randomizer's code patches, compiled: scripts/gen-rando-hooks.py turns
 // every instruction the randomizer core can write (and the code caves it
 // writes) into native code behind a [[midasm_hook]] at the patched address
-// (nocturnerecomp_rando_hooks.toml). A hook runs the patched version while the
+// (config/nocturnerecomp_rando_hooks.toml). A hook runs the patched version while the
 // world in guest memory has changed its instruction, and lets the recompiled
 // one run otherwise.
 #pragma once

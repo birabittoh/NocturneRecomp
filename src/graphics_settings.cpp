@@ -1339,7 +1339,7 @@ void GraphicsSettings::Bind(rex::Runtime* runtime) {
   g_set_text_colour_fn = dispatcher->GetFunction(kSetTextColourFnAddr);
   g_write_profile_settings_fn = dispatcher->GetFunction(kWriteProfileSettingsFnAddr);
 
-  // The stretch screen's functions are hooked at codegen time (nocturnerecomp_config.toml).
+  // The stretch screen's functions are hooked at codegen time (config/nocturnerecomp_config.toml).
   REXLOG_INFO("[graphics_settings] hooks installed");
 }
 
@@ -1350,7 +1350,7 @@ GraphicsSettings& GetGraphicsSettings() {
 
 }  // namespace nocturne
 
-// Entry hooks, wired up in nocturnerecomp_config.toml.
+// Entry hooks, wired up in config/nocturnerecomp_config.toml.
 bool GraphicsSettings_PercentToRectHook(PPCRegister& r3) {
   return nocturne::fnhook::Enter(r3, nocturne::kStretchPercentToRectFnAddr, &nocturne::GraphicsSettings_PercentToRect);
 }

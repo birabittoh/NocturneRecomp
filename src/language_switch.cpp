@@ -555,7 +555,7 @@ extern "C" void LanguageSwitch_ListItemTextCentered2(PPCContext& ctx, uint8_t* b
 
 }  // namespace nocturne
 
-// Entry hooks, wired up in nocturnerecomp_config.toml.
+// Entry hooks, wired up in config/nocturnerecomp_config.toml.
 bool LanguageSwitch_ListItemTextHook(PPCRegister& r3) {
   return nocturne::fnhook::Enter(r3, nocturne::kListItemTextFnAddr,
                                  &nocturne::LanguageSwitch_ListItemText);

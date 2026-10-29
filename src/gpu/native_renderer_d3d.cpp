@@ -2,7 +2,7 @@
 //
 // The guest hooks. The Xbox 360 D3D9 runtime is statically linked into the
 // game, so there are no imports to hook: the functions below are located by
-// address (named in nocturnerecomp_d3d9.toml, which carries the evidence for
+// address (named in config/nocturnerecomp_d3d9.toml, which carries the evidence for
 // each) and replaced with REX_HOOK_RAW. Each hook runs the guest's own code
 // first (via __imp__<name>) so the device object keeps its shadows of every
 // register the renderer reads back, then observes the call.
