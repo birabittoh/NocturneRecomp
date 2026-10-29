@@ -505,7 +505,9 @@ void SavesScreen::DrawSlot(int slot, ImVec2 min, ImVec2 max) {
   const int text_lines = 2;
   float y = std::floor(min.y + (h - line1 - float(text_lines - 1) * (line2 + 3.0f * u)) * 0.5f);
   draw_->PushClipRect(ImVec2(text_x, min.y), ImVec2(body_max.x - 6.0f * u, max.y), true);
-  const std::string name = SlotName(slot);
+  // The buttons narrow the row, so it says less: "#13", and no date.
+  const bool compact = body_max.x != max.x;
+  const std::string name = compact ? "#" + SlotNumber(slot) : SlotName(slot);
   draw_->AddText(font_, line1, ImVec2(text_x, y), Col(kText, a * (selected ? 1.0f : 0.85f)),
                  name.c_str());
   if (info.used) {
@@ -535,14 +537,16 @@ void SavesScreen::DrawSlot(int slot, ImVec2 min, ImVec2 max) {
     // The player's name, as the load menu shows it; the date at its right.
     const std::string& chapter = info.name;
     draw_->AddText(font_, line2, ImVec2(text_x, y), Col(kText, 0.85f * a), chapter.c_str());
-    const float date_size = 14.0f * u;
-    const float date_w = font_->CalcTextSizeA(date_size, FLT_MAX, 0.0f, info.modified.c_str()).x;
-    const float chapter_end =
-        text_x + font_->CalcTextSizeA(line2, FLT_MAX, 0.0f, chapter.c_str()).x + 12.0f * u;
-    draw_->AddText(font_, date_size,
-                   ImVec2(std::max(chapter_end, body_max.x - 10.0f * u - date_w),
-                          y + (line2 - date_size)),
-                   Col(kMuted, 0.8f * a), info.modified.c_str());
+    if (!compact) {
+      const float date_size = 14.0f * u;
+      const float date_w = font_->CalcTextSizeA(date_size, FLT_MAX, 0.0f, info.modified.c_str()).x;
+      const float chapter_end =
+          text_x + font_->CalcTextSizeA(line2, FLT_MAX, 0.0f, chapter.c_str()).x + 12.0f * u;
+      draw_->AddText(font_, date_size,
+                     ImVec2(std::max(chapter_end, body_max.x - 10.0f * u - date_w),
+                            y + (line2 - date_size)),
+                     Col(kMuted, 0.8f * a), info.modified.c_str());
+    }
   }
   draw_->PopClipRect();
 }
