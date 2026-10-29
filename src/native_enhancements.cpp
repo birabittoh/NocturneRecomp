@@ -10,6 +10,7 @@
 // Labels are short: a row's label has to fit between the list's left edge and
 // the value arrows, about 20 Latin characters at the list's scale.
 #include <cstdint>
+#include <cstring>
 #include <random>
 #include <string>
 
@@ -18,6 +19,7 @@
 #include "enhancements.h"
 #include "native_options_page.h"
 #include "rando/rando.h"
+#include "rando_runtime.h"
 
 namespace nocturne {
 
@@ -59,12 +61,47 @@ static_assert(std::size(kGameModes) == static_cast<size_t>(rando::GameMode::kCou
 
 // --- Behaviour ----------------------------------------------------------------
 
+// The seed in memory (the loaded save's, or New Game's at the title) applies
+// this row's patch itself, whatever the setting says: the row shows On and
+// can't be changed, and the setting keeps the player's value for vanilla and
+// other seeds. The overlay marks the same rows (settings.cpp).
+bool SeedApplies(const OptionRow& row) {
+  const auto active = GetRandoRuntime().state().active;
+  if (!active) {
+    return false;
+  }
+  if (std::strcmp(row.cvar, kAlchemyVatsCvar) == 0) {
+    return AlchemyVatsSeedUse(active->options) == SeedUse::kIncluded;
+  }
+  for (const auto& e : EnhancementList()) {
+    if (std::strcmp(e.cvar, row.cvar) == 0) {
+      return e.seed_use(active->options) == SeedUse::kIncluded;
+    }
+  }
+  return false;
+}
+
+int32_t GetEnhancementBool(const OptionRow& row) {
+  return SeedApplies(row) ? 1 : GetCvarBool(row);
+}
+
+void CommitEnhancementBool(const OptionRow& row, int32_t value) {
+  if (!SeedApplies(row)) {
+    CommitCvarBool(row, value);
+  }
+}
+
 // The vats row is On/Off over a shuffle seed: switching it on rolls a fresh
 // nonzero seed, as the overlay's toggle does, and leaving it on keeps the
 // current shuffle.
-int32_t GetAlchemyVats(const OptionRow& row) { return GetCvarInt(row) != 0 ? 1 : 0; }
+int32_t GetAlchemyVats(const OptionRow& row) {
+  return SeedApplies(row) || GetCvarInt(row) != 0 ? 1 : 0;
+}
 
 void CommitAlchemyVats(const OptionRow& row, int32_t value) {
+  if (SeedApplies(row)) {
+    return;
+  }
   const bool shuffled = GetCvarInt(row) != 0;
   if ((value != 0) == shuffled) {
     return;
@@ -85,10 +122,11 @@ constexpr OptionRow BoolRow(uint32_t list_row, const char* cvar) {
       .label = NativeText{cvar},
       .value_count = 2,
       .values = kOffOnTexts,
-      .get = &GetCvarBool,
-      .commit = &CommitCvarBool,
+      .get = &GetEnhancementBool,
+      .commit = &CommitEnhancementBool,
       .reset = &GetCvarDefault,
       .cvar = cvar,
+      .locked = &SeedApplies,
   };
 }
 
@@ -132,6 +170,7 @@ constexpr OptionRow kOtherRows[] = {
         .commit = &CommitAlchemyVats,
         .reset = &GetCvarDefault,
         .cvar = kAlchemyVatsCvar,
+        .locked = &SeedApplies,
     },
     {
         .list_row = 3,

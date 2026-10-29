@@ -1237,6 +1237,13 @@ extern "C" void NativeOptions_CycleRow(PPCContext& ctx, uint8_t* base) {
   }
 
   const OptionRow& row = Page().rows[index];
+  if (row.locked && row.locked(row)) {
+    // The vanilla path already stepped the entry: put the held value back.
+    Write32BE(base, g_entries + screen_row * kEntryStride + kEntryValue,
+              static_cast<uint32_t>(g_values[index]));
+    RenderRow(ctx, base, static_cast<uint32_t>(index));
+    return;
+  }
   g_values[index] = EntryValue(base, row);
   // Commit before painting, so the paint sees this keypress's change rather
   // than the previous one.
@@ -1705,6 +1712,22 @@ extern "C" void NativeOptions_SettingsUpdate(PPCContext& ctx, uint8_t* base) {
     g_original_settings_update_fn(ctx, base);
   }
 
+  // A locked row (OptionRow::locked) can't be cycled, so it gets no arrows.
+  if (ours) {
+    const int32_t index = FindActiveValueRow(Read32BE(base, g_list + kListSelectedRow) + g_scroll);
+    if (index >= 0) {
+      const OptionRow& row = Page().rows[index];
+      if (row.locked && row.locked(row)) {
+        for (uint32_t offset : {kScreenLeftArrowOffset, kScreenRightArrowOffset}) {
+          if (const uint32_t arrow = Read32BE(base, screen + offset)) {
+            SetWidgetVisible(ctx, base, arrow, false);
+          }
+        }
+        return;
+      }
+    }
+  }
+
   if (!submenu_row_selected) {
     if (ours) {
       PushRightArrowPastValue(ctx, base, screen);
@@ -1749,6 +1772,9 @@ void RollBackLiveRows() {
 void ResetPageToDefaults(PPCContext& ctx, uint8_t* base) {
   for (uint32_t i = 0; i < Page().row_count; ++i) {
     const OptionRow& row = Page().rows[i];
+    if (row.locked && row.locked(row)) {
+      continue;
+    }
     const int32_t value = row.reset ? row.reset(row) : g_seeded_values[i];
     g_values[i] = std::clamp(value, RowMin(row), RowMax(row));
     if (row.live && row.commit) {

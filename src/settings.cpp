@@ -595,12 +595,17 @@ class CuratedSettingsDialog : public rex::ui::ImGuiDialog {
       }
       ImGui::PushID(e.cvar);
       const SeedUse use = seed ? e.seed_use(*seed) : SeedUse::kNone;
+      // The seed applies it itself: shown On and locked, the setting keeping
+      // the player's value for vanilla and other seeds.
+      const bool forced = use == SeedUse::kIncluded;
       ImGui::BeginGroup();
-      bool on = entry->getter() == "true";
+      bool on = forced || entry->getter() == "true";
+      ImGui::BeginDisabled(forced);
       if (rex::ui::ToggleSwitch("##v", &on)) {
         rex::cvar::SetFlagByName(e.cvar, on ? "true" : "false", /*persist=*/true);
         SaveEnhancements();
       }
+      ImGui::EndDisabled();
       ImGui::SameLine();
       ImGui::TextUnformatted(Tr("enhancements", e.cvar));
       DrawSeedMarker(use);
@@ -614,17 +619,20 @@ class CuratedSettingsDialog : public rex::ui::ImGuiDialog {
     const rando::Enhancements current = CurrentEnhancements();
     ImGui::PushID(kAlchemyVatsCvar);
     const SeedUse vats_use = seed ? AlchemyVatsSeedUse(*seed) : SeedUse::kNone;
-    bool shuffle_vats = current.alchemy_vats != 0;
+    const bool vats_forced = vats_use == SeedUse::kIncluded;
+    bool shuffle_vats = vats_forced || current.alchemy_vats != 0;
     ImGui::BeginGroup();
+    ImGui::BeginDisabled(vats_forced);
     if (rex::ui::ToggleSwitch("##v", &shuffle_vats)) {
       SetAlchemyVatsShuffle(shuffle_vats ? NewShuffleSeed() : 0);
     }
+    ImGui::EndDisabled();
     ImGui::SameLine();
     ImGui::TextUnformatted(Tr("enhancements", "shuffle_vats"));
     DrawSeedMarker(vats_use);
     ImGui::EndGroup();
     EnhancementTooltip(Tr("enhancements", "shuffle_vats_desc"), vats_use);
-    if (shuffle_vats) {
+    if (shuffle_vats && !vats_forced) {
       ImGui::SameLine();
       if (ImGui::SmallButton(Tr("enhancements", "reshuffle"))) {
         SetAlchemyVatsShuffle(NewShuffleSeed());

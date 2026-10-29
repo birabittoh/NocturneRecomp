@@ -91,6 +91,12 @@ struct OptionRow {
   // Override rows only: returning false leaves the row completely alone:
   // the stock row keeps its vanilla behaviour, model copy-back and all.
   bool (*available)() = nullptr;
+
+  // Optional: while this returns true the row holds the value `get` returns,
+  // whatever left/right or X do, for a setting something else decides (an
+  // enhancement the active seed applies itself). `commit` still runs on A,
+  // with that value, so it should leave the setting alone while locked.
+  bool (*locked)(const OptionRow& row) = nullptr;
 };
 
 struct OptionsPage {
