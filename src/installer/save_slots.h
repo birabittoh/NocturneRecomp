@@ -33,6 +33,9 @@ struct SaveSlotInfo {
   std::string completion;
   // Local time of the last write, "YYYY/MM/DD HH:MM".
   std::string modified;
+  // Played in a randomizer seed (the game's rando_slots record), and its seed name.
+  bool randomized = false;
+  std::string seed;
   // The icon's frames, RGBA kSaveThumbWidth x kSaveThumbHeight each; empty when
   // unreadable. More than one when the game's icon set is cached.
   std::vector<std::vector<uint8_t>> frames;

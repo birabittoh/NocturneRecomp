@@ -118,6 +118,28 @@ fs::path HeaderPath(const fs::path& root, int slot) {
   return TitleRoot(root) / "Headers" / "00000001" / (FileName(slot) + ".header");
 }
 
+// The randomizer's record of the world a save was written in.
+fs::path RandoRecordPath(const fs::path& root, int slot) {
+  return root / "rando_slots" / (FileName(slot) + ".txt");
+}
+
+void ReadRandoRecord(const fs::path& root, int slot, SaveSlotInfo& info) {
+  std::ifstream f(RandoRecordPath(root, slot));
+  if (!f)
+    return;
+  std::string seed;
+  for (std::string line; std::getline(f, line);) {
+    while (!line.empty() && (line.back() == '\r' || line.back() == '\n'))
+      line.pop_back();
+    if (line == "vanilla=1")
+      return;
+    if (line.rfind("seed=", 0) == 0)
+      seed = line.substr(5);
+  }
+  info.randomized = true;
+  info.seed = seed;
+}
+
 bool IsBlock(const Bytes& data) {
   return data.size() == kBlockSize && data[0] == 'S' && data[1] == 'C';
 }
@@ -330,6 +352,7 @@ std::vector<SaveSlotInfo> ReadSaveSlots(const fs::path& user_data_root) {
       continue;
     SaveSlotInfo& slot = slots[size_t(i)];
     slot.used = true;
+    ReadRandoRecord(user_data_root, i, slot);
     if (const auto when = fs::last_write_time(file, ec); !ec)
       slot.modified = FormatModified(when);
     const Bytes block = ReadFile(file, kBlockSize);
@@ -404,6 +427,8 @@ std::string WriteSaveSlot(const fs::path& user_data_root, int slot, const Prepar
   }
   if (!WriteFile(header, RenamedHeader(save.header, slot)))
     return Tr("saves", "err_write", rex::path_to_utf8(header));
+  // An imported save carries no world of its own and loads as vanilla.
+  fs::remove(RandoRecordPath(user_data_root, slot), ec);
   return {};
 }
 
@@ -414,6 +439,7 @@ std::string DeleteSaveSlot(const fs::path& user_data_root, int slot) {
   if (ec)
     return ec.message();
   fs::remove(HeaderPath(user_data_root, slot), ec);
+  fs::remove(RandoRecordPath(user_data_root, slot), ec);
   return {};
 }
 

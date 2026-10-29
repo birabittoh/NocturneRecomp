@@ -513,6 +513,20 @@ void SavesScreen::DrawSlot(int slot, ImVec2 min, ImVec2 max) {
     const float x = text_x + font_->CalcTextSizeA(line1, FLT_MAX, 0.0f, name.c_str()).x + 10.0f * u;
     draw_->AddText(font_, line2, ImVec2(x, y + (line1 - line2) * 0.6f), Col(kHeader, a),
                    info.completion.c_str());
+    if (info.randomized) {
+      // A die at the row's right end, in the randomizer page's gold: the five face.
+      const float side = 20.0f * u;
+      const ImVec2 dmin(body_max.x - 10.0f * u - side, y + (line1 - side) * 0.5f);
+      const ImVec2 dmax(dmin.x + side, dmin.y + side);
+      draw_->AddRectFilled(dmin, dmax, Col(kGold, 0.18f * a), 4.0f * u);
+      draw_->AddRect(dmin, dmax, Col(kGold, 0.9f * a), 4.0f * u, 0, std::max(1.0f, 1.5f * u));
+      const ImVec2 mid((dmin.x + dmax.x) * 0.5f, (dmin.y + dmax.y) * 0.5f);
+      const float off = side * 0.25f;
+      const float pip = std::max(1.2f, side * 0.075f);
+      for (const ImVec2 p : {ImVec2(0, 0), ImVec2(-off, -off), ImVec2(off, -off),
+                             ImVec2(-off, off), ImVec2(off, off)})
+        draw_->AddCircleFilled(ImVec2(mid.x + p.x, mid.y + p.y), pip, Col(kGold, a));
+    }
   }
   y += line1 + 3.0f * u;
   if (!info.used) {
