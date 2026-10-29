@@ -57,6 +57,10 @@ constexpr NativeText kRequiresGlitches{"rando_requires_glitches"};
 rando::Options g_options;
 // The Game row: 0 vanilla, 1 randomized.
 int32_t g_game = 1;
+// Whether A has accepted the pages since the game started. Until then they
+// open on the first preset rather than the one randomizer.txt saved, so a
+// glitch preset left over from another session isn't picked by accident.
+bool g_accepted = false;
 
 // The Seed row's values: the seed the screen opened with, then random ones,
 // rolled the first time the row shows each. Left from the first wraps round
@@ -246,6 +250,7 @@ constexpr NativeText kCredit{"rando_credit"};
 
 // A on any page: the options as edited, then the Game row's choice.
 void Accept() {
+  g_accepted = true;
   rando::Options options = g_options;
   const rando::Preset& preset =
       rando::Presets()[std::min<size_t>(options.preset, rando::Presets().size() - 1)];
@@ -411,6 +416,11 @@ void BeginRandomizerEdit() {
   const auto& presets = rando::Presets();
   if (g_options.preset < 0 || static_cast<size_t>(g_options.preset) >= presets.size()) {
     g_options.preset = 0;
+  }
+  if (!g_accepted && g_options.preset != 0) {
+    // As if the player picked it: its own complexity and options too.
+    g_options.preset = -1;
+    SelectPreset(0);
   }
   g_laid_out = false;
   Relayout();
