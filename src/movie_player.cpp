@@ -20,6 +20,7 @@
 #include <rex/audio/raw_pcm_player.h>
 #include <rex/input/input.h>
 #include <rex/input/input_system.h>
+#include <rex/cvar.h>
 #include <rex/logging.h>
 #include <rex/memory/utils.h>
 #include <rex/runtime.h>
@@ -59,6 +60,8 @@
 //
 // Hooks wired up in nocturnerecomp_movie_hooks.toml.
 // ---------------------------------------------------------------------------
+
+REXCVAR_DECLARE(bool, skip_richter);  // intro_skips.cpp
 
 extern "C" REX_FUNC(sub_82234BF0);  // SOTNSoundSuspend
 extern "C" REX_FUNC(sub_82234CC8);  // SOTNSoundUnsuspend
@@ -367,8 +370,11 @@ std::unique_ptr<rex::ui::ImGuiDialog> CreateMovieOverlay(rex::ui::ImGuiDrawer* d
 }  // namespace nocturne
 
 // Title dispatcher sub_822521C0, mode 5's `b sub_8224ED70`: OPN_WS first.
-// True holds mode 5 (returns from the dispatcher, 0x822523A0).
+// True holds mode 5 (returns from the dispatcher, 0x822523A0). The opening
+// introduces the Richter prologue, so skip_richter skips it too.
 bool MovieOpeningHook() {
+  if (REXCVAR_GET(skip_richter))
+    return false;
   return nocturne::HoldForMovie("OPN_WS.wmv") == nocturne::Hold::kPlaying;
 }
 
