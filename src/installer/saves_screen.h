@@ -56,6 +56,7 @@ class SavesScreen {
   void Reload();
   bool Used(int slot) const { return slots_[size_t(slot)].used; }
   void Move(int dx, int dy);
+  void ChangePage(int delta);
   void Press(const Focus& focus);
   void Export(int slot);
   void Import(int slot);
@@ -91,6 +92,8 @@ class SavesScreen {
   bool moved_ = false;
 
   Focus focus_;
+  // The page of slots on show; follows the cursor while it is on a slot.
+  int page_ = 0;
   // Where Up from the music toggle returns to.
   Focus before_bottom_;
   bool back_ = false;

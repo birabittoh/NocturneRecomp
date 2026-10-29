@@ -27,19 +27,21 @@ constexpr ImVec4 kGold(1.00f, 0.80f, 0.30f, 1.0f);
 
 // Slots fill a row left to right from the bottom one up, as the game's load menu has them.
 constexpr int kColumns = 3;
-constexpr int kRows = (kSaveSlotCount + kColumns - 1) / kColumns;
+constexpr int kSlotsPerPage = 15;
+constexpr int kRows = kSlotsPerPage / kColumns;
+constexpr int kPages = (kSaveSlotCount + kSlotsPerPage - 1) / kSlotsPerPage;
 
 int ColumnOf(int slot) {
-  return slot % kColumns;
+  return (slot % kSlotsPerPage) % kColumns;
 }
 
 // From the top.
 int RowOf(int slot) {
-  return kRows - 1 - slot / kColumns;
+  return kRows - 1 - (slot % kSlotsPerPage) / kColumns;
 }
 
-int SlotAt(int column, int row) {
-  return (kRows - 1 - row) * kColumns + column;
+int SlotAt(int page, int column, int row) {
+  return page * kSlotsPerPage + (kRows - 1 - row) * kColumns + column;
 }
 
 ImU32 Col(const ImVec4& c, float a = 1.0f) {
@@ -116,6 +118,7 @@ void SavesScreen::Reopen(bool gamepad) {
   loaded_ = false;
   gamepad_ = gamepad;
   focus_ = {};
+  page_ = 0;
   status_.clear();
   CancelDelete();
 }
@@ -143,7 +146,7 @@ void SavesScreen::Move(int dx, int dy) {
   switch (f.zone) {
     case Zone::kBack:
       if (dy > 0)
-        f = {Zone::kSlot, SlotAt(0, 0)};
+        f = {Zone::kSlot, SlotAt(page_, 0, 0)};
       return;
     case Zone::kMusic:
       if (dy < 0)
@@ -171,7 +174,7 @@ void SavesScreen::Move(int dx, int dy) {
       else if (IntroLanguageCount() >= 2)
         f = {Zone::kPicker, 0};
     } else {
-      f = {Zone::kSlot, SlotAt(column, row + dy)};
+      f = {Zone::kSlot, SlotAt(page_, column, row + dy)};
     }
     return;
   }
@@ -184,9 +187,24 @@ void SavesScreen::Move(int dx, int dy) {
   if (next >= 0 && next < int(parts.size()))
     f.zone = parts[size_t(next)];
   else if (dx > 0 && column + 1 < kColumns)
-    f = {Zone::kSlot, SlotAt(column + 1, row)};
+    f = {Zone::kSlot, SlotAt(page_, column + 1, row)};
   else if (dx < 0 && column > 0)
-    f = {Zone::kSlot, SlotAt(column - 1, row)};
+    f = {Zone::kSlot, SlotAt(page_, column - 1, row)};
+  else if (dx > 0 && page_ + 1 < kPages)
+    f = {Zone::kSlot, SlotAt(page_ + 1, 0, row)};
+  else if (dx < 0 && page_ > 0)
+    f = {Zone::kSlot, SlotAt(page_ - 1, kColumns - 1, row)};
+}
+
+void SavesScreen::ChangePage(int delta) {
+  const int page = std::clamp(page_ + delta, 0, kPages - 1);
+  if (page == page_)
+    return;
+  const bool on_slot = focus_.zone == Zone::kSlot || focus_.zone == Zone::kExport ||
+                       focus_.zone == Zone::kDelete || focus_.zone == Zone::kImport;
+  if (on_slot)
+    focus_ = {Zone::kSlot, page * kSlotsPerPage + focus_.index % kSlotsPerPage};
+  page_ = page;
 }
 
 // A row exports its save, or imports into it when empty.
@@ -342,6 +360,10 @@ void SavesScreen::Input() {
     Move(1, 0);
   } else if (Pressed({ImGuiKey_LeftArrow, ImGuiKey_A, ImGuiKey_GamepadDpadLeft})) {
     Move(-1, 0);
+  } else if (Pressed({ImGuiKey_Q, ImGuiKey_PageUp, ImGuiKey_GamepadL1})) {
+    ChangePage(-1);
+  } else if (Pressed({ImGuiKey_E, ImGuiKey_PageDown, ImGuiKey_GamepadR1})) {
+    ChangePage(1);
   } else if (Pressed({ImGuiKey_Enter, ImGuiKey_KeypadEnter, ImGuiKey_Space,
                       ImGuiKey_GamepadFaceDown})) {
     Press(focus_);
@@ -595,6 +617,8 @@ void SavesScreen::DrawHints(float y) {
       text += gap + std::string(delete_key) + S("delete");
     text += gap + std::string(back) + Tr(IntroText::kHintBack);
   }
+  if (gamepad_ && !confirm_step_)
+    text += gap + std::string("LB/RB  ") + S("page");
   const float size = 17.0f * unit_;
   const ImVec2 extent = font_->CalcTextSizeA(size, FLT_MAX, 0.0f, text.c_str());
   draw_->AddText(font_, size, ImVec2(std::floor((size_.x - extent.x) * 0.5f), y),
@@ -639,23 +663,59 @@ bool SavesScreen::Draw(ImDrawList* draw, ImFont* font, ImVec2 size, float unit, 
   const float row_h = 72.0f * u;
   const float row_gap = 10.0f * u;
   const float top = 96.0f * u;
-  for (int i = 0; i < kSaveSlotCount; ++i) {
+  if (focus_.zone == Zone::kSlot || focus_.zone == Zone::kExport ||
+      focus_.zone == Zone::kDelete || focus_.zone == Zone::kImport)
+    page_ = focus_.index / kSlotsPerPage;
+  for (int i = page_ * kSlotsPerPage; i < (page_ + 1) * kSlotsPerPage; ++i) {
     const ImVec2 min(x0 + float(ColumnOf(i)) * (column_w + column_gap),
                      top + float(RowOf(i)) * (row_h + row_gap));
     DrawSlot(i, min, ImVec2(min.x + column_w, min.y + row_h));
   }
   const float bottom = top + kRows * (row_h + row_gap) - row_gap;
 
+  // "< 1 / 2 >" under the grid.
+  {
+    const float size_px = 20.0f * u;
+    const float arrow_w = 40.0f * u;
+    char label[32];
+    std::snprintf(label, sizeof(label), "%d / %d", page_ + 1, kPages);
+    const float label_w = font->CalcTextSizeA(size_px, FLT_MAX, 0.0f, label).x;
+    const float cy = bottom + 28.0f * u;
+    const float cx = size.x * 0.5f;
+    draw->AddText(font, size_px, ImVec2(std::floor(cx - label_w * 0.5f), cy - size_px * 0.5f),
+                  Col(kText, alpha), label);
+    for (int dir = -1; dir <= 1; dir += 2) {
+      const bool enabled = page_ + dir >= 0 && page_ + dir < kPages;
+      const float ax = cx + float(dir) * (label_w * 0.5f + 12.0f * u + arrow_w * 0.5f);
+      const ImVec2 amin(ax - arrow_w * 0.5f, cy - 16.0f * u);
+      const ImVec2 amax(ax + arrow_w * 0.5f, cy + 16.0f * u);
+      bool hovered = false;
+      if (!confirm_step_ && ready_ && !waiting_ && enabled) {
+        ImGui::SetCursorScreenPos(amin);
+        ImGui::PushID(900 + dir);
+        if (ImGui::InvisibleButton("##page", ImVec2(amax.x - amin.x, amax.y - amin.y)))
+          ChangePage(dir);
+        hovered = ImGui::IsItemHovered() && !touch_;
+        ImGui::PopID();
+      }
+      const ImU32 ink = Col(hovered ? kAccent : kText, alpha * (enabled ? 1.0f : 0.25f));
+      const float t = 7.0f * u;
+      const float s = float(dir);
+      draw->AddTriangleFilled(ImVec2(ax + s * t, cy), ImVec2(ax - s * t, cy - t),
+                              ImVec2(ax - s * t, cy + t), ink);
+    }
+  }
+
   std::string status = waiting_ ? std::string(S("waiting")) : status_;
   if (!status.empty()) {
     const float text_size = 18.0f * u;
     const ImVec2 extent = font->CalcTextSizeA(text_size, FLT_MAX, width, status.c_str());
     draw->AddText(font, text_size, ImVec2(std::floor((size.x - std::min(extent.x, width)) * 0.5f),
-                                          bottom + 12.0f * u),
+                                          bottom + 52.0f * u),
                   Col(waiting_ ? kMuted : status_error_ ? kError : kGood, alpha), status.c_str(),
                   nullptr, width);
   }
-  DrawHints(bottom + 58.0f * u);
+  DrawHints(bottom + 96.0f * u);
   if (confirm_step_ && deleting_ >= 0)
     DrawConfirm();
   return back_;

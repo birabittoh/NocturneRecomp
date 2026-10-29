@@ -7,7 +7,7 @@
 // title such as "CASTLEVANIA-01 ALUCARD 020%", a 16x16 4bpp icon, the game
 // data) stored as the content file BASLUS-00067DRAX<n>, with an XContent
 // .header beside it. The game writes a new save to the first free <n> below
-// 29 (sub_822538E0); the page shows the first kSaveSlotCount of them. The
+// 30 (sub_822538E0); the page shows all kSaveSlotCount of them. The
 // block's info (sub_82253BF0) follows the PS1's SaveInfo from +0x100.
 //
 // Only Xbox 360 saves are imported: our export zip, or a bare block with its
@@ -21,7 +21,7 @@
 
 namespace nocturne {
 
-inline constexpr int kSaveSlotCount = 15;
+inline constexpr int kSaveSlotCount = 30;
 // The PS1 memory card icon.
 inline constexpr int kSaveThumbWidth = 16;
 inline constexpr int kSaveThumbHeight = 16;

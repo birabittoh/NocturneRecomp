@@ -366,6 +366,7 @@ confirm_delete_again = "本当によろしいですか？セーブファイル {
 deleted = "セーブファイル {} を削除しました。"
 delete_failed = "セーブファイル {} を削除できませんでした: {}"
 waiting = "ファイル選択画面を待っています..."
+page = "ページ"
 err_read = "ファイルを読み取れませんでした。"
 err_write = "{} に書き込めませんでした。"
 err_write_location = "その場所に書き込めませんでした。"
