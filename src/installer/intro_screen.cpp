@@ -424,11 +424,11 @@ class IntroDialog final : public rex::ui::ImGuiDialog {
 
     draw->AddRectFilledMultiColor(ImVec2(0, 0), size, kTop, kTop, kBottom, kBottom);
     if (g_background.texture)
-      Cover(draw, g_background, size, IM_COL32_WHITE);
-    // Darkens the lower half the text sits on.
-    draw->AddRectFilledMultiColor(ImVec2(0, size.y * 0.35f), size, IM_COL32(0, 0, 0, 0),
-                                  IM_COL32(0, 0, 0, 0), IM_COL32(0, 0, 0, 190),
-                                  IM_COL32(0, 0, 0, 190));
+      Cover(draw, g_background, size, IM_COL32(170, 170, 170, 255));
+    // Darkens the lower part the text sits on.
+    draw->AddRectFilledMultiColor(ImVec2(0, size.y * 0.2f), size, IM_COL32(0, 0, 0, 0),
+                                  IM_COL32(0, 0, 0, 0), IM_COL32(0, 0, 0, 225),
+                                  IM_COL32(0, 0, 0, 225));
     Motes(draw, size, unit, t, shown);
 
     if (mods_open_) {
