@@ -21,6 +21,7 @@
 #include <mutex>
 #include <optional>
 #include <string>
+#include <vector>
 
 #include <rex/cvar.h>
 #include <rex/logging.h>
@@ -28,6 +29,8 @@
 #include <rex/ppc/context.h>
 #include <rex/runtime.h>
 #include <rex/system/function_dispatcher.h>
+#include <rex/system/kernel_state.h>
+#include <rex/system/xam/user_profile.h>
 #include <rex/system/mod_registry.h>
 #include <rex/system/mod_storage.h>
 
@@ -95,6 +98,22 @@ constexpr uint32_t kStyleEntryIndexBias = 21;
 constexpr uint32_t kStyleEntryBaseOffset = 28;
 constexpr uint32_t kStyleEntryByteOffset = 2;
 constexpr uint32_t kStyleMenuMirrorOffset = 4548;
+// cPersistentDataManager's profile writer, (settings_base, user_index) -> BOOL:
+// packs the settings (PackSettings, sub_8257FCA0 -- which takes the style from
+// the menu mirror above, not the applied byte) and hands them to
+// XamUserWriteProfileSettings. The settings screen's own Accept handler
+// (sub_825B3F58) calls it exactly this way after committing a change.
+constexpr uint32_t kWriteProfileSettingsFnAddr = 0x82580680u;
+// The signed-in player. Passing -1 makes the writer fall back to slot 4, which
+// isn't a real user.
+constexpr uint32_t kProfileUserIndex = 0;
+// Where that writer leaves the packed settings, per user: the size at
+// data_ptr + 4 * (8550 + user), the bytes at data_ptr + 34220 + 1000 * user.
+constexpr uint32_t kPackedSettingsSizeOffset = 4 * 8550;
+constexpr uint32_t kPackedSettingsOffset = 34220;
+constexpr uint32_t kPackedSettingsStride = 1000;
+// The title-specific profile setting the packed settings are stored under.
+constexpr uint32_t kTitleSettingsProfileId = 0x63E83FFFu;
 // Sanity bound on base_index before it's multiplied into a write address --
 // mirrors the mod's own kMaxSettingsEntryIndex guard against aiming a byte
 // write at garbage read before the settings system has initialized.
@@ -318,6 +337,7 @@ PPCFunc* g_text_widget_ctor_fn = nullptr;
 PPCFunc* g_set_text_fn = nullptr;
 PPCFunc* g_text_width_fn = nullptr;
 PPCFunc* g_set_text_colour_fn = nullptr;
+PPCFunc* g_write_profile_settings_fn = nullptr;
 uint32_t g_text_scratch = 0;
 
 // Path settings.cpp's curated dialog also writes to (settings.toml), cached
@@ -354,6 +374,12 @@ std::atomic<int> g_requested_style{-1};
 // passive diff-detection so a not-yet-initialized live byte (read before the
 // chain settles) never gets misread as the player having picked something.
 bool g_style_chain_seen = false;
+// Where the chain resolved last frame. The entry index (data_ptr + 4348) moves
+// when the game opens its session after the title screen, so the same chain
+// can resolve to a different, unrelated entry without ever failing -- that
+// counts as "never seen" too.
+uint32_t g_last_style_addr = 0;
+uint32_t g_last_menu_addr = 0;
 
 int64_t NowMs() {
   return std::chrono::duration_cast<std::chrono::milliseconds>(
@@ -526,12 +552,14 @@ void SetPercentLabelText(PPCContext& ctx, uint8_t* base, PercentLabel& label, bo
 // guest addresses. false before the settings system has initialized (any
 // pointer in the chain reads 0) or if base_index looks like uninitialized
 // garbage.
-bool ResolveStyleAddrs(const uint8_t* base, uint32_t* style_addr, uint32_t* menu_addr) {
+bool ResolveStyleAddrs(const uint8_t* base, uint32_t* style_addr, uint32_t* menu_addr,
+                       uint32_t* settings_base_out) {
   uint32_t singleton = Read32BE(base, kAppSingletonPtrAddr);
   if (singleton == 0) {
     return false;
   }
   uint32_t settings_base = Read32BE(base, singleton + kStyleSettingsBaseOffset);
+  *settings_base_out = settings_base;
   if (settings_base == 0) {
     return false;
   }
@@ -570,6 +598,44 @@ void LatchStyle(bool enhanced) {
   SaveStyleCvar();
 }
 
+// Saves the current settings to the player's profile. The game's writer does
+// the packing, but its own XamUserWriteProfileSettings call can't be relied on
+// to land: it never fills in the setting's data.type, and the SDK skips a
+// setting whose type reads as unset, so whether it saves depends on whatever
+// was left on the stack (it happens to work from the game's own menu, not
+// from here). So the packed bytes are stored through the SDK directly.
+void WriteStyleToProfile(PPCContext& ctx, uint8_t* base, uint32_t settings_base) {
+  if (!g_write_profile_settings_fn) {
+    return;
+  }
+  auto* ks = rex::system::kernel_state();
+  if (!ks || !ks->user_profile()) {
+    return;
+  }
+  const uint32_t data_ptr = Read32BE(base, settings_base + kStyleDataPtrOffset);
+  const uint32_t size_addr = data_ptr + kPackedSettingsSizeOffset + 4 * kProfileUserIndex;
+
+  // The writer's return value can't tell "packed" from "bailed out early" (no
+  // signed-in user, or the game refusing to write right now): when the packed
+  // bytes match its cached copy it returns an uninitialized local. The size
+  // slot can -- packing always rewrites it, and an early bail never touches it.
+  const uint32_t previous_size = Read32BE(base, size_addr);
+  Write32BE(base, size_addr, 0);
+  CallGuest(ctx, base, g_write_profile_settings_fn, settings_base, kProfileUserIndex);
+  const uint32_t size = Read32BE(base, size_addr);
+  if (size == 0 || size > kPackedSettingsStride) {
+    Write32BE(base, size_addr, previous_size);
+    REXLOG_WARN("[graphics_settings] game declined to pack settings for the profile");
+    return;
+  }
+  const uint8_t* packed =
+      base + data_ptr + kPackedSettingsOffset + kPackedSettingsStride * kProfileUserIndex;
+  ks->user_profile()->AddSetting(std::make_unique<rex::system::xam::UserProfile::BinarySetting>(
+      kTitleSettingsProfileId, std::vector<uint8_t>(packed, packed + size)));
+  REXLOG_INFO("[graphics_settings] saved graphics style to profile (enhanced={})",
+              g_pending_style != 0);
+}
+
 // Writes g_pending_style into both guest addresses if the chain resolves,
 // after first (a) adopting any external change to the graphics_style_enhanced
 // cvar itself (e.g. the SDK's generic "All Settings..." cvar browser, or the
@@ -594,7 +660,7 @@ void LatchStyle(bool enhanced) {
 //
 // Called unconditionally from GraphicsSettings_PerFrame -- see g_pending_
 // style's comment for why the write itself can't be bounded or one-shot.
-void ReassertStyle(uint8_t* base) {
+void ReassertStyle(PPCContext& ctx, uint8_t* base) {
   // Adopt any external cvar change too -- not just the request queue below.
   // The curated dialog and the mod both go through RequestGraphicsStyle, but
   // the SDK's own generic "All Settings..." cvar browser (opened from the
@@ -610,7 +676,8 @@ void ReassertStyle(uint8_t* base) {
 
   uint32_t style_addr = 0;
   uint32_t menu_addr = 0;
-  if (!ResolveStyleAddrs(base, &style_addr, &menu_addr)) {
+  uint32_t settings_base = 0;
+  if (!ResolveStyleAddrs(base, &style_addr, &menu_addr, &settings_base)) {
     // The chain can legitimately relocate (e.g. a different settings-table
     // index once a different save slot is active) -- treat a lost chain as
     // "never seen" so re-resolving it doesn't diff a fresh, unrelated live
@@ -619,10 +686,22 @@ void ReassertStyle(uint8_t* base) {
     return;
   }
 
+  if (style_addr != g_last_style_addr || menu_addr != g_last_menu_addr) {
+    g_style_chain_seen = false;
+    g_last_style_addr = style_addr;
+    g_last_menu_addr = menu_addr;
+  }
+
+  // Diffed on the menu byte, not the applied one: the native Original/Enhanced
+  // row (sub_825B2F18) writes only the menu byte, and that byte is also what
+  // the profile stores. It's 0 for Original and non-zero for Enhanced (the
+  // game's own default is 2).
   if (g_style_chain_seen) {
-    uint8_t live = base[style_addr];
-    if (live != g_pending_style) {
-      LatchStyle(live != 0);
+    const bool live = base[menu_addr] != 0;
+    if (live != (g_pending_style != 0)) {
+      REXLOG_INFO("[graphics_settings] graphics style changed in the game's menu (enhanced={})",
+                  live);
+      LatchStyle(live);
     }
   }
   g_style_chain_seen = true;
@@ -634,6 +713,14 @@ void ReassertStyle(uint8_t* base) {
 
   base[style_addr] = g_pending_style;
   base[menu_addr] = g_pending_style;
+
+  // An explicit request (the overlay, or a mod) also goes into the player's
+  // profile, the way the settings screen's own Accept does. Without this the
+  // profile keeps the old style, the game loads it back over the byte above,
+  // and the diff check reads that as the player picking it.
+  if (requested >= 0) {
+    WriteStyleToProfile(ctx, base, settings_base);
+  }
   if (!g_style_restore_logged) {
     g_style_restore_logged = true;
     REXLOG_INFO("[graphics_settings] applying graphics style (enhanced={})",
@@ -1119,7 +1206,7 @@ extern "C" void GraphicsSettings_PerFrame(PPCContext& ctx, uint8_t* base) {
     ApplyPendingRestore(base);
   }
 
-  ReassertStyle(base);
+  ReassertStyle(ctx, base);
 
   // Not graphics, but this is the one per-frame hook with a live context.
   nocturne::player::ApplyRequestedLevelUp(ctx, base);
@@ -1286,6 +1373,7 @@ void GraphicsSettings::Bind(rex::Runtime* runtime) {
   g_set_text_fn = dispatcher->GetFunction(kSetTextFnAddr);
   g_text_width_fn = dispatcher->GetFunction(kTextWidthFnAddr);
   g_set_text_colour_fn = dispatcher->GetFunction(kSetTextColourFnAddr);
+  g_write_profile_settings_fn = dispatcher->GetFunction(kWriteProfileSettingsFnAddr);
 
   // The stretch screen's functions are hooked at codegen time (nocturnerecomp_config.toml).
   REXLOG_INFO("[graphics_settings] hooks installed");
