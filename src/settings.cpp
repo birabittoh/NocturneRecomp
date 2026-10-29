@@ -21,6 +21,7 @@
 #include <random>
 #include <cstdio>
 #include <cstdlib>
+#include <optional>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -50,7 +51,15 @@
 
 namespace nocturne {
 
+// Applied through ImGui's style (see UiScaleApplier), so it reaches every overlay
+// window without each one knowing about it.
+REXCVAR_DEFINE_DOUBLE(ui_scale, 1.0, "Game", "Scale of the overlay windows and their text")
+    .range(0.5, 3.0);
+
 namespace {
+
+// Fixed pixel sizes in the settings overlay, which ScaleAllSizes cannot reach.
+float Px(float pixels) { return pixels * UiScale(); }
 
 // A modal asking to confirm a restart. Call every frame; `open` requests it.
 // `id` keeps the popups of different buttons apart.
@@ -157,11 +166,13 @@ constexpr std::array<const char*, 4> kEnhancementTabs = {
 // <cvar> and <cvar>_desc.
 constexpr std::array<const char*, 2> kIntroSkipCvarNames = {"skip_intros", "skip_richter"};
 
-constexpr std::array<const char*, 16> kBasicCvarNames = {
+constexpr std::array<const char*, 17> kBasicCvarNames = {
     "fullscreen",       "vsync",         "user_language",
     "gpu_backend",      "vulkan_device", "audio_mute",      "audio_volume",
     "graphics_style_enhanced", "touch_controls", "touch_movement", "touch_function_keys", "touch_scale",
-    "touch_opacity", "touch_hide_delay", "voices", "artwork"};
+    "touch_opacity", "touch_hide_delay", "voices", "artwork", "ui_scale"};
+
+constexpr std::array kUiScaleSteps = {0.75, 1.0, 1.25, 1.5, 1.75, 2.0, 2.5, 3.0};
 
 // audio_volume is stored (and applied to samples by the SDL audio driver) as
 // linear amplitude, but human loudness perception is roughly logarithmic --
@@ -217,6 +228,38 @@ std::vector<std::string> BasicCvarNames() {
 #if REX_HAS_VULKAN
 std::vector<rex::ui::vulkan::DeviceInfo> g_vulkan_devices;
 #endif
+
+// Draws nothing; it is a dialog only to get a per frame call inside the ImGui
+// frame. A change lands in full on the next frame, since the font size is
+// fixed at NewFrame. Sizes are rescaled from the unscaled style captured on
+// the first call, because ScaleAllSizes compounds; colors are left alone, so
+// a theme change made at runtime survives.
+class UiScaleApplier : public rex::ui::ImGuiDialog {
+ public:
+  explicit UiScaleApplier(rex::ui::ImGuiDrawer* drawer) : rex::ui::ImGuiDialog(drawer) {}
+
+ protected:
+  void OnDraw(ImGuiIO& /*io*/) override {
+    ImGuiStyle& style = ImGui::GetStyle();
+    if (!base_) {
+      base_ = style;
+    }
+    const float scale = UiScale();
+    if (scale == applied_) {
+      return;
+    }
+    ImGuiStyle scaled = *base_;
+    scaled.ScaleAllSizes(scale);
+    scaled.FontScaleMain = base_->FontScaleMain * scale;
+    std::copy(std::begin(style.Colors), std::end(style.Colors), std::begin(scaled.Colors));
+    style = scaled;
+    applied_ = scale;
+  }
+
+ private:
+  std::optional<ImGuiStyle> base_;
+  float applied_ = 1.0f;
+};
 
 class CuratedSettingsDialog : public rex::ui::ImGuiDialog {
  public:
@@ -363,6 +406,7 @@ class CuratedSettingsDialog : public rex::ui::ImGuiDialog {
     DrawFullscreenRow();
 #endif
     DrawVsyncRow();
+    DrawUiScaleRow();
     DrawGraphicsStyleRow();
     // The native renderer reads both: gpu_backend picks D3D12 or Vulkan (only
     // Windows has the choice) and vulkan_device the adapter when Vulkan is in use.
@@ -386,9 +430,9 @@ class CuratedSettingsDialog : public rex::ui::ImGuiDialog {
     if (!entry)
       return;
     ImGui::TextUnformatted(Tr("settings", "touch_controls"));
-    ImGui::SameLine(180.0f);
+    ImGui::SameLine(Px(180.0f));
     ImGui::PushID("touch_controls");
-    if (rex::ui::DrawCvarWidget(*entry, 160.0f, /*persist=*/true))
+    if (rex::ui::DrawCvarWidget(*entry, Px(160.0f), /*persist=*/true))
       SaveBasic();
     ImGui::PopID();
     if (entry->getter() != "true")
@@ -406,9 +450,9 @@ class CuratedSettingsDialog : public rex::ui::ImGuiDialog {
     if (!entry)
       return;
     ImGui::TextUnformatted(Tr("settings", "touch_function_keys"));
-    ImGui::SameLine(180.0f);
+    ImGui::SameLine(Px(180.0f));
     ImGui::PushID("touch_function_keys");
-    if (rex::ui::DrawCvarWidget(*entry, 160.0f, /*persist=*/true))
+    if (rex::ui::DrawCvarWidget(*entry, Px(160.0f), /*persist=*/true))
       SaveBasic();
     ImGui::PopID();
   }
@@ -416,7 +460,7 @@ class CuratedSettingsDialog : public rex::ui::ImGuiDialog {
   void DrawTouchMovementRow() {
     const std::string current = rex::cvar::GetFlagByName("touch_movement");
     ImGui::TextUnformatted(Tr("settings", "touch_movement"));
-    ImGui::SameLine(180.0f);
+    ImGui::SameLine(Px(180.0f));
     ImGui::PushID("touch_movement");
     if (ImGui::RadioButton(Tr("settings", "touch_movement_dpad"), current != "stick")) {
       rex::cvar::SetFlagByName("touch_movement", "dpad", /*persist=*/true);
@@ -439,8 +483,8 @@ class CuratedSettingsDialog : public rex::ui::ImGuiDialog {
     if (never_at_max)
       value = std::round(value);
     ImGui::TextUnformatted(label);
-    ImGui::SameLine(180.0f);
-    ImGui::SetNextItemWidth(160.0f);
+    ImGui::SameLine(Px(180.0f));
+    ImGui::SetNextItemWidth(Px(160.0f));
     ImGui::PushID(name);
     const bool never = never_at_max && value >= max;
     if (ImGui::SliderFloat("##v", &value, min, max, never ? Tr("settings", "touch_never") : format,
@@ -590,8 +634,8 @@ class CuratedSettingsDialog : public rex::ui::ImGuiDialog {
 
     ImGui::Spacing();
     ImGui::TextUnformatted(Tr("enhancements", "wing_smash_color"));
-    ImGui::SameLine(180.0f);
-    ImGui::SetNextItemWidth(160.0f);
+    ImGui::SameLine(Px(180.0f));
+    ImGui::SetNextItemWidth(Px(160.0f));
     const int color = current.wing_smash_color;
     if (ImGui::BeginCombo("##wing_smash_color", WingSmashColorName(color))) {
       for (int i = 0; i <= rando::kWingSmashColorCount; ++i) {
@@ -623,8 +667,8 @@ class CuratedSettingsDialog : public rex::ui::ImGuiDialog {
     ImGui::EndGroup();
     EnhancementTooltip(GameModeDescription(mode), mode_use,
                        mode != rando::GameMode::kNormal ? kModeNote : nullptr);
-    ImGui::SameLine(180.0f);
-    ImGui::SetNextItemWidth(160.0f);
+    ImGui::SameLine(Px(180.0f));
+    ImGui::SetNextItemWidth(Px(160.0f));
     if (ImGui::BeginCombo("##game_mode", GameModeName(mode))) {
       for (int i = 0; i < static_cast<int>(rando::GameMode::kCount); ++i) {
         const auto m = static_cast<rando::GameMode>(i);
@@ -794,9 +838,9 @@ class CuratedSettingsDialog : public rex::ui::ImGuiDialog {
     if (!entry)
       return;
     ImGui::TextUnformatted(Tr("settings", "fullscreen"));
-    ImGui::SameLine(180.0f);
+    ImGui::SameLine(Px(180.0f));
     ImGui::PushID("fullscreen");
-    if (rex::ui::DrawCvarWidget(*entry, 160.0f, /*persist=*/true)) {
+    if (rex::ui::DrawCvarWidget(*entry, Px(160.0f), /*persist=*/true)) {
       SaveBasic();
     }
     ImGui::PopID();
@@ -807,9 +851,9 @@ class CuratedSettingsDialog : public rex::ui::ImGuiDialog {
     if (!entry)
       return;
     ImGui::TextUnformatted(Tr("settings", "vsync"));
-    ImGui::SameLine(180.0f);
+    ImGui::SameLine(Px(180.0f));
     ImGui::PushID("vsync");
-    if (rex::ui::DrawCvarWidget(*entry, 160.0f, /*persist=*/true)) {
+    if (rex::ui::DrawCvarWidget(*entry, Px(160.0f), /*persist=*/true)) {
       SaveBasic();
     }
     ImGui::PopID();
@@ -820,9 +864,9 @@ class CuratedSettingsDialog : public rex::ui::ImGuiDialog {
     if (!entry)
       return;
     ImGui::TextUnformatted(Tr("settings", "mute_audio"));
-    ImGui::SameLine(180.0f);
+    ImGui::SameLine(Px(180.0f));
     ImGui::PushID("audio_mute");
-    if (rex::ui::DrawCvarWidget(*entry, 160.0f, /*persist=*/true)) {
+    if (rex::ui::DrawCvarWidget(*entry, Px(160.0f), /*persist=*/true)) {
       SaveBasic();
     }
     ImGui::PopID();
@@ -848,8 +892,8 @@ class CuratedSettingsDialog : public rex::ui::ImGuiDialog {
     const std::string current =
         available ? entry->getter() : (TargetReleaseId() == "xbla-jp" ? "jp" : "world");
     ImGui::TextUnformatted(label);
-    ImGui::SameLine(180.0f);
-    ImGui::SetNextItemWidth(160.0f);
+    ImGui::SameLine(Px(180.0f));
+    ImGui::SetNextItemWidth(Px(160.0f));
     ImGui::PushID(cvar);
     ImGui::BeginDisabled(!available);
     if (ImGui::BeginCombo("##v", label_for(current).c_str())) {
@@ -882,8 +926,8 @@ class CuratedSettingsDialog : public rex::ui::ImGuiDialog {
     int percent = VolumePercentFromAmplitude(std::atof(entry->getter().c_str()));
 
     ImGui::TextUnformatted(Tr("settings", "volume"));
-    ImGui::SameLine(180.0f);
-    ImGui::SetNextItemWidth(160.0f);
+    ImGui::SameLine(Px(180.0f));
+    ImGui::SetNextItemWidth(Px(160.0f));
     ImGui::PushID("audio_volume");
     bool changed = ImGui::SliderInt("##v", &percent, 0, 100, "%d%%");
     if (changed) {
@@ -894,12 +938,52 @@ class CuratedSettingsDialog : public rex::ui::ImGuiDialog {
     ImGui::PopID();
   }
 
+  // Committed on release: applied live, the slider would rescale under the
+  // cursor mid drag and jump between steps.
+  void DrawUiScaleRow() {
+    const auto* entry = rex::cvar::GetFlagInfo("ui_scale");
+    if (!entry)
+      return;
+    const double value = std::atof(entry->getter().c_str());
+    int idx = ui_scale_drag_idx_;
+    if (idx < 0) {
+      idx = 0;
+      for (int i = 1; i < static_cast<int>(kUiScaleSteps.size()); ++i) {
+        if (std::abs(kUiScaleSteps[i] - value) < std::abs(kUiScaleSteps[idx] - value))
+          idx = i;
+      }
+    }
+    char text[16];
+    std::snprintf(text, sizeof(text), "%d%%%%",
+                  static_cast<int>(std::lround(
+                      (ui_scale_drag_idx_ < 0 ? value : kUiScaleSteps[idx]) * 100.0)));
+
+    ImGui::TextUnformatted(Tr("settings", "ui_scale"));
+    if (ImGui::IsItemHovered())
+      ImGui::SetTooltip("%s", Tr("settings", "ui_scale_tip"));
+    ImGui::SameLine(Px(180.0f));
+    ImGui::SetNextItemWidth(Px(160.0f));
+    ImGui::PushID("ui_scale");
+    if (ImGui::SliderInt("##v", &idx, 0, static_cast<int>(kUiScaleSteps.size()) - 1, text,
+                         ImGuiSliderFlags_NoInput)) {
+      ui_scale_drag_idx_ = idx;
+    }
+    if (ImGui::IsItemDeactivated() && ui_scale_drag_idx_ >= 0) {
+      char step[16];
+      std::snprintf(step, sizeof(step), "%g", kUiScaleSteps[ui_scale_drag_idx_]);
+      rex::cvar::SetFlagByName("ui_scale", step, /*persist=*/true);
+      SaveBasic();
+      ui_scale_drag_idx_ = -1;
+    }
+    ImGui::PopID();
+  }
+
   void DrawGraphicsStyleRow() {
     const auto* entry = rex::cvar::GetFlagInfo("graphics_style_enhanced");
     if (!entry)
       return;
     ImGui::TextUnformatted(Tr("settings", "enhanced_graphics"));
-    ImGui::SameLine(180.0f);
+    ImGui::SameLine(Px(180.0f));
     ImGui::PushID("graphics_style_enhanced");
     bool enhanced = entry->getter() == "true";
     // rex::ui::ToggleSwitch directly rather than DrawCvarWidget's generic
@@ -931,8 +1015,8 @@ class CuratedSettingsDialog : public rex::ui::ImGuiDialog {
     }
 
     ImGui::TextUnformatted(Tr("settings", "language"));
-    ImGui::SameLine(180.0f);
-    ImGui::SetNextItemWidth(160.0f);
+    ImGui::SameLine(Px(180.0f));
+    ImGui::SetNextItemWidth(Px(160.0f));
     ImGui::PushID("user_language");
     if (ImGui::BeginCombo("##v", options[cur_idx].label)) {
       for (int i = 0; i < static_cast<int>(options.size()); ++i) {
@@ -973,8 +1057,8 @@ class CuratedSettingsDialog : public rex::ui::ImGuiDialog {
     }
 
     ImGui::TextUnformatted(Tr("settings", "gpu_backend"));
-    ImGui::SameLine(180.0f);
-    ImGui::SetNextItemWidth(160.0f);
+    ImGui::SameLine(Px(180.0f));
+    ImGui::SetNextItemWidth(Px(160.0f));
     ImGui::PushID("gpu_backend");
     if (ImGui::BeginCombo("##v", label_for(gpu_backend_names_[cur_idx]).c_str())) {
       for (int i = 0; i < static_cast<int>(gpu_backend_names_.size()); ++i) {
@@ -1014,8 +1098,8 @@ class CuratedSettingsDialog : public rex::ui::ImGuiDialog {
     if (!entry->description.empty() && ImGui::IsItemHovered()) {
       ImGui::SetTooltip("%s", entry->description.c_str());
     }
-    ImGui::SameLine(180.0f);
-    ImGui::SetNextItemWidth(160.0f);
+    ImGui::SameLine(Px(180.0f));
+    ImGui::SetNextItemWidth(Px(160.0f));
     ImGui::PushID("vulkan_device");
     if (ImGui::BeginCombo("##v", label_for(current).c_str())) {
       {
@@ -1059,6 +1143,7 @@ class CuratedSettingsDialog : public rex::ui::ImGuiDialog {
 
   rex::system::AutoUpdater auto_updater_;
   bool update_check_requested_ = false;
+  int ui_scale_drag_idx_ = -1;
 };
 
 }  // namespace
@@ -1250,6 +1335,12 @@ void RegisterNativeStringListener(rex::system::ModRegistry* registry) {
 const char16_t* FindNativeStringTranslation(uint32_t language_id, std::string_view key) {
   const char* text = FindModUiString(language_id, "native", key);
   return text ? CachedUtf16(text) : nullptr;
+}
+
+float UiScale() { return static_cast<float>(std::clamp(REXCVAR_GET(ui_scale), 0.5, 3.0)); }
+
+std::unique_ptr<rex::ui::ImGuiDialog> CreateUiScaleApplier(rex::ui::ImGuiDrawer* drawer) {
+  return std::make_unique<UiScaleApplier>(drawer);
 }
 
 std::unique_ptr<rex::ui::ImGuiDialog> CreateSettingsDialog(

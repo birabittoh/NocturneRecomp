@@ -161,6 +161,14 @@ bool CallInWindowThread(std::function<void()> work);
 // never gets here. Does nothing in fullscreen.
 void PersistWindowSize();
 
+// Scales every ImGui overlay except the SDK's touch controls, whose layout is in
+// window pixels. Constructing it registers it with the drawer, and it applies
+// ui_scale once per frame from then on, so keep it alive for the whole session.
+std::unique_ptr<rex::ui::ImGuiDialog> CreateUiScaleApplier(rex::ui::ImGuiDrawer* drawer);
+
+// The ui_scale cvar, clamped, for overlays that size things in fixed pixels.
+float UiScale();
+
 // Creates the curated settings overlay. `user_settings_path` is where the
 // friendly settings (Fullscreen, VSync) are persisted;
 // `app_config_path` is where everything else (the Advanced section) is

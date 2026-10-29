@@ -195,6 +195,8 @@ class NocturnerecompApp : public rex::ReXApp {
     // drawer that produces them, the start screen's included.
     nocturne::PlumeSetOverlayDrawer(imgui_drawer());
     nocturne::InitNativeRenderer(window());
+    // Applies ui_scale to the F-key overlays, the start screen's included.
+    ui_scale_applier_ = nocturne::CreateUiScaleApplier(imgui_drawer());
     nocturne::BindIntroScreen(imgui_drawer(), &app_context(), user_data_root());
     nocturne::BindWindowTarget(window(), user_settings_path());
 
@@ -534,6 +536,7 @@ class NocturnerecompApp : public rex::ReXApp {
   // Draws the on-screen pad; the driver it reads is owned by the input system.
   std::unique_ptr<rex::ui::ImGuiDialog> touch_controls_overlay_;
   std::unique_ptr<rex::ui::ImGuiDialog> movie_overlay_;
+  std::unique_ptr<rex::ui::ImGuiDialog> ui_scale_applier_;
 
   std::filesystem::path user_settings_path() const { return user_data_root() / "settings.toml"; }
 };
