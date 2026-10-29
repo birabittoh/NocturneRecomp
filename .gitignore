@@ -107,3 +107,6 @@ CLAUDE.md
 /android/app/src/main/res/mipmap-xhdpi/
 /android/app/src/main/res/mipmap-xxhdpi/
 /android/app/src/main/res/mipmap-xxxhdpi/
+
+# RexLiveless Guide data (accounts, caches)
+/guide/

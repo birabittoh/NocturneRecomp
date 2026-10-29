@@ -10,6 +10,7 @@
 #include <cstring>
 #include <functional>
 #include <optional>
+#include <string_view>
 #include <memory>
 
 #include <imgui.h>
@@ -27,6 +28,7 @@
 #include <rex/ui/imgui_theme.h>
 #include <rex/ui/presenter.h>
 #include <rex/ui/window.h>
+#include <rexglue_guide/guide.h>
 
 #ifdef _WIN32
 #include <Windows.h>
@@ -395,6 +397,20 @@ class NocturnerecompApp : public rex::ReXApp {
     nocturne::GetAccentColor().AttachWatcher(drawer);
     nocturne::GetFastForward().AttachWatcher(drawer);
     nocturne::GetRandoMenu().Attach(drawer, user_data_root());
+
+    // Last, so the Guide draws over the other overlays. It takes over the
+    // sign-in, friends and stats imports; the launcher's start screen has to
+    // be gone before its sign-in screen shows.
+    rexglue_guide::AddCredit("birabittoh", "NocturneRecomp");
+    rexglue_guide::Install(this, drawer, {
+        .title_name = "Castlevania: Symphony of the Night",
+        .on_quit = [this] { if (auto* w = window()) w->RequestClose(); },
+        .ready_for_sign_in = [this] { return runtime() != nullptr; },
+        .immediate_drawer = immediate_drawer() ? immediate_drawer() : drawer->immediate_drawer(),
+        .config_file = user_settings_path(),
+        // The renderer is native, so the SDK's GPU plugin choice is moot.
+        .show_setting = [](std::string_view name) { return name != "gpu_plugin"; },
+    });
   }
 
   // Replace the SDK's default pixel font with a serif face that fits the
@@ -498,6 +514,7 @@ class NocturnerecompApp : public rex::ReXApp {
   }
 
   void OnShutdown() override {
+    rexglue_guide::Shutdown();
     // Tear the host renderer down before the window goes away.
     nocturne::ShutdownPlumeBackend();
 

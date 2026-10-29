@@ -390,7 +390,6 @@ set(NOCTURNERECOMP_SOURCES
     src/platform/touch_input_driver.cpp
     src/ui_text.cpp
     src/video_mode.cpp
-    src/xbox_live.cpp
     src/gpu/guest_shaders.cpp
     src/gpu/native_renderer.cpp
     src/gpu/native_renderer_d3d.cpp
@@ -443,6 +442,11 @@ else()
 endif()
 
 rexglue_setup_target(nocturnerecomp)
+
+# RexLiveless Guide: Xbox LIVE replacement (sign-in, friends, leaderboards).
+# Its sources compile into the executable, after rexglue_setup_target.
+include(${CMAKE_SOURCE_DIR}/ext/RexLiveless/CMakeLists.txt)
+rexglue_guide_attach(nocturnerecomp)
 if(NOCTURNE_EMBED_GUEST_IMAGE)
     target_compile_definitions(nocturnerecomp PRIVATE NOCTURNE_EMBED_GUEST_IMAGE=1)
 endif()

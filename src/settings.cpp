@@ -90,7 +90,6 @@ struct DefaultValue {
 };
 
 constexpr std::array kGameDefaults = {
-    DefaultValue{"user_name", "Player"},
     DefaultValue{"user_language", "1"},
     DefaultValue{"gpu_backend", "any"},
     DefaultValue{"fullscreen", "false"},
@@ -158,8 +157,8 @@ constexpr std::array<const char*, 4> kEnhancementTabs = {
 // <cvar> and <cvar>_desc.
 constexpr std::array<const char*, 2> kIntroSkipCvarNames = {"skip_intros", "skip_richter"};
 
-constexpr std::array<const char*, 17> kBasicCvarNames = {
-    "fullscreen",       "vsync",         "user_name",       "user_language",
+constexpr std::array<const char*, 16> kBasicCvarNames = {
+    "fullscreen",       "vsync",         "user_language",
     "gpu_backend",      "vulkan_device", "audio_mute",      "audio_volume",
     "graphics_style_enhanced", "touch_controls", "touch_movement", "touch_function_keys", "touch_scale",
     "touch_opacity", "touch_hide_delay", "voices", "artwork"};
@@ -352,7 +351,6 @@ class CuratedSettingsDialog : public rex::ui::ImGuiDialog {
     DrawLanguageRow();
     DrawReleaseChoiceRow("voices", Tr("settings", "voices"), JpVoicesAvailable());
     DrawReleaseChoiceRow("artwork", Tr("settings", "artwork"), JpArtworkAvailable());
-    DrawUserNameRow();
     DrawStartScreenRow();
 
     ImGui::SeparatorText(Tr("settings", "section_audio"));
@@ -912,19 +910,6 @@ class CuratedSettingsDialog : public rex::ui::ImGuiDialog {
     // (Mute Audio, Fullscreen, ...) without going through its own apply path.
     if (rex::ui::ToggleSwitch("##v", &enhanced)) {
       RequestGraphicsStyle(enhanced);
-    }
-    ImGui::PopID();
-  }
-
-  void DrawUserNameRow() {
-    const auto* entry = rex::cvar::GetFlagInfo("user_name");
-    if (!entry)
-      return;
-    ImGui::TextUnformatted(Tr("settings", "player_name"));
-    ImGui::SameLine(180.0f);
-    ImGui::PushID("user_name");
-    if (rex::ui::DrawCvarWidget(*entry, 160.0f, /*persist=*/true)) {
-      SaveBasic();
     }
     ImGui::PopID();
   }

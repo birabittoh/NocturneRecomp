@@ -10,3 +10,6 @@
 [submodule "ext/libadrenotools"]
 	path = ext/libadrenotools
 	url = https://github.com/bylaws/libadrenotools.git
+[submodule "ext/RexLiveless"]
+	path = ext/RexLiveless
+	url = https://github.com/SolarCookies/RexLiveless
