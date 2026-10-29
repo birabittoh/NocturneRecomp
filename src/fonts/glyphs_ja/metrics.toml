@@ -102,3 +102,39 @@ U+90E8 = { left = 0, top = 4, advance = 21 }  # 部 box 21x21 -- kanji, stock me
 U+91CD = { left = 1, top = 4, advance = 21 }  # 重 box 19x20 -- kanji, stock median advance 21
 U+9752 = { left = 1, top = 4, advance = 21 }  # 青 box 19x21 -- kanji, stock median advance 21
 U+9928 = { left = 0, top = 4, advance = 21 }  # 館 box 21x21 -- kanji, stock median advance 21
+U+3058 = { left = 1, top = 7, advance = 14 }  # じ box 15x18 -- modelled on し shi, box 14 advance 14
+U+305D = { left = 1, top = 6, advance = 18 }  # そ box 18x19 -- no stock そ; the hiragana median
+U+3069 = { left = 0, top = 5, advance = 16 }  # ど box 18x20 -- modelled on と to, box 15 advance 15
+U+307B = { left = 2, top = 7, advance = 18 }  # ほ box 18x18 -- modelled on は ha, box 17 advance 18
+U+307C = { left = 2, top = 5, advance = 18 }  # ぼ box 19x20 -- modelled on は ha, box 17 advance 18
+U+4E00 = { left = 0, top = 13, advance = 21 }  # 一 box 21x3 -- kanji, stock median advance 21
+U+5143 = { left = 0, top = 7, advance = 21 }  # 元 box 21x19 -- kanji, stock median advance 21
+U+52B9 = { left = 0, top = 5, advance = 21 }  # 効 box 20x21 -- kanji, stock median advance 21
+U+540D = { left = 0, top = 5, advance = 21 }  # 名 box 20x20 -- kanji, stock median advance 21
+U+57FA = { left = 0, top = 5, advance = 21 }  # 基 box 21x20 -- kanji, stock median advance 21
+U+5916 = { left = 0, top = 5, advance = 21 }  # 外 box 21x20 -- kanji, stock median advance 21
+U+5B88 = { left = 1, top = 5, advance = 21 }  # 守 box 19x21 -- kanji, stock median advance 21
+U+5C11 = { left = 0, top = 5, advance = 21 }  # 少 box 20x20 -- kanji, stock median advance 21
+U+5FEB = { left = 0, top = 5, advance = 21 }  # 快 box 20x21 -- kanji, stock median advance 21
+U+6027 = { left = 0, top = 5, advance = 21 }  # 性 box 21x20 -- kanji, stock median advance 21
+U+66FF = { left = 0, top = 5, advance = 21 }  # 替 box 21x21 -- kanji, stock median advance 21
+U+6709 = { left = 0, top = 5, advance = 21 }  # 有 box 20x20 -- kanji, stock median advance 21
+U+672C = { left = 0, top = 5, advance = 21 }  # 本 box 21x20 -- kanji, stock median advance 21
+U+679A = { left = 0, top = 5, advance = 21 }  # 枚 box 21x21 -- kanji, stock median advance 21
+U+6B8B = { left = 0, top = 4, advance = 21 }  # 残 box 21x22 -- kanji, stock median advance 21
+U+6D88 = { left = 0, top = 5, advance = 21 }  # 消 box 20x20 -- kanji, stock median advance 21
+U+6E1B = { left = 0, top = 5, advance = 21 }  # 減 box 21x20 -- kanji, stock median advance 21
+U+7531 = { left = 2, top = 4, advance = 21 }  # 由 box 17x22 -- kanji, stock median advance 21
+U+7684 = { left = 1, top = 5, advance = 21 }  # 的 box 20x21 -- kanji, stock median advance 21
+U+81EA = { left = 2, top = 5, advance = 21 }  # 自 box 16x21 -- kanji, stock median advance 21
+U+843D = { left = 0, top = 4, advance = 21 }  # 落 box 21x21 -- kanji, stock median advance 21
+U+8A73 = { left = 0, top = 5, advance = 21 }  # 詳 box 21x20 -- kanji, stock median advance 21
+U+8ABF = { left = 1, top = 5, advance = 21 }  # 調 box 19x21 -- kanji, stock median advance 21
+U+8CBB = { left = 1, top = 4, advance = 21 }  # 費 box 19x22 -- kanji, stock median advance 21
+U+8FD1 = { left = 0, top = 5, advance = 21 }  # 近 box 21x21 -- kanji, stock median advance 21
+U+9069 = { left = 0, top = 5, advance = 21 }  # 適 box 21x21 -- kanji, stock median advance 21
+U+907A = { left = 0, top = 4, advance = 21 }  # 遺 box 20x22 -- kanji, stock median advance 21
+U+9577 = { left = 1, top = 6, advance = 21 }  # 長 box 20x19 -- kanji, stock median advance 21
+U+9806 = { left = 0, top = 5, advance = 21 }  # 順 box 21x20 -- kanji, stock median advance 21
+U+98DB = { left = 0, top = 5, advance = 21 }  # 飛 box 21x21 -- kanji, stock median advance 21
+U+98DF = { left = 0, top = 5, advance = 21 }  # 食 box 21x20 -- kanji, stock median advance 21

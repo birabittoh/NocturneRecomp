@@ -48,6 +48,9 @@ struct Options {
 
 struct Preset {
   const char* name;
+  // Its description's key in res/lang's [rando_presets]: lines separated by
+  // newlines.
+  const char* text_key;
   // The six "what to randomize" checkboxes are fixed by the preset rather
   // than chosen by the player.
   bool fixes_randomization;
@@ -57,7 +60,6 @@ struct Preset {
   int default_complexity;
   // Switch the six checkboxes on when the preset is selected.
   bool sets_normal_options;
-  std::vector<const char*> description;
   // Can't be finished without glitches (shift lines, boomerang jumps...).
   bool requires_glitches = false;
 };

@@ -105,19 +105,8 @@ PageDescription PresetDescription() {
   if (!g_game) {
     return {};
   }
-  static std::u16string text;
-  static const rando::Preset* cached = nullptr;
   const rando::Preset& preset = CurrentPreset();
-  if (cached != &preset) {
-    cached = &preset;
-    text.clear();
-    for (const char* line : preset.description) {
-      if (!text.empty()) {
-        text += u'\n';
-      }
-      text += Utf8ToUtf16(line);
-    }
-  }
+  const char16_t* text = CachedUtf16(Tr("rando_presets", preset.text_key));
   const char16_t* warning = preset.requires_glitches ? kRequiresGlitches.Get() : nullptr;
   return {warning ? warning : u"", text};
 }

@@ -175,8 +175,12 @@ class RandoMenuDialog : public rex::ui::ImGuiDialog {
       ImGui::TextWrapped("%s", Tr("randomizer", "requires_glitches"));
       ImGui::PopStyleColor();
     }
-    for (const char* line : preset.description) {
-      ImGui::TextWrapped("%s", line);
+    // One paragraph per line of the text.
+    std::string_view text = Tr("rando_presets", preset.text_key);
+    while (!text.empty()) {
+      const size_t end = std::min(text.find('\n'), text.size());
+      ImGui::TextWrapped("%.*s", static_cast<int>(end), text.data());
+      text.remove_prefix(std::min(end + 1, text.size()));
     }
     const auto log = gen.Log();
     if (!log.empty()) {

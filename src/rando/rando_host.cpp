@@ -55,8 +55,6 @@ namespace nocturne::rando {
 
 namespace {
 
-constexpr const char* kNormal1 = "Basic Randomizer.";
-
 uint32_t ReadBE32(const uint8_t* p) {
   return uint32_t(p[0]) << 24 | uint32_t(p[1]) << 16 | uint32_t(p[2]) << 8 | p[3];
 }
@@ -72,99 +70,28 @@ constexpr const char* kLegacyPresetOrder[] = {
 
 const std::vector<Preset>& Presets() {
   // Mirrors Show_Preset_Description in upstream main.cpp: which controls
-  // each preset fixes, and the text it shows. The order is the one MottZilla
-  // suggested for this port rather than upstream's: the general presets
-  // first, the glitch ones last, so nobody starts on one by accident.
+  // each preset fixes. The text it shows is in res/lang's [rando_presets],
+  // translated. The order is the one MottZilla suggested for this port rather
+  // than upstream's: the general presets first, the glitch ones last, so
+  // nobody starts on one by accident.
   static const std::vector<Preset> presets = {
-      {"Standard", false, true, 6, false,
-       {"Minimum Complexity = User Choice", kNormal1,
-        "Note: Complexity is not difficulty. It's progression chain length."}},
-      {"O.G.", true, false, 0, true,
-       {"Minimum Complexity = 1",
-        "Basic Randomizer. Gold & Silver Rings, Holy Glasses, and Spikebreaker are in original "
-        "locations. Relic locations only.",
-        "Starting Gear: Random."}},
-      {"Guarded O.G.", true, false, 0, true,
-       {"Minimum Complexity = 1",
-        "Basic Randomizer. Gold & Silver Rings, Holy Glasses, and Spikebreaker are in original "
-        "locations.",
-        "Starting Gear: Random."}},
-      {"Lycanthrope", true, false, 0, true,
-       {"Minimum Complexity = 8", "Start with all Wolf Relics. Reduced MP cost for Wolf.",
-        "Starting Gear: Shield Rod, Shaman Shield, Silver Crown, Brilliant Mail, Blood Cloak, and "
-        "Mystic Pendant."}},
-      {"Nimble", true, false, 0, true,
-       {"Minimum Complexity = 6", "Start with Soul of Bat, Gravity Boots, and Leap Stone.",
-        "Starting Gear: Mana Prism, Buffalo Star, Dragon Helm, Alucard Mail, Twilight Cloak, and "
-        "Duplicator."}},
-      {"Warlock", true, false, 0, true,
-       {"Minimum Complexity = 6", "Start with Form of Mist and 99 INT. Spell MP cost greatly reduced.",
-        "Starting Gear: Wizard Hat, the rest random."}},
-      {"Bat Master", true, false, 0, true,
-       {"Minimum Complexity = 1",
-        "All Bat Abilities upgraded. Bat form can open doors. Pressing Y Cancels Wing Smash. "
-        "Holding Y moves bat at normal speed.",
-        "Starting Gear: Random.", "Designed by: MT_Fun & MottZilla"}},
-      {"LegDay", true, false, 0, true,
-       {"Minimum Complexity = 7", "Infinite Leap Stone jumping. Super Backdash.",
-        "BETA VERSION! Door behavior incomplete!", "Starting Gear: Random.",
-        "Designed by: MT_Fun & MottZilla"}},
-      {"Bounty Hunter", true, false, 0, true,
-       {"Minimum Complexity = 5",
-        "The 5 Vlad relics are dropped from 5 randomly picked enemies. You must find the 5 Familiar "
-        "Cards to find out which 5 enemies you need to defeat to get each Vlad relic.",
-        "Starting Gear: Alucart Sword, Shield, Mail, Dragon Helm, Twilight Cloak, Ring of "
-        "Arcana"}},
-      {"Hitman", true, false, 0, true,
-       {"Minimum Complexity = 1",
-        "This is mostly the same as Bounty Hunter except you start with all 5 cards and the drop "
-        "rate on the Vlad relics is increased. When generating these seeds you will see the names "
-        "of the 5 targets as well.",
-        "Starting Gear: Alucart Sword, Shield, Mail, Dragon Helm, Twilight Cloak, Ring of "
-        "Arcana"}},
-      {"Richter Rando", true, true, 6, false,
-       {"Minimum Complexity = User Choice. 6 Default & Max.",
-        "Play randomizer as Richter. You must find Holy Glasses and all 5 Vlads to reach the end. "
-        "Richter can make use of certain relics to progress or power up. He can also use Food, "
-        "Library Cards, and Life Apples.",
-        "Quick Tips:", "Library Card Teleport with Faerie Scroll or Library Card.",
-        "Hold LB+RB and Press B.", "Use Food by holding Up and Pressing RT.",
-        "See READTHIS.TXT in SOTN_XB_RANDO for more info."}},
-      {"Adventure", true, true, 8, false,
-       {"Minimum Complexity = User Choice. 8 Default.",
-        "Normal Randomizer with Equipment Location checks. Takes longer to complete.",
-        "Starting Gear: Random."}},
-      {"Expedition", true, false, 0, true,
-       {"Minimum Complexity = 7", "Start with Soul of Bat, Gravity Boots, and Leap Stone.",
-        "Starting Gear: Mana Prism, Buffalo Star, Dragon Helm, Alucard Mail, Twilight Cloak, and "
-        "Duplicator.",
-        "Equipment Location checks!"}},
-      {"Glitch", true, false, 0, true,
-       {"Minimum Complexity = 5",
-        "This preset requires the use of different Glitches to complete. This includes Shift "
-        "Lines, Reverse Shift Lines, Fire Boomerang Jumps, and more. The logic is similar to the "
-        "current PSX randomizer's Glitch preset.",
-        "Starting Gear: Random + Fire Boomerang & Library Card.", "Equipment Location checks!"},
-       true},
-      {"NoLogic", true, false, 0, true,
-       {"Minimum Complexity = 1",
-        "Another glitch preset. In this preset you start with Soul of Wolf, Leap Stone, Fire "
-        "Boomerangs, Axe Lord Armor, Duplicator, Manna Prism, Shield Rod, and Shaman Shield. "
-        "Relics can be anywhere as there is no location logic.",
-        "Guarded Location checks!"},
-       true},
-      {"NoLogicEq", true, false, 0, true,
-       {"Minimum Complexity = 1",
-        "Another glitch preset. In this preset you start with Soul of Wolf, Leap Stone, Fire "
-        "Boomerangs, Axe Lord Armor, Duplicator, Manna Prism, Shield Rod, and Shaman Shield. "
-        "Relics can be anywhere as there is no location logic.",
-        "Equipment Location checks!"},
-       true},
-      {"Bingo", false, false, 0, false,
-       {"Vanilla Relics, start with Holy Glasses, no random Library Card or Duplicator drops from "
-        "enemies. Be aware all check box options other than Randomize Relics still work for "
-        "Bingo.",
-        "For Bingo Board Play Only."}},
+      {"Standard", "standard", false, true, 6, false},
+      {"O.G.", "og", true, false, 0, true},
+      {"Guarded O.G.", "guarded_og", true, false, 0, true},
+      {"Lycanthrope", "lycanthrope", true, false, 0, true},
+      {"Nimble", "nimble", true, false, 0, true},
+      {"Warlock", "warlock", true, false, 0, true},
+      {"Bat Master", "bat_master", true, false, 0, true},
+      {"LegDay", "legday", true, false, 0, true},
+      {"Bounty Hunter", "bounty_hunter", true, false, 0, true},
+      {"Hitman", "hitman", true, false, 0, true},
+      {"Richter Rando", "richter_rando", true, true, 6, false},
+      {"Adventure", "adventure", true, true, 8, false},
+      {"Expedition", "expedition", true, false, 0, true},
+      {"Glitch", "glitch", true, false, 0, true, true},
+      {"NoLogic", "nologic", true, false, 0, true, true},
+      {"NoLogicEq", "nologiceq", true, false, 0, true, true},
+      {"Bingo", "bingo", false, false, 0, false},
   };
   return presets;
 }
