@@ -7,6 +7,7 @@
 
 #include <atomic>
 #include <chrono>
+#include <thread>
 #include <cstring>
 #include <functional>
 #include <optional>
@@ -234,6 +235,26 @@ class NocturnerecompApp : public rex::ReXApp {
     return paths;
   }
 
+  // The SDK's OnClosing ends in _Exit(0), but on Android it can block and leave
+  // the process alive behind a frozen window. Nothing is left to save once the
+  // game is closing, so force the exit if it stalls.
+  static void ArmAndroidExitWatchdog() {
+#if REX_PLATFORM_ANDROID
+    static std::atomic<bool> armed{false};
+    if (armed.exchange(true))
+      return;
+    std::thread([] {
+      std::this_thread::sleep_for(std::chrono::seconds(3));
+      REXLOG_WARN("Shutdown stalled; forcing process exit");
+      rex::FlushLogging();
+      std::_Exit(0);
+    }).detach();
+#endif
+  }
+
+  // The guest's main thread ends when the game quits itself (Quit Game).
+  void OnGuestThreadExit(rex::system::XThread*) override { ArmAndroidExitWatchdog(); }
+
   // Closing from the start screen quits through it; while game files are
   // extracted, closing waits for the extraction to finish.
   bool OnWindowCloseRequested() override {
@@ -243,6 +264,7 @@ class NocturnerecompApp : public rex::ReXApp {
     }
     if (nocturne::RequestIntroQuit())
       return false;
+    ArmAndroidExitWatchdog();
     return true;
   }
 
@@ -428,6 +450,8 @@ class NocturnerecompApp : public rex::ReXApp {
   // is added last, and PT Serif is meant to be the UI's default font.
   void OnConfigureFonts(ImFontAtlas* atlas) override {
     atlas->AddFontDefault();
+    // The Guide's own faces. Without them its message boxes have no font.
+    rexglue_guide::ConfigureFonts(atlas);
 
     ImFontConfig cfg;
     cfg.FontDataOwnedByAtlas = false;

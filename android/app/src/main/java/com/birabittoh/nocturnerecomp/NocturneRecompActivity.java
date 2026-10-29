@@ -464,6 +464,61 @@ public class NocturneRecompActivity extends SDLActivity {
     private native void nativeHostMenuSelect(int index);
     private native void nativeDocumentPicked(String path);
     private native String nativeDocumentWrite();
+    /**
+     * One HTTPS request for the native HTTP client (Android has no system
+     * libcurl). Returns the status as 4 big-endian bytes followed by the body;
+     * a status of -1 is any connection failure, -2 an unknown host and -3 a
+     * TLS or certificate failure.
+     */
+    public static byte[] httpsRequest(String method, String url, String token, String contentType,
+                                      byte[] body, int timeoutMs) {
+        int status = -1;
+        byte[] payload = new byte[0];
+        java.net.HttpURLConnection conn = null;
+        try {
+            conn = (java.net.HttpURLConnection) new java.net.URL(url).openConnection();
+            conn.setRequestMethod(method);
+            conn.setConnectTimeout(timeoutMs);
+            conn.setReadTimeout(timeoutMs);
+            conn.setRequestProperty("User-Agent", "RexglueGuide/1.0");
+            if (token != null && !token.isEmpty()) conn.setRequestProperty("Authorization", "Bearer " + token);
+            if (body != null && body.length > 0) {
+                conn.setRequestProperty("Content-Type", contentType);
+                conn.setDoOutput(true);
+                conn.setFixedLengthStreamingMode(body.length);
+                try (OutputStream out = conn.getOutputStream()) {
+                    out.write(body);
+                }
+            }
+            status = conn.getResponseCode();
+            InputStream in = status >= 400 ? conn.getErrorStream() : conn.getInputStream();
+            if (in != null) {
+                try (InputStream s = in) {
+                    java.io.ByteArrayOutputStream buf = new java.io.ByteArrayOutputStream();
+                    byte[] chunk = new byte[16384];
+                    for (int n; (n = s.read(chunk)) > 0; ) buf.write(chunk, 0, n);
+                    payload = buf.toByteArray();
+                }
+            }
+        } catch (java.net.UnknownHostException e) {
+            status = -2;
+        } catch (javax.net.ssl.SSLException e) {
+            status = -3;
+        } catch (Exception e) {
+            Log.w(TAG, "httpsRequest failed", e);
+            status = -1;
+        } finally {
+            if (conn != null) conn.disconnect();
+        }
+        byte[] out = new byte[4 + payload.length];
+        out[0] = (byte) (status >>> 24);
+        out[1] = (byte) (status >>> 16);
+        out[2] = (byte) (status >>> 8);
+        out[3] = (byte) status;
+        System.arraycopy(payload, 0, out, 4, payload.length);
+        return out;
+    }
+
     private native void nativeDocumentWritten(boolean ok);
     private native void nativeDocumentCancelled();
     private native void nativeGpuDriverDialogClosed();
