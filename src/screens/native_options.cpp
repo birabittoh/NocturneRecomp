@@ -420,6 +420,28 @@ namespace {
 // all-caps prompt bar.
 constexpr NativeText kFullscreenLabel{"fullscreen_label"};
 
+// --- Gamma ----------------------------------------------------------------
+
+// The same steps as the overlay's slider (settings.h), applied live: the
+// picture behind the menu is the feedback, and B puts the original back.
+constexpr NativeText kGammaLabel{"gamma_label"};
+
+constexpr const char16_t* kGammaTexts[] = {u"0.8", u"0.9", u"1.0", u"1.1",
+                                           u"1.2", u"1.3", u"1.4"};
+
+const char16_t* GammaText(int32_t value) {
+  return static_cast<size_t>(value) < std::size(kGammaTexts) ? kGammaTexts[value] : nullptr;
+}
+
+int32_t GetGammaIndex(const OptionRow&) { return DisplayGammaOptionIndex(); }
+
+void CommitGammaIndex(const OptionRow& row, int32_t value) {
+  if (value == DisplayGammaOptionIndex())
+    return;
+  SetDisplayGammaOption(value);
+  SaveCvar(row.cvar);
+}
+
 // --- Language -------------------------------------------------------------
 
 // `user_language` applies live (see language_switch.h): the next guest frame
@@ -661,7 +683,8 @@ constexpr uint32_t kFullscreenRows = 0;
 constexpr uint32_t kFullscreenRows = 1;
 #endif
 constexpr uint32_t kFullscreenRow = kVanillaRowCount;
-constexpr uint32_t kLanguageRow = kVanillaRowCount + kFullscreenRows;
+constexpr uint32_t kGammaRow = kVanillaRowCount + kFullscreenRows;
+constexpr uint32_t kLanguageRow = kGammaRow + 1;
 constexpr uint32_t kVoicesRow = kLanguageRow + 1;
 constexpr uint32_t kArtworkRow = kLanguageRow + 2;
 constexpr uint32_t kPrologueRow = kLanguageRow + 3;
@@ -714,6 +737,17 @@ constexpr OptionRow kSettingsRows[] = {
         .tooltip = NativeText{"tip_fullscreen"},
     },
 #endif
+    {
+        .list_row = kGammaRow,
+        .label = kGammaLabel,
+        .value_count = std::size(kGammaTexts),
+        .value_text = &GammaText,
+        .get = &GetGammaIndex,
+        .commit = &CommitGammaIndex,
+        .cvar = "display_gamma",
+        .live = true,
+        .tooltip = NativeText{"tip_gamma"},
+    },
     {
         // `live`: each left/right switches the whole game's language on the
         // next frame, and B puts the original back the same way.

@@ -56,6 +56,13 @@ namespace nocturne {
 REXCVAR_DEFINE_DOUBLE(ui_scale, 1.0, "Game", "Scale of the overlay windows and their text")
     .range(0.5, 3.0);
 
+// Read by the present blit (blit.frag.hlsl), on top of the console's display
+// ramp.
+REXCVAR_DEFINE_DOUBLE(display_gamma, 1.0, "Game",
+                      "Gamma applied on top of the console display ramp when presenting. 1 matches "
+                      "the console; above 1 brightens.")
+    .range(0.5, 2.0);
+
 namespace {
 
 // Fixed pixel sizes in the settings overlay, which ScaleAllSizes cannot reach.
@@ -173,14 +180,18 @@ constexpr std::array<const char*, 4> kEnhancementTabs = {
 // <cvar> and <cvar>_desc.
 constexpr std::array<const char*, 2> kIntroSkipCvarNames = {"skip_intros", "skip_richter"};
 
-constexpr std::array<const char*, 18> kBasicCvarNames = {
+constexpr std::array<const char*, 19> kBasicCvarNames = {
     "fullscreen",       "vsync",         "user_language",
     "gpu_backend",      "vulkan_device", "audio_mute",      "audio_volume",
     "graphics_style_enhanced", "touch_controls", "touch_movement", "touch_function_keys", "touch_scale",
     "touch_opacity", "touch_hide_delay", "voices", "artwork", "prologue",
-    "ui_scale"};
+    "ui_scale", "display_gamma"};
 
 constexpr std::array kUiScaleSteps = {0.75, 1.0, 1.25, 1.5, 1.75, 2.0, 2.5, 3.0};
+
+constexpr std::array kDisplayGammaSteps = {0.8, 0.9, 1.0, 1.1, 1.2, 1.3, 1.4};
+constexpr std::array<const char*, 7> kDisplayGammaLabels = {"0.8", "0.9", "1.0", "1.1",
+                                                            "1.2", "1.3", "1.4"};
 
 // audio_volume is stored (and applied to samples by the SDL audio driver) as
 // linear amplitude, but human loudness perception is roughly logarithmic --
@@ -417,6 +428,7 @@ class CuratedSettingsDialog : public rex::ui::ImGuiDialog {
     DrawVsyncRow();
     DrawUiScaleRow();
     DrawGraphicsStyleRow();
+    DrawGammaRow();
     // The native renderer reads both: gpu_backend picks D3D12 or Vulkan (only
     // Windows has the choice) and vulkan_device the adapter when Vulkan is in use.
 #ifdef _WIN32
@@ -972,6 +984,28 @@ class CuratedSettingsDialog : public rex::ui::ImGuiDialog {
     ImGui::PopID();
   }
 
+  // Applies live, every step of the drag: the picture behind the overlay is
+  // the feedback.
+  void DrawGammaRow() {
+    if (!rex::cvar::GetFlagInfo("display_gamma"))
+      return;
+    int idx = DisplayGammaOptionIndex();
+
+    ImGui::TextUnformatted(Tr("settings", "display_gamma"));
+    RowTip("tip_gamma");
+    ImGui::SameLine(Px(180.0f));
+    ImGui::SetNextItemWidth(Px(160.0f));
+    ImGui::PushID("display_gamma");
+    if (ImGui::SliderInt("##v", &idx, 0, DisplayGammaOptionCount() - 1,
+                         DisplayGammaOptionLabel(idx), ImGuiSliderFlags_NoInput)) {
+      SetDisplayGammaOption(idx);
+    }
+    if (ImGui::IsItemDeactivatedAfterEdit())
+      SaveBasic();
+    RowTip("tip_gamma");
+    ImGui::PopID();
+  }
+
   void DrawGraphicsStyleRow() {
     const auto* entry = rex::cvar::GetFlagInfo("graphics_style_enhanced");
     if (!entry)
@@ -1341,6 +1375,36 @@ void RegisterNativeStringListener(rex::system::ModRegistry* registry) {
 const char16_t* FindNativeStringTranslation(uint32_t language_id, std::string_view key) {
   const char* text = FindModUiString(language_id, "native", key);
   return text ? CachedUtf16(text) : nullptr;
+}
+
+int DisplayGammaOptionCount() { return static_cast<int>(kDisplayGammaSteps.size()); }
+
+const char* DisplayGammaOptionLabel(int index) {
+  if (index < 0 || index >= DisplayGammaOptionCount())
+    return nullptr;
+  return kDisplayGammaLabels[index];
+}
+
+int DisplayGammaOptionIndex() {
+  const double cur = REXCVAR_GET(display_gamma);
+  int best = 0;
+  for (int i = 1; i < DisplayGammaOptionCount(); ++i) {
+    if (std::abs(kDisplayGammaSteps[i] - cur) < std::abs(kDisplayGammaSteps[best] - cur))
+      best = i;
+  }
+  return best;
+}
+
+void SetDisplayGammaOption(int index) {
+  if (index < 0 || index >= DisplayGammaOptionCount())
+    return;
+  char step[16];
+  std::snprintf(step, sizeof(step), "%g", kDisplayGammaSteps[index]);
+  rex::cvar::SetFlagByName("display_gamma", step, /*persist=*/true);
+}
+
+float DisplayGamma() {
+  return static_cast<float>(std::clamp(REXCVAR_GET(display_gamma), 0.5, 2.0));
 }
 
 float UiScale() { return static_cast<float>(std::clamp(REXCVAR_GET(ui_scale), 0.5, 3.0)); }

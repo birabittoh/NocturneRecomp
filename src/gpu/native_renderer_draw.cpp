@@ -18,6 +18,7 @@
 #include <rex/logging.h>
 #include <rex/system/xmemory.h>
 
+#include "core/settings.h"
 #include "guest_shaders.h"
 #include "native_renderer_shader_debug.h"
 #include "native_renderer_plume.h"
@@ -344,7 +345,12 @@ bool CreateBlit(RenderDevice* device) {
       RenderDescriptorRange(RenderDescriptorRangeType::SAMPLER, 1, 1),
   };
   const RenderDescriptorSetDesc set_desc(ranges, 2);
+  // The player's gamma, as its reciprocal (see blit.frag.hlsl).
+  const RenderPushConstantRange push_constants(0, 0, 0, sizeof(float),
+                                               RenderShaderStageFlag::PIXEL);
   RenderPipelineLayoutDesc layout_desc;
+  layout_desc.pushConstantRanges = &push_constants;
+  layout_desc.pushConstantRangesCount = 1;
   layout_desc.descriptorSetDescs = &set_desc;
   layout_desc.descriptorSetDescsCount = 1;
   g_res.blit_layout = device->createPipelineLayout(layout_desc);
@@ -1263,6 +1269,8 @@ void CompositeGuestImage(RenderCommandList* commands, const RenderFramebuffer* f
   commands->setGraphicsPipelineLayout(g_res.blit_layout.get());
   commands->setPipeline(g_res.blit_pipeline.get());
   commands->setGraphicsDescriptorSet(g_res.blit_set.get(), 0);
+  const float inv_gamma = 1.0f / DisplayGamma();
+  commands->setGraphicsPushConstants(0, &inv_gamma, 0, sizeof(inv_gamma));
   commands->drawInstanced(3, 1, 0, 0);
   commands->setViewports(RenderViewport(0.0f, 0.0f, float(width), float(height)));
 }

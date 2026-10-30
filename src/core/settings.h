@@ -41,6 +41,17 @@ namespace nocturne {
 double VolumeAmplitudeFromPercent(int percent);
 int VolumePercentFromAmplitude(double amplitude);
 
+// display_gamma as discrete steps, shared by the overlay's slider and the
+// native settings page so neither can land on a value the other cannot show.
+// Setting a step only changes the cvar; each caller persists it its own way.
+// DisplayGamma is the live value the present blit applies, clamped to the
+// cvar's range.
+int DisplayGammaOptionCount();
+const char* DisplayGammaOptionLabel(int index);
+int DisplayGammaOptionIndex();
+void SetDisplayGammaOption(int index);
+float DisplayGamma();
+
 // Overrides the SDK's built-in cvar defaults with the game's own. Call once,
 // before rex::ReXApp::SetupEnvironment() (i.e. before any config file is
 // loaded), so a saved config or CLI/env override still takes precedence.
