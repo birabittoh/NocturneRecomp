@@ -65,6 +65,8 @@ for path in sources:
     for key in pat_native.findall(text) + pat_native_text.findall(text):
         used.add(("native", key))
 
+# settings.cpp's RowTip("tip_x") reads [native].
+used |= {("native", key) for key in re.findall(r'RowTip\(\s*"(\w+)"', (root / "src/core/settings.cpp").read_text(encoding="utf8"))}
 # Keys composed at run time.
 # settings.cpp's ConfirmRestart takes its text keys as defaulted parameters.
 settings_src = (root / "src/core/settings.cpp").read_text(encoding="utf8")

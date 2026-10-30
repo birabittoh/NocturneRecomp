@@ -60,6 +60,13 @@ namespace {
 // Fixed pixel sizes in the settings overlay, which ScaleAllSizes cannot reach.
 float Px(float pixels) { return pixels * UiScale(); }
 
+// Hover help from res/lang's [native] tip_<name>, for the item just drawn; the
+// same texts the native settings page shows for the highlighted row.
+void RowTip(const char* key) {
+  if (ImGui::IsItemHovered(ImGuiHoveredFlags_ForTooltip | ImGuiHoveredFlags_AllowWhenDisabled))
+    ImGui::SetTooltip("%s", Tr("native", key));
+}
+
 // A modal asking to confirm a restart. Call every frame; `open` requests it.
 // `id` keeps the popups of different buttons apart.
 bool ConfirmRestart(const char* id, bool open, const char* message_key = "restart_confirm",
@@ -645,8 +652,7 @@ class CuratedSettingsDialog : public rex::ui::ImGuiDialog {
     ImGui::TextUnformatted(Tr("enhancements", "mode"));
     DrawSeedMarker(mode_use);
     ImGui::EndGroup();
-    EnhancementTooltip(GameModeDescription(mode), mode_use,
-                       mode != rando::GameMode::kNormal ? kModeNote : nullptr);
+    EnhancementTooltip(kModeNote, mode_use);
     ImGui::SameLine(Px(180.0f));
     ImGui::SetNextItemWidth(Px(160.0f));
     if (ImGui::BeginCombo("##game_mode", GameModeName(mode))) {
@@ -657,13 +663,11 @@ class CuratedSettingsDialog : public rex::ui::ImGuiDialog {
           SaveEnhancements();
         }
         EnhancementTooltip(GameModeDescription(m),
-                           seed ? GameModeSeedUse(*seed, m) : SeedUse::kNone,
-                           m != rando::GameMode::kNormal ? kModeNote : nullptr);
+                           seed ? GameModeSeedUse(*seed, m) : SeedUse::kNone);
       }
       ImGui::EndCombo();
     } else {
-      EnhancementTooltip(GameModeDescription(mode), mode_use,
-                         mode != rando::GameMode::kNormal ? kModeNote : nullptr);
+      EnhancementTooltip(kModeNote, mode_use);
     }
   }
 
@@ -804,11 +808,13 @@ class CuratedSettingsDialog : public rex::ui::ImGuiDialog {
     if (!entry)
       return;
     ImGui::TextUnformatted(Tr("settings", "fullscreen"));
+    RowTip("tip_fullscreen");
     ImGui::SameLine(Px(180.0f));
     ImGui::PushID("fullscreen");
     if (rex::ui::DrawCvarWidget(*entry, Px(160.0f), /*persist=*/true)) {
       SaveBasic();
     }
+    RowTip("tip_fullscreen");
     ImGui::PopID();
   }
 
@@ -817,11 +823,13 @@ class CuratedSettingsDialog : public rex::ui::ImGuiDialog {
     if (!entry)
       return;
     ImGui::TextUnformatted(Tr("settings", "vsync"));
+    RowTip("tip_vsync");
     ImGui::SameLine(Px(180.0f));
     ImGui::PushID("vsync");
     if (rex::ui::DrawCvarWidget(*entry, Px(160.0f), /*persist=*/true)) {
       SaveBasic();
     }
+    RowTip("tip_vsync");
     ImGui::PopID();
   }
 
@@ -841,6 +849,21 @@ class CuratedSettingsDialog : public rex::ui::ImGuiDialog {
   // Voices and artwork: whose release to use. Only with both installed is
   // there a choice; otherwise the row is disabled and shows the one installed.
   // Both apply live (see jp_voices.h, jp_artwork.h); "Auto" follows the language.
+  static void ReleaseTip(const char* cvar, bool available) {
+    if (!ImGui::IsItemHovered(ImGuiHoveredFlags_ForTooltip | ImGuiHoveredFlags_AllowWhenDisabled))
+      return;
+    ImGui::BeginTooltip();
+    ImGui::PushTextWrapPos(ImGui::GetFontSize() * 28.0f);
+    ImGui::TextUnformatted(Tr("native", (std::string("tip_") + cvar).c_str()));
+    if (!available) {
+      ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 0.85f, 0.2f, 1.0f));
+      ImGui::TextUnformatted(Tr("settings", "choice_needs_both"));
+      ImGui::PopStyleColor();
+    }
+    ImGui::PopTextWrapPos();
+    ImGui::EndTooltip();
+  }
+
   void DrawReleaseChoiceRow(const char* cvar, const char* label, bool available) {
     const auto* entry = rex::cvar::GetFlagInfo(cvar);
     if (!entry)
@@ -858,6 +881,7 @@ class CuratedSettingsDialog : public rex::ui::ImGuiDialog {
     const std::string current =
         available ? entry->getter() : (TargetReleaseId() == "xbla-jp" ? "jp" : "world");
     ImGui::TextUnformatted(label);
+    ReleaseTip(cvar, available);
     ImGui::SameLine(Px(180.0f));
     ImGui::SetNextItemWidth(Px(160.0f));
     ImGui::PushID(cvar);
@@ -875,8 +899,7 @@ class CuratedSettingsDialog : public rex::ui::ImGuiDialog {
       ImGui::EndCombo();
     }
     ImGui::EndDisabled();
-    if (!available && ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
-      ImGui::SetTooltip("%s", Tr("settings", "choice_needs_both"));
+    ReleaseTip(cvar, available);
     ImGui::PopID();
   }
 
@@ -892,10 +915,12 @@ class CuratedSettingsDialog : public rex::ui::ImGuiDialog {
     int percent = VolumePercentFromAmplitude(std::atof(entry->getter().c_str()));
 
     ImGui::TextUnformatted(Tr("settings", "volume"));
+    RowTip("tip_volume");
     ImGui::SameLine(Px(180.0f));
     ImGui::SetNextItemWidth(Px(160.0f));
     ImGui::PushID("audio_volume");
     bool changed = ImGui::SliderInt("##v", &percent, 0, 100, "%d%%");
+    RowTip("tip_volume");
     if (changed) {
       rex::cvar::SetFlagByName("audio_volume", std::to_string(VolumeAmplitudeFromPercent(percent)),
                                /*persist=*/true);
@@ -949,6 +974,7 @@ class CuratedSettingsDialog : public rex::ui::ImGuiDialog {
     if (!entry)
       return;
     ImGui::TextUnformatted(Tr("settings", "enhanced_graphics"));
+    RowTip("tip_graphics");
     ImGui::SameLine(Px(180.0f));
     ImGui::PushID("graphics_style_enhanced");
     bool enhanced = entry->getter() == "true";
@@ -961,6 +987,7 @@ class CuratedSettingsDialog : public rex::ui::ImGuiDialog {
     if (rex::ui::ToggleSwitch("##v", &enhanced)) {
       RequestGraphicsStyle(enhanced);
     }
+    RowTip("tip_graphics");
     ImGui::PopID();
   }
 
@@ -981,6 +1008,7 @@ class CuratedSettingsDialog : public rex::ui::ImGuiDialog {
     }
 
     ImGui::TextUnformatted(Tr("settings", "language"));
+    RowTip("tip_language");
     ImGui::SameLine(Px(180.0f));
     ImGui::SetNextItemWidth(Px(160.0f));
     ImGui::PushID("user_language");
@@ -996,6 +1024,7 @@ class CuratedSettingsDialog : public rex::ui::ImGuiDialog {
       }
       ImGui::EndCombo();
     }
+    RowTip("tip_language");
     ImGui::PopID();
   }
 
@@ -1327,12 +1356,12 @@ std::unique_ptr<rex::ui::ImGuiDialog> CreateSettingsDialog(
 
 }  // namespace nocturne
 
-// The pause menu's "Quit game" row (formerly "Return to Arcade", strings 31 and
-// 48; see font_overlay.cpp). Its handler, in the function table at 0x820099C8,
-// is a thunk that tail-calls XLaunchNewImage("XLNI_DASH_ARCADE", 0) to return
-// to the Xbox dashboard, which has nowhere to go here. Close the game instead,
-// as the settings dialog's Quit Game button does.
+// The pause menu's "Quit to launcher" row (formerly "Return to Arcade", strings
+// 31 and 48; see font_overlay.cpp). Its handler, in the function table at
+// 0x820099C8, is a thunk that tail-calls XLaunchNewImage("XLNI_DASH_ARCADE", 0)
+// to return to the Xbox dashboard, which has nowhere to go here. Restart into
+// the start screen (the launcher) instead, as the settings dialog's button does.
 REX_HOOK_RAW(sub_82577430) {
-  if (!nocturne::QuitNow())
-    REXLOG_WARN("[quit] no window to close");
+  if (!nocturne::RestartToStartScreen())
+    REXLOG_WARN("[quit] could not restart to the launcher");
 }

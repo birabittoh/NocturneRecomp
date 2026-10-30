@@ -19,6 +19,7 @@
 #include "screens/native_options_page.h"
 #include "rando/rando.h"
 #include "rando/rando_runtime.h"
+#include "ui/ui_text.h"
 
 namespace nocturne {
 
@@ -30,6 +31,7 @@ namespace {
 // its cvar (see BoolRow); the others are here.
 constexpr NativeText kWingSmashColor{"enh_wing_smash_color"};
 constexpr NativeText kGameMode{"enh_game_mode"};
+constexpr NativeText kWingSmashColorDesc{"enh_wing_smash_color_desc"};
 
 // The Help & Options entry's text, in the stock title's all caps. Each page's
 // own title is its category (enh_title_*).
@@ -159,6 +161,38 @@ constexpr OptionRow kOtherRows[] = {
     BoolRow(5, "skip_richter"),
 };
 
+// --- Description ----------------------------------------------------------------
+
+// The left column's text for the highlighted row of the page over `Rows`: the
+// overlay's tooltip for it, behind a note when the active seed decides it.
+template <const auto& Rows>
+PageDescription DescribeRow(uint32_t list_row, int32_t value) {
+  for (const OptionRow& row : Rows) {
+    if (row.list_row != list_row) {
+      continue;
+    }
+    const char16_t* warning = u"";
+    if (row.locked && row.locked(row)) {
+      warning = CachedUtf16(Tr("enhancements", "tip_in_seed"));
+    }
+    const char16_t* text = u"";
+    if (row.cvar == std::string_view(kWingSmashColorCvar)) {
+      text = kWingSmashColorDesc.Get();
+    } else if (row.cvar == std::string_view(kGameModeCvar)) {
+      // The note on the row itself, then the mode shown: there is no
+      // dropdown here to read the others' descriptions from.
+      const std::string key = "mode_" + std::to_string(value) + "_desc";
+      const std::string full = std::string(Tr("enhancements", "mode_note")) + "\n" +
+                               Tr("enhancements", key.c_str());
+      text = CachedUtf16(full.c_str());
+    } else {
+      text = CachedUtf16(Tr("enhancements", (std::string(row.cvar) + "_desc").c_str()));
+    }
+    return {warning, text ? text : u""};
+  }
+  return {};
+}
+
 // What fits on the screen's backdrop: the list starts at y=150, 30 apart, and
 // an eighth row would run into the stone border above the prompt bar.
 constexpr uint32_t kVisibleRows = 7;
@@ -167,7 +201,7 @@ constexpr uint32_t kVisibleRows = 7;
 constexpr uint32_t kLeftBumperGlyph = 0x82012F50u;
 constexpr NativeText kChangePagePrompt{"change_page_prompt"};
 
-template <size_t N>
+template <const auto& Rows, size_t N>
 constexpr OptionsPage MakePage(const OptionRow (&rows)[N], NativeText title) {
   return {
       .rows = rows,
@@ -179,6 +213,7 @@ constexpr OptionsPage MakePage(const OptionRow (&rows)[N], NativeText title) {
       .owns_all_rows = true,
       .prompt_text = kChangePagePrompt,
       .prompt_glyph = kLeftBumperGlyph,
+      .row_description = &DescribeRow<Rows>,
   };
 }
 
@@ -192,10 +227,10 @@ static_assert(std::size(kQualityOfLifeRows) <= kVisibleRows &&
               "each page fits the screen without scrolling");
 
 constexpr OptionsPage kPages[] = {
-    MakePage(kQualityOfLifeRows, NativeText{"enh_title_qol"}),
-    MakePage(kFixesRows, NativeText{"enh_title_fixes"}),
-    MakePage(kItemsRows, NativeText{"enh_title_items"}),
-    MakePage(kOtherRows, NativeText{"enh_title_other"}),
+    MakePage<kQualityOfLifeRows>(kQualityOfLifeRows, NativeText{"enh_title_qol"}),
+    MakePage<kFixesRows>(kFixesRows, NativeText{"enh_title_fixes"}),
+    MakePage<kItemsRows>(kItemsRows, NativeText{"enh_title_items"}),
+    MakePage<kOtherRows>(kOtherRows, NativeText{"enh_title_other"}),
 };
 
 }  // namespace

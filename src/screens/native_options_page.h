@@ -83,6 +83,11 @@ struct OptionRow {
   // perceive while the menu is open, like volume.
   bool live = false;
 
+  // The setting can change behind the screen's back (Alt+Enter toggling
+  // fullscreen): `get` is re-asked every frame and the row repainted when it
+  // differs from what is shown.
+  bool follow = false;
+
   // Override rows only: force the stock setting this row displaced to its
   // maximum, so whatever now backs the row has the full range to work with
   // rather than being multiplied down by a leftover value nobody can reach
@@ -98,6 +103,10 @@ struct OptionRow {
   // enhancement the active seed applies itself). `commit` still runs on A,
   // with that value, so it should leave the setting alone while locked.
   bool (*locked)(const OptionRow& row) = nullptr;
+
+  // Help text for the page's description column while the row is highlighted
+  // (OptionsPage::row_description). A null key shows none.
+  NativeText tooltip;
 };
 
 // Text shown in a column left of the list (OptionsPage::description).
@@ -158,6 +167,10 @@ struct OptionsPage {
   // Optional: text for the column left of the list, asked again every frame,
   // so it follows the rows' values (the randomizer's preset description).
   PageDescription (*description)() = nullptr;
+
+  // Like `description`, but for the row highlighted, by its list_row and the
+  // value it shows (not yet committed on a row that isn't `live`).
+  PageDescription (*row_description)(uint32_t list_row, int32_t value) = nullptr;
 };
 
 // Every row on a unique, in-range line; label-only rows only on stock lines of

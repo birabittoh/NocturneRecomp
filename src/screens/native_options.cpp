@@ -103,6 +103,9 @@
 #include "screens/native_options_page.h"
 #include "ui/native_ui.h"
 #include "core/settings.h"
+#include "core/target.h"
+#include "jp/jp_artwork.h"
+#include "jp/jp_voices.h"
 
 #include <fmt/format.h>
 #include <fmt/ranges.h>
@@ -110,6 +113,7 @@
 #include <rex/cvar.h>
 #include <rex/logging.h>
 #include <rex/memory/utils.h>
+#include <rex/platform.h>
 #include <rex/platform/process.h>
 #include <rex/ppc/context.h>
 #include <rex/runtime.h>
@@ -407,15 +411,13 @@ namespace {
 // --- Fullscreen and VSync ---------------------------------------------------
 
 // Both apply live: `fullscreen` through the change callback
-// ReXApp::SetupPresentation registers, `vsync` on the renderer's next present
+// ReXApp::SetupPresentation registers, 
 // (see ApplyVsyncIfChanged). So both rows are `live`, same as Volume.
 //
 // The shared string table has no id for either label, so they are res/lang
 // [native] strings rather than looked up by id. Title case to match the stock rows, not the
 // all-caps prompt bar.
 constexpr NativeText kFullscreenLabel{"fullscreen_label"};
-
-constexpr NativeText kVsyncLabel{"vsync_label"};
 
 // --- Language -------------------------------------------------------------
 
@@ -595,14 +597,67 @@ constexpr NativeText kCustomPromptLabel{"custom_prompt_label"};
 // which would be the wrong tool here).
 constexpr NativeText kGraphicsLabel{"graphics_label", /*current_only=*/true};
 
+// --- Voices and artwork -----------------------------------------------------
+
+// Whose release to use, as the overlay's rows (settings.cpp): only with both
+// installed is there a choice. Otherwise the row is locked on the one release
+// there is, and the description column says what to do about it.
+constexpr const char* kReleaseValues[] = {"auto", "jp", "world"};
+constexpr NativeText kReleaseTexts[3] = {NativeText{"release_auto"}, NativeText{"release_jp"},
+                                         NativeText{"release_world"}};
+constexpr NativeText kVoicesLabel{"voices_label"};
+constexpr NativeText kArtworkLabel{"artwork_label"};
+constexpr NativeText kChoiceNeedsBoth{"choice_needs_both"};
+
+bool ReleaseChoiceAvailable(const OptionRow& row) {
+  return std::string_view(row.cvar) == "voices" ? JpVoicesAvailable() : JpArtworkAvailable();
+}
+
+bool ReleaseChoiceLocked(const OptionRow& row) {
+  return !ReleaseChoiceAvailable(row);
+}
+
+int32_t GetReleaseChoice(const OptionRow& row) {
+  const std::string current = ReleaseChoiceAvailable(row)
+                                  ? rex::cvar::GetFlagByName(row.cvar)
+                                  : (TargetReleaseId() == "xbla-jp" ? "jp" : "world");
+  for (int32_t i = 0; i < 3; ++i) {
+    if (current == kReleaseValues[i]) {
+      return i;
+    }
+  }
+  return 0;
+}
+
+void CommitReleaseChoice(const OptionRow& row, int32_t value) {
+  if (!ReleaseChoiceAvailable(row) || value < 0 || value > 2 ||
+      rex::cvar::GetFlagByName(row.cvar) == kReleaseValues[value]) {
+    return;
+  }
+  rex::cvar::SetFlagByName(row.cvar, kReleaseValues[value], /*persist=*/true);
+  SaveCvar(row.cvar);
+}
+
+int32_t ResetReleaseChoice(const OptionRow&) {
+  return 0;
+}
+
 // --- The table itself -------------------------------------------------------
 
 constexpr uint32_t kStockGraphicsRow = 0;
 constexpr uint32_t kStockVolumeRow = 1;
+// Android is always fullscreen, so the row is left out there and the ones
+// after it move up.
+#if REX_PLATFORM_ANDROID
+constexpr uint32_t kFullscreenRows = 0;
+#else
+constexpr uint32_t kFullscreenRows = 1;
+#endif
 constexpr uint32_t kFullscreenRow = kVanillaRowCount;
-constexpr uint32_t kVsyncRow = kVanillaRowCount + 1;
-constexpr uint32_t kLanguageRow = kVanillaRowCount + 2;
-constexpr uint32_t kSettingsRowCount = kVanillaRowCount + 3;
+constexpr uint32_t kLanguageRow = kVanillaRowCount + kFullscreenRows;
+constexpr uint32_t kVoicesRow = kLanguageRow + 1;
+constexpr uint32_t kArtworkRow = kLanguageRow + 2;
+constexpr uint32_t kSettingsRowCount = kLanguageRow + 3;
 
 constexpr OptionRow kSettingsRows[] = {
     {
@@ -610,6 +665,7 @@ constexpr OptionRow kSettingsRows[] = {
         // untouched -- value, behaviour and model copy-back all stay stock.
         .list_row = kStockGraphicsRow,
         .label = kGraphicsLabel,
+        .tooltip = NativeText{"tip_graphics"},
     },
     {
         // Keeps the game's own localized "Volume" label and its 0-10 spinner.
@@ -621,6 +677,7 @@ constexpr OptionRow kSettingsRows[] = {
         .live = true,
         .pin_stock_to_max = true,
         .available = &MasterVolumeAvailable,
+        .tooltip = NativeText{"tip_volume"},
     },
     {
         .list_row = kPresetRow,
@@ -633,7 +690,9 @@ constexpr OptionRow kSettingsRows[] = {
         .get = [](const OptionRow&) { return GetGraphicsPresetIndex(); },
         .commit = [](const OptionRow&, int32_t value) { RequestGraphicsPreset(value); },
         .live = true,
+        .tooltip = NativeText{"tip_preset"},
     },
+#if !REX_PLATFORM_ANDROID
     {
         .list_row = kFullscreenRow,
         .label = kFullscreenLabel,
@@ -643,17 +702,10 @@ constexpr OptionRow kSettingsRows[] = {
         .commit = &CommitCvarBool,
         .cvar = "fullscreen",
         .live = true,
+        .follow = true,
+        .tooltip = NativeText{"tip_fullscreen"},
     },
-    {
-        .list_row = kVsyncRow,
-        .label = kVsyncLabel,
-        .value_count = 2,
-        .values = kOffOnTexts,
-        .get = &GetCvarBool,
-        .commit = &CommitCvarBool,
-        .cvar = "vsync",
-        .live = true,
-    },
+#endif
     {
         // `live`: each left/right switches the whole game's language on the
         // next frame, and B puts the original back the same way.
@@ -665,6 +717,33 @@ constexpr OptionRow kSettingsRows[] = {
         .get = &GetLanguageIndex,
         .commit = &CommitLanguageIndex,
         .live = true,
+        .tooltip = NativeText{"tip_language"},
+    },
+    {
+        .list_row = kVoicesRow,
+        .label = kVoicesLabel,
+        .value_count = 3,
+        .values = kReleaseTexts,
+        .get = &GetReleaseChoice,
+        .commit = &CommitReleaseChoice,
+        .reset = &ResetReleaseChoice,
+        .cvar = "voices",
+        .live = true,
+        .locked = &ReleaseChoiceLocked,
+        .tooltip = NativeText{"tip_voices"},
+    },
+    {
+        .list_row = kArtworkRow,
+        .label = kArtworkLabel,
+        .value_count = 3,
+        .values = kReleaseTexts,
+        .get = &GetReleaseChoice,
+        .commit = &CommitReleaseChoice,
+        .reset = &ResetReleaseChoice,
+        .cvar = "artwork",
+        .live = true,
+        .locked = &ReleaseChoiceLocked,
+        .tooltip = NativeText{"tip_artwork"},
     },
 };
 
@@ -672,6 +751,17 @@ static_assert(RowsAreWellFormed(kSettingsRows, kSettingsRowCount, /*owns_all_row
               "every settings row needs a unique in-range list_row; appended rows must run "
               "contiguously up from kVanillaRowCount; a row without `get` is label-only and "
               "must supply a `label` and target a stock row");
+
+PageDescription SettingsDescription(uint32_t list_row, int32_t) {
+  for (const OptionRow& row : kSettingsRows) {
+    if (row.list_row != list_row) {
+      continue;
+    }
+    const bool locked = row.locked && row.locked(row);
+    return {locked ? kChoiceNeedsBoth.Get() : u"", row.tooltip.Get() ? row.tooltip.Get() : u""};
+  }
+  return {};
+}
 
 constexpr OptionsPage kSettingsPage = {
     .rows = kSettingsRows,
@@ -681,6 +771,7 @@ constexpr OptionsPage kSettingsPage = {
     .stretch_prompt = true,
     .prompt_text = kCustomPromptLabel,
     .prompt_glyph = kYGlyphNameAddr,
+    .row_description = &SettingsDescription,
 };
 
 // ---------------------------------------------------------------------------
@@ -1222,6 +1313,24 @@ extern "C" void NativeOptions_BindRows(PPCContext& ctx, uint8_t* base) {
   }
 }
 
+// Rows marked `follow` track their setting when something else changes it.
+void FollowRows(PPCContext& ctx, uint8_t* base) {
+  for (uint32_t i = 0; i < Page().row_count; ++i) {
+    const OptionRow& row = Page().rows[i];
+    if (!row.follow || !row.get || !IsRowActive(row) || !OnScreen(row)) {
+      continue;
+    }
+    const int32_t value = std::clamp(row.get(row), RowMin(row), RowMax(row));
+    if (value == g_values[i]) {
+      continue;
+    }
+    g_values[i] = g_seeded_values[i] = value;
+    Write32BE(base, g_entries + ScreenRow(row) * kEntryStride + kEntryValue,
+              static_cast<uint32_t>(value));
+    RenderRow(ctx, base, i);
+  }
+}
+
 // Left/right on a row. The vanilla path already advances and wraps every row
 // correctly (ours are stock spinner entries), so all this adds is taking the
 // new value, repainting an enumerated row with its own text instead of the raw
@@ -1335,6 +1444,10 @@ extern "C" void NativeOptions_ListUpdate(PPCContext& ctx, uint8_t* base) {
 
   if (g_original_list_update_fn) {
     g_original_list_update_fn(ctx, base);
+  }
+
+  if (g_list != 0 && list == g_list && g_entries) {
+    FollowRows(ctx, base);
   }
 
   // Repaint list row 2's value, which that same Update just blanked.
@@ -1738,8 +1851,12 @@ void UpdateDescription(PPCContext& ctx, uint8_t* base, uint32_t screen) {
       !g_text_width_fn) {
     return;
   }
-  const PageDescription description =
-      Page().description ? Page().description() : PageDescription{};
+  PageDescription description = Page().description ? Page().description() : PageDescription{};
+  if (Page().row_description && g_list) {
+    const uint32_t selected = Read32BE(base, g_list + kListSelectedRow) + g_scroll;
+    const int32_t index = FindActiveValueRow(selected);
+    description = Page().row_description(selected, index >= 0 ? g_values[index] : 0);
+  }
   if (description.warning.empty() && description.text.empty()) {
     if (g_description_shown) {
       HideDescription(ctx, base);
