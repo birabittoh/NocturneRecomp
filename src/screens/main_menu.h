@@ -6,7 +6,7 @@
 //
 // The main menu (front-end page 1) is a six-item list: Single Player,
 // Leaderboards, Achievements, Help & Options, then "Unlock Full Game" and
-// "Return to Arcade" (relabelled Quit game, see font_overlay.cpp), of which
+// "Return to Arcade" (relabelled Quit to launcher, see font_overlay.cpp), of which
 // its Activate keeps one: the full game moves Quit up onto the Unlock item
 // and hides the last. Ours goes in at index 1 and every stock item moves down
 // one, so each hook here hands the stock code the index it was written for.

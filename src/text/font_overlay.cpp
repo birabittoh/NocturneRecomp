@@ -366,7 +366,7 @@ std::vector<uint8_t> MergeJapaneseStrings(const std::vector<uint8_t>& world_file
 }
 
 // The button that used to say "Return to Arcade" (id 31, description id 48)
-// quits the game, so every strings_<code>.bin gets new text for both.
+// returns to the launcher, so every strings_<code>.bin gets new text for both.
 constexpr size_t kQuitStringId = 31;
 constexpr size_t kQuitDescriptionId = 48;
 struct QuitLabel {
@@ -375,12 +375,12 @@ struct QuitLabel {
   const char16_t* description;
 };
 constexpr QuitLabel kQuitLabels[] = {
-    {"en", u"Quit game", u"Quit the game"},
-    {"de", u"Spiel beenden", u"Das Spiel beenden"},
-    {"es", u"Salir del juego", u"Salir del juego"},
-    {"fr", u"Quitter le jeu", u"Quitter le jeu"},
-    {"it", u"Esci dal gioco", u"Esci dal gioco"},
-    {"ja", u"ゲームを終了", u"ゲームを終了"},
+    {"en", u"Quit to launcher", u"Quit to the launcher"},
+    {"de", u"Zum Launcher", u"Zum Launcher zurückkehren"},
+    {"es", u"Salir al launcher", u"Salir al launcher"},
+    {"fr", u"Quitter vers le launcher", u"Quitter vers le launcher"},
+    {"it", u"Torna al launcher", u"Torna al launcher"},
+    {"ja", u"ランチャーへ戻る", u"ランチャーへ戻る"},
 };
 
 // Points entry `id` of `file` at `text`, appended at the end, as in
