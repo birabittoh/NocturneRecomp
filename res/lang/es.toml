@@ -253,6 +253,10 @@ rando_drops = "Botín enemigo"
 rando_shop = "Tienda"
 rando_candles = "Velas"
 
+[renderer]
+device_lost_title = "Dispositivo gráfico perdido"
+device_lost = "El controlador gráfico dejó de responder con {} y el juego no puede continuar.\n\n¿Cambiar a {} y reiniciar? Puedes cambiarlo más tarde en Ajustes.\n\nElige No para cerrar el juego."
+
 [intro]
 start = "Iniciar"
 extract = "Extraer"

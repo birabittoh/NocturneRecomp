@@ -259,6 +259,10 @@ rando_drops = "Enemy Drops"
 rando_shop = "Shop Items"
 rando_candles = "Candles"
 
+[renderer]
+device_lost_title = "Graphics Device Lost"
+device_lost = "The graphics driver stopped responding while running on {}, and the game cannot continue.\n\nSwitch to {} and restart? You can change this later in Settings.\n\nChoose No to close the game."
+
 [intro]
 start = "Start"
 extract = "Extract"

@@ -31,6 +31,17 @@
 #endif
 
 #include "native_renderer_plume_internal.h"
+#include "ui/ui_text.h"
+
+#ifdef _WIN32
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h>
+#endif
 
 namespace plume {
 #ifdef _WIN32
@@ -339,6 +350,55 @@ void GrowReleaseSemaphores() {
   while (g_backend.release_semaphores.size() < g_backend.swap_chain->getTextureCount())
     g_backend.release_semaphores.push_back(g_backend.device->createCommandSemaphore());
 }
+
+#ifdef _WIN32
+// DXGI_ERROR_DEVICE_REMOVED / _HUNG / _RESET / _DRIVER_INTERNAL_ERROR, and
+// VK_ERROR_DEVICE_LOST.
+bool IsDeviceLostCode(uint32_t code) {
+  return code == 0x887A0005 || code == 0x887A0006 || code == 0x887A0007 || code == 0x887A0020 ||
+         code == 0xFFFFFFFC;
+}
+
+bool DeviceLost() {
+  if (!g_backend.swap_chain)
+    return false;
+  if (IsDeviceLostCode(uint32_t(g_backend.swap_chain->getLastError())))
+    return true;
+  return g_backend.api_name == "D3D12" && uint32_t(g_backend.swap_chain->getDeviceRemovedReason()) != 0;
+}
+
+// A lost device never comes back, and nothing here rebuilds one, so the window
+// would sit frozen on its last frame with every input dead. Say so, and offer
+// the other backend, which is what gets a player past a driver that only
+// misbehaves under one API. Asked once; runs on the guest GPU thread, which has
+// nothing left to draw anyway.
+void PromptDeviceLost() {
+  static bool prompted = false;
+  if (prompted)
+    return;
+  prompted = true;
+
+  const bool on_vulkan = g_backend.api_name == "Vulkan";
+  const char* other_name = on_vulkan ? "d3d12" : "vulkan";
+  const char* other_label = on_vulkan ? "D3D12" : "Vulkan";
+  REXLOG_ERROR("native_renderer: the {} device was lost; offering {}", g_backend.api_name,
+               other_label);
+
+  const std::string message = TrArgs("renderer", "device_lost",
+                                     {g_backend.api_name, other_label});
+  const std::u16string wide_message = Utf8ToUtf16(message);
+  const std::u16string wide_title = Utf8ToUtf16(Tr("renderer", "device_lost_title"));
+  const int answer = MessageBoxW(nullptr, reinterpret_cast<const wchar_t*>(wide_message.c_str()),
+                                 reinterpret_cast<const wchar_t*>(wide_title.c_str()),
+                                 MB_YESNO | MB_ICONERROR | MB_SETFOREGROUND | MB_TOPMOST);
+  if (answer == IDYES) {
+    rex::cvar::SetFlagByName("gpu_backend", other_name, /*persist=*/true);
+    if (RestartNow())
+      return;
+  }
+  QuitNow();
+}
+#endif
 
 void ApplyResize() {
   if (!g_backend.swap_chain->resize()) {
@@ -733,6 +793,10 @@ void PlumePresentFrame() {
   ++g_frames_presented;
   if (have_swap_chain)
     SettleWindowSize();
+#ifdef _WIN32
+  if (have_swap_chain && (g_present_failures != 0 || g_resize_failures != 0) && DeviceLost())
+    PromptDeviceLost();
+#endif
   if (g_frames_presented % 600 == 0) {
     REXLOG_DEBUG(
         "native_renderer: Plume presented {} frames ({} acquire failures, {} present failures, "

@@ -253,6 +253,10 @@ rando_drops = "Gegner-Drops"
 rando_shop = "Ladenartikel"
 rando_candles = "Kerzen"
 
+[renderer]
+device_lost_title = "Grafikgerät verloren"
+device_lost = "Der Grafiktreiber reagiert unter {} nicht mehr, und das Spiel kann nicht fortgesetzt werden.\n\nZu {} wechseln und neu starten? Das lässt sich später in den Einstellungen ändern.\n\nMit Nein wird das Spiel beendet."
+
 [intro]
 start = "Starten"
 extract = "Extrahieren"
