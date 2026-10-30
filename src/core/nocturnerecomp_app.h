@@ -83,6 +83,11 @@
 // Single on/off vsync toggle, consumed by the renderer (src/gpu, in progress).
 REXCVAR_DEFINE_BOOL(vsync, true, "Video", "Enable vsync");
 
+// Whether the Guide's sign-in screen opens by itself at startup when no account
+// is remembered. Off: it only opens from the Guide button or the game's prompt.
+REXCVAR_DEFINE_BOOL(guide_sign_in_at_startup, false, "Guide",
+                    "Open the sign-in screen at startup when not signed in");
+
 class NocturnerecompApp : public rex::ReXApp {
  public:
   using rex::ReXApp::ReXApp;
@@ -472,6 +477,7 @@ class NocturnerecompApp : public rex::ReXApp {
         .title_name = "Castlevania: Symphony of the Night",
         .on_quit = [this] { if (auto* w = window()) w->RequestClose(); },
         .ready_for_sign_in = [this] { return runtime() != nullptr; },
+        .sign_in_at_startup = [] { return REXCVAR_GET(guide_sign_in_at_startup); },
         .immediate_drawer = immediate_drawer() ? immediate_drawer() : drawer->immediate_drawer(),
         .config_file = user_settings_path(),
         // The renderer is native, so the SDK's GPU plugin choice is moot.
