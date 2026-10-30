@@ -53,3 +53,29 @@ return_on_true = true
 address = 0x8239AEC8
 name = "JpFileSelectMenuOption"
 registers = ["r3"]
+
+# The Librarian's bestiary (src/jp/jp_bestiary.cpp). sub_82408178 is the page's
+# state machine, sub_82407C28 fills the page, sub_82406DC0 the list of names.
+[[midasm_hook]]
+address = 0x82408178
+name = "JpBestiaryPage"
+registers = ["r3"]
+return_on_true = true
+
+[[midasm_hook]]
+address = 0x82407C28
+name = "JpBestiaryDetail"
+registers = ["r3"]
+return_on_true = true
+
+[[midasm_hook]]
+address = 0x82406DC0
+name = "JpBestiaryList"
+registers = ["r3"]
+return_on_true = true
+
+# sub_82408178, state 2: the width the window opens to (r6), JP's 0x74.
+[[midasm_hook]]
+address = 0x8240857C
+name = "JpBestiaryWindowWidth"
+registers = ["r6"]

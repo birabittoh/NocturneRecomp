@@ -286,8 +286,9 @@ bool InstallJpText(rex::Runtime* runtime) {
   }
 
   const uint32_t prologue = arena.Put(Prologue(jp), false);
-  if (!InstallJpFileSelect(jp, arena)) {
-    REXLOG_ERROR("jp text: can't copy the file select's text; Japanese stays World's");
+  if (!InstallJpFileSelect(jp, arena) || !InstallJpBestiary(jp, arena)) {
+    REXLOG_ERROR("jp text: can't copy the file select's or the bestiary's text; Japanese stays "
+                 "World's");
     return false;
   }
 

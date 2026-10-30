@@ -24,7 +24,7 @@ inline constexpr uint32_t kImageBase = 0x82000000u;
 // PE timestamp of JP's release (see scripts/guest_recipe.py).
 inline constexpr uint32_t kJpTimestamp = 0x5B4B7B46u;
 
-// Room for everything copied from JP: about 0x3800 bytes today.
+// Room for everything copied from JP: about 0x6800 bytes today.
 inline constexpr uint32_t kArenaSize = 0x10000;
 
 inline uint32_t ReadBE32(const uint8_t* p) {
@@ -205,5 +205,6 @@ void CallGuest(uint32_t address, PPCContext& ctx, uint8_t* base);
 // Each screen's part, called from InstallJpText once JP's image is read. They
 // keep the copies they need; false when one could not be made.
 bool InstallJpFileSelect(const JpImage& jp, Arena& arena);
+bool InstallJpBestiary(const JpImage& jp, Arena& arena);
 
 }  // namespace nocturne::jp_text
