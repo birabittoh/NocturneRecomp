@@ -30,6 +30,7 @@
 #include "native_renderer.h"
 #include "native_renderer_draw.h"
 #include "native_renderer_plume.h"
+#include "native_renderer_shader_debug.h"
 
 // The recompiled bodies the hooks below wrap. The strong REX_HOOK_RAW
 // definitions override the weak generated aliases, so calling __imp__ runs the
@@ -323,6 +324,9 @@ REX_HOOK_RAW(D3DDevice__Swap) {
         g_stats.vertex_shaders.exchange(0), g_stats.pixel_shaders.exchange(0));
   }
   nocturne::PlumePresentFrame();
+  // Rolls the shader debugger's "active this frame" flags over, so its list
+  // shows what the game is drawing now rather than what it ever drew.
+  nocturne::GuestShaderDebugEndFrame();
   nocturne::NotifyGuestFrame();
   LimitFrameRate();
 }

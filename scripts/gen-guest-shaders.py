@@ -11,7 +11,10 @@ finite offline problem:
     dxc                     HLSL -> DXIL and SPIR-V
 
 Output is `guest_shaders.bin` plus a `.S` sidecar that `.incbin`s it into the
-executable's read-only data, read back by src/gpu/guest_shaders.cpp.
+executable's read-only data, read back by src/gpu/guest_shaders.cpp. A second
+pack, `guest_shaders_debug.bin`, carries each shader's name, microcode
+disassembly and HLSL for the F2 shader debugger (src/gpu/
+native_renderer_shader_debug.cpp); the renderer never reads it.
 
 Unlike Eternal Sonata, the guest has no shader table to index, so a bound shader
 object is resolved to its pack entry by hashing its microcode (the pack's hash
@@ -56,6 +59,14 @@ import xenos_ucode as U  # noqa: E402
 
 PACK_MAGIC = b"NRGS"
 PACK_VERSION = 1
+
+# The sidecar the F2 shader debugger reads: per shader, the extractor's name,
+# the microcode disassembly and the emitted HLSL. Kept out of guest_shaders.bin
+# because none of it is touched unless the overlay is opened, so the runtime
+# reads spans out of it on demand. Missing or empty, the overlay still lists,
+# names and toggles shaders; it just has no source to show.
+DEBUG_MAGIC = b"NRGD"
+DEBUG_VERSION = 2
 
 SLOTS = X.MAX_INDEX + 1
 
@@ -235,6 +246,8 @@ class Translated:
         entry.flags = 0
         entry.blobs = {}
         entry.source = None
+        entry.hlsl = b""
+        entry.disassembly = b"; hand ported, the guest compiles this shader at startup"
         return entry
 
     def __init__(self, shader, emitted):
@@ -269,6 +282,9 @@ class Translated:
             self.flags |= FLAG_POINT_SIZE
         self.blobs = {}
         self.source = None
+        # For the debugger sidecar only.
+        self.hlsl = b""
+        self.disassembly = b""
 
 
 def load_shaders(media):
@@ -330,6 +346,15 @@ def translate(shaders, hlsl_dir, skipped):
         entry.source = os.path.join(hlsl_dir, shader.name + ".hlsl")
         write_if_different(entry.source, text)
         entry.text = text.decode("utf-8")
+        entry.hlsl = text
+        # A shader whose microcode will not disassemble still has to reach the
+        # pack: the renderer runs the compiled blob either way, and losing the
+        # build over a cosmetic pane would be the wrong trade.
+        try:
+            entry.disassembly = U.disassemble(shader.microcode).encode("utf-8")
+        except Exception as exc:  # noqa: BLE001
+            entry.disassembly = ("; %s does not disassemble: %s"
+                                 % (shader.name, exc)).encode("utf-8")
         out.append(entry)
 
     out.append(port_font(out, layout, hlsl_dir, "vs", FONT_VS_KEY,
@@ -362,8 +387,8 @@ def port_font(entries, layout, hlsl_dir, kind, key, inputs, texture_mask,
                               texture_mask)
     entry.source_file = "ATG::Font"
     entry.source = os.path.join(hlsl_dir, name + ".hlsl")
-    write_if_different(entry.source,
-                       (preamble.replace(base.name, name) + body).encode("utf-8"))
+    entry.hlsl = (preamble.replace(base.name, name) + body).encode("utf-8")
+    write_if_different(entry.source, entry.hlsl)
     return entry
 
 
@@ -431,6 +456,40 @@ def pack(entries):
             + bytes(inputs) + bytes(keys) + bytes(literals) + bytes(blob))
 
 
+def pack_debug(entries):
+    """Lay out the shader debugger's sidecar: header, entry table, then text.
+
+    Same slot indexing as the main pack: an entry index is `kind_base + slot`.
+    Spans are deduplicated, since the same text can land in two slots.
+    """
+    text = bytearray()
+    seen = {}
+
+    def place(data):
+        if not data:
+            return (0, 0)
+        existing = seen.get(data)
+        if existing is not None:
+            return existing
+        where = (len(text), len(data))
+        text.extend(data)
+        seen[data] = where
+        return where
+
+    empty = struct.pack("<IIIIII", 0, 0, 0, 0, 0, 0)
+    table = [empty] * (SLOTS * 2)
+    for entry in entries:
+        index = (0 if entry.kind == "vs" else SLOTS) + entry.slot
+        name = place(entry.name.encode("utf-8"))
+        ucode = place(entry.disassembly)
+        hlsl = place(entry.hlsl)
+        table[index] = struct.pack("<IIIIII", name[0], name[1], ucode[0],
+                                   ucode[1], hlsl[0], hlsl[1])
+
+    header = struct.pack("<4sIII", DEBUG_MAGIC, DEBUG_VERSION, SLOTS, len(text))
+    return header + b"".join(table) + bytes(text)
+
+
 def main():
     root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
@@ -441,6 +500,11 @@ def main():
                                        "(default <out>/guest_shaders.bin)")
     parser.add_argument("--pack-asm", help=".S file to write, .incbin-ing "
                                            "--pack (default <pack>.S)")
+    parser.add_argument("--debug-pack",
+                        help="shader debugger sidecar to write (default "
+                             "<out>/guest_shaders_debug.bin)")
+    parser.add_argument("--debug-pack-asm", help=".S file to write, .incbin-ing "
+                                                  "--debug-pack (default <debug-pack>.S)")
     parser.add_argument("--dxc", required=True, help="dxc executable")
     parser.add_argument("--dxc-lib-dir",
                         help="directory holding libdxcompiler, if it is not "
@@ -475,14 +539,24 @@ def main():
     write_pack_asm(args.pack_asm or (pack_path + ".S"), pack_path,
                    "kGuestShaderPackData")
 
+    debug_path = args.debug_pack or os.path.join(args.out,
+                                                 "guest_shaders_debug.bin")
+    debug_data = pack_debug(entries)
+    os.makedirs(os.path.dirname(os.path.abspath(debug_path)), exist_ok=True)
+    write_if_different(debug_path, debug_data)
+    write_pack_asm(args.debug_pack_asm or (debug_path + ".S"), debug_path,
+                   "kGuestShaderDebugPackData")
+
     for entry in entries:
         print("  %s %s key %016X" % (entry.name, entry.source_file, entry.hash))
     if skipped:
         print("  not in the pack: %s" % ", ".join(skipped))
-    print("guest shaders: %d vertex, %d pixel, formats %s, pack %d bytes -> %s"
+    print("guest shaders: %d vertex, %d pixel, formats %s, pack %d bytes -> %s "
+          "(debug sidecar %d bytes -> %s)"
           % (sum(e.kind == "vs" for e in entries),
              sum(e.kind == "ps" for e in entries),
-             "+".join(formats), len(data), pack_path))
+             "+".join(formats), len(data), pack_path, len(debug_data),
+             debug_path))
     return 0
 
 

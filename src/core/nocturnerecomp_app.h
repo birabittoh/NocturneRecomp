@@ -27,6 +27,7 @@
 #include <rex/version.h>
 #include <rex/ui/imgui_drawer.h>
 #include <rex/ui/imgui_theme.h>
+#include <rex/ui/overlay/shader_debugger_overlay.h>
 #include <rex/ui/presenter.h>
 #include <rex/ui/window.h>
 #include <rexglue_guide/guide.h>
@@ -61,6 +62,7 @@
 #include "native_renderer.h"
 #include "native_renderer_overlay.h"
 #include "native_renderer_plume.h"
+#include "native_renderer_shader_debug.h"
 #include "game/player_status.h"
 #include "rando/rando_menu.h"
 #include "rando/rando_runtime.h"
@@ -277,6 +279,8 @@ class NocturnerecompApp : public rex::ReXApp {
   }
 
   void OnPostSetup() override {
+    WireShaderDebugger();
+
     // Runs the settings overlay's Vulkan device enumeration now,
     // rather than paying for it on the player's first F4 press (the SDK
     // destroys and recreates the overlay on every close/open, so without this
@@ -420,6 +424,37 @@ class NocturnerecompApp : public rex::ReXApp {
   // Register the per-frame achievements input watcher (closes the overlay on
   // controller B). The ImGui drawer is live here; the input system is supplied
   // later in OnPostSetup. See achievements_menu.cpp.
+  // Points the SDK's F2 shader debugger at the native renderer instead of at
+  // the emulated command processor, which does not exist in this build. The
+  // overlay's whole data model is "a list of shaders, by hash"; this renderer's
+  // shaders are the closed set in guest_shaders.bin, addressed by pack slot, so
+  // the override presents a slot where a hash would go. See
+  // src/gpu/native_renderer_shader_debug.h.
+  void WireShaderDebugger() {
+    ShaderDebuggerOverride override;
+    override.snapshot_provider = [] { return nocturne::GuestShaderSnapshot(); };
+    override.details_provider = [](uint64_t id) { return nocturne::GuestShaderDetails(id); };
+    override.disable_setter = [](uint64_t id, bool disabled) {
+      nocturne::SetGuestShaderDisabled(id, disabled);
+    };
+    // Replacing a compiled blob under a live pipeline is not offered: the
+    // pipeline cache hands out objects that the frame's command list only reads
+    // at execute time, so swapping one mid-frame would retroactively change
+    // draws already recorded against it. Leaving the callback unset makes the
+    // dialog's "Load binary..." fail loudly rather than corrupt a frame.
+    override.profiling_toggle = [](bool enabled) { nocturne::SetGuestShaderProfiling(enabled); };
+    override.profiling_resetter = [] { nocturne::ResetGuestShaderProfiling(); };
+    SetShaderDebuggerOverride(std::move(override));
+
+    // The dialog persists the disable flags, but only applies them as the user
+    // toggles a row. Reading the same file here means a shader switched off in
+    // a previous session is off from the first frame, without the overlay ever
+    // being opened.
+    nocturne::SetGuestShaderBlacklist(
+        rex::ui::ShaderDebuggerDialog::ReadShaderBlacklistFromToml(runtime()->ModDumpRoot() /
+                                                                   "shaders.toml"));
+  }
+
   void OnCreateDialogs(rex::ui::ImGuiDrawer* drawer) override {
     nocturne::Achievements().AttachWatcher(drawer);
     nocturne::GetAccentColor().AttachWatcher(drawer);

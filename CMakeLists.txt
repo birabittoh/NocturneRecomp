@@ -259,6 +259,11 @@ endif()
 set(NOCTURNE_GUEST_SHADER_DIR ${CMAKE_BINARY_DIR}/guest_shaders)
 set(NOCTURNE_GUEST_SHADER_PACK ${CMAKE_BINARY_DIR}/guest_shaders.bin)
 set(NOCTURNE_GUEST_SHADER_PACK_ASM ${CMAKE_BINARY_DIR}/guest_shaders.bin.S)
+# The sidecar the F2 shader debugger reads: per shader, the microcode
+# disassembly and HLSL. Linked in the same way; see
+# src/gpu/native_renderer_shader_debug.cpp.
+set(NOCTURNE_GUEST_SHADER_DEBUG_PACK ${CMAKE_BINARY_DIR}/guest_shaders_debug.bin)
+set(NOCTURNE_GUEST_SHADER_DEBUG_PACK_ASM ${CMAKE_BINARY_DIR}/guest_shaders_debug.bin.S)
 if(NOT CMAKE_ASM_COMPILER)
     set(CMAKE_ASM_COMPILER ${CMAKE_CXX_COMPILER})
 endif()
@@ -278,11 +283,14 @@ file(GLOB NOCTURNE_GUEST_SHADER_FILES CONFIGURE_DEPENDS
     ${NOCTURNE_GUEST_MEDIA_DIR}/*.xvu ${NOCTURNE_GUEST_MEDIA_DIR}/*.xpu)
 add_custom_command(
     OUTPUT ${NOCTURNE_GUEST_SHADER_PACK} ${NOCTURNE_GUEST_SHADER_PACK_ASM}
+        ${NOCTURNE_GUEST_SHADER_DEBUG_PACK} ${NOCTURNE_GUEST_SHADER_DEBUG_PACK_ASM}
     COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/scripts/gen-guest-shaders.py
         --media ${NOCTURNE_GUEST_MEDIA_DIR}
         --out ${NOCTURNE_GUEST_SHADER_DIR}
         --pack ${NOCTURNE_GUEST_SHADER_PACK}
         --pack-asm ${NOCTURNE_GUEST_SHADER_PACK_ASM}
+        --debug-pack ${NOCTURNE_GUEST_SHADER_DEBUG_PACK}
+        --debug-pack-asm ${NOCTURNE_GUEST_SHADER_DEBUG_PACK_ASM}
         --dxc ${PLUME_DXC_EXECUTABLE}
         ${NOCTURNE_DXC_LIB_ARG}
         --formats ${NOCTURNE_SHADER_FORMATS}
@@ -399,6 +407,7 @@ set(NOCTURNERECOMP_SOURCES
     src/gpu/native_renderer_draw.cpp
     src/gpu/native_renderer_overlay.cpp
     src/gpu/native_renderer_plume.cpp
+    src/gpu/native_renderer_shader_debug.cpp
     src/gpu/native_renderer_tessellation.cpp
     src/gpu/native_renderer_texture.cpp
     ${NOCTURNE_FONTS_HEADER}
@@ -408,6 +417,7 @@ set(NOCTURNERECOMP_SOURCES
     ${NOCTURNE_IMAGES_HEADER}
     ${CMAKE_SOURCE_DIR}/ext/KryptonRecomp/guest_shader_pack.cpp
     ${NOCTURNE_GUEST_SHADER_PACK_ASM}
+    ${NOCTURNE_GUEST_SHADER_DEBUG_PACK_ASM}
 )
 if(ANDROID)
     list(APPEND NOCTURNERECOMP_SOURCES src/platform/android_gpu_driver.cpp)
@@ -485,6 +495,8 @@ set_source_files_properties(src/rando/rando_core.cpp PROPERTIES COMPILE_OPTIONS 
 # The `.S` only names the pack; the pack itself must exist before it assembles.
 set_source_files_properties(${NOCTURNE_GUEST_SHADER_PACK_ASM} PROPERTIES
     OBJECT_DEPENDS ${NOCTURNE_GUEST_SHADER_PACK})
+set_source_files_properties(${NOCTURNE_GUEST_SHADER_DEBUG_PACK_ASM} PROPERTIES
+    OBJECT_DEPENDS ${NOCTURNE_GUEST_SHADER_DEBUG_PACK})
 if(WIN32)
     # Plume's CMake does not link the D3D12 import library itself, leaving
     # D3D12CreateDevice and D3D12SerializeRootSignature to the consumer.

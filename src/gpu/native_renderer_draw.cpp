@@ -8,6 +8,7 @@
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
+#include <chrono>
 #include <cstring>
 #include <iterator>
 #include <memory>
@@ -18,6 +19,7 @@
 #include <rex/system/xmemory.h>
 
 #include "guest_shaders.h"
+#include "native_renderer_shader_debug.h"
 #include "native_renderer_plume.h"
 #include "native_renderer_plume_internal.h"
 #include "native_renderer_texture.h"
@@ -139,6 +141,7 @@ enum DropReason {
   kDropPipeline,
   kDropArena,
   kDropTextures,
+  kDropShaderDisabled,
   kDropCount,
 };
 constexpr const char* kDropNames[kDropCount] = {
@@ -150,6 +153,7 @@ constexpr const char* kDropNames[kDropCount] = {
     "pipeline creation failed",
     "the upload arena could not grow",
     "a texture descriptor set could not be created",
+    "a bound shader is toggled off in the F2 shader debugger",
 };
 uint64_t g_drops[kDropCount] = {};
 
@@ -1018,6 +1022,12 @@ GuestVertexFill GuestDrawInline(uint8_t* base, const GuestInlineDraw& draw) {
     return {};
   RenderDevice* device = PlumeDevice();
 
+  // Timed only while the F2 overlay has profiling on, so the clock is not read
+  // otherwise.
+  const bool profiling = GuestShaderProfilingEnabled();
+  const std::chrono::steady_clock::time_point started =
+      profiling ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
+
   const uint32_t dev = draw.device;
   const int vertex_slot = draw.vertex_slot >= 0
                               ? draw.vertex_slot
@@ -1026,6 +1036,12 @@ GuestVertexFill GuestDrawInline(uint8_t* base, const GuestInlineDraw& draw) {
   if (vertex_slot < 0 || pixel_slot < 0) {
     Drop(kDropUnresolvedShader, Load32(base, dev + (vertex_slot < 0 ? kBoundVertexShader
                                                                      : kBoundPixelShader)));
+    return {};
+  }
+  // A shader switched off in the F2 overlay drops every draw that binds it,
+  // which is what answers "which shader draws this?".
+  if (GuestShaderDrawDisabled(vertex_slot, pixel_slot)) {
+    Drop(kDropShaderDisabled, uint32_t(vertex_slot) << 8 | uint32_t(pixel_slot));
     return {};
   }
   VertexDeclaration decl;
@@ -1144,6 +1160,16 @@ GuestVertexFill GuestDrawInline(uint8_t* base, const GuestInlineDraw& draw) {
   } else {
     commands->drawInstanced(draw.count, 1, 0, 0);
   }
+
+  uint64_t elapsed_ns = 0;
+  if (profiling) {
+    const auto delta = std::chrono::steady_clock::now() - started;
+    // Zero means "not profiling" to the registry, so a draw too fast for the
+    // clock is charged one nanosecond rather than being silently uncounted.
+    elapsed_ns = uint64_t(std::chrono::duration_cast<std::chrono::nanoseconds>(delta).count());
+    elapsed_ns = elapsed_ns != 0 ? elapsed_ns : 1;
+  }
+  NoteGuestShaderDraw(vertex_slot, pixel_slot, elapsed_ns);
   return fill;
 }
 
