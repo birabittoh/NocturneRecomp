@@ -89,6 +89,19 @@ REXCVAR_DEFINE_BOOL(vsync, true, "Video", "Enable vsync");
 REXCVAR_DEFINE_BOOL(guide_sign_in_at_startup, false, "Guide",
                     "Open the sign-in screen at startup when not signed in");
 
+// The SDK's hint toast, drawn in the Japanese font when the interface is
+// Japanese: PT Serif, the default, has no kana.
+class LocalizedHintToast : public rex::ui::HintToastDialog {
+ public:
+  using HintToastDialog::HintToastDialog;
+
+ protected:
+  void OnDraw(ImGuiIO& io) override {
+    const nocturne::UiFontScope font;
+    HintToastDialog::OnDraw(io);
+  }
+};
+
 class NocturnerecompApp : public rex::ReXApp {
  public:
   using rex::ReXApp::ReXApp;
@@ -588,7 +601,7 @@ class NocturnerecompApp : public rex::ReXApp {
     // through RuntimeConfig::startup_hint, which is fixed English before the
     // interface language is known.
     if (imgui_drawer()) {
-      startup_hint_ = std::make_unique<rex::ui::HintToastDialog>(imgui_drawer());
+      startup_hint_ = std::make_unique<LocalizedHintToast>(imgui_drawer());
       startup_hint_->Show(nocturne::Tr("settings", "startup_hint"));
     }
   }
@@ -622,7 +635,7 @@ class NocturnerecompApp : public rex::ReXApp {
   std::unique_ptr<rex::ui::ImGuiDialog> touch_controls_overlay_;
   std::unique_ptr<rex::ui::ImGuiDialog> movie_overlay_;
   std::unique_ptr<rex::ui::ImGuiDialog> ui_scale_applier_;
-  std::unique_ptr<rex::ui::HintToastDialog> startup_hint_;
+  std::unique_ptr<LocalizedHintToast> startup_hint_;
 
   std::filesystem::path user_settings_path() const { return user_data_root() / "settings.toml"; }
 };
