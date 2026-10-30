@@ -936,7 +936,7 @@ bool ModsScreen::Hit(ImVec2 min, ImVec2 max, Focus self, bool usable) {
 
 void ModsScreen::Plate(ImVec2 min, ImVec2 max, bool focused, bool picked, float a) {
   const float rounding = 6.0f * unit_;
-  draw_->AddRectFilled(min, max, IM_COL32(0, 0, 0, int((focused ? 150 : 100) * a)), rounding);
+  draw_->AddRectFilled(min, max, IM_COL32(0, 0, 0, int((focused ? 225 : 195) * a)), rounding);
   if (picked)
     draw_->AddRectFilled(min, max, Col(kAccent, 0.25f * a), rounding);
   draw_->AddRect(min, max, focused ? Col(kAccent, a) : IM_COL32(255, 255, 255, int(60 * a)),
@@ -992,7 +992,7 @@ void ModsScreen::List(Zone zone, int count, ImVec2 min, ImVec2 max, float row_he
     gesture_.scroll_start = scroll;
   }
 
-  draw_->AddRectFilled(min, max, IM_COL32(0, 0, 0, int(60 * alpha_)), 6.0f * unit_);
+  draw_->AddRectFilled(min, max, IM_COL32(0, 0, 0, int(150 * alpha_)), 6.0f * unit_);
   ImGui::PushClipRect(min, max, true);
   for (int i = 0; i < count; ++i) {
     const float y = min.y - scroll + float(i) * (row_height + gap);
@@ -1029,7 +1029,7 @@ bool ModsScreen::SideButton(ImVec2 min, ImVec2 max, Focus row, Part part, bool s
   ImGui::PopID();
   const float rounding = 6.0f * unit_;
   const float a = alpha_;
-  draw_->AddRectFilled(min, max, IM_COL32(0, 0, 0, int((hot ? 150 : 100) * a)), rounding);
+  draw_->AddRectFilled(min, max, IM_COL32(0, 0, 0, int((hot ? 225 : 195) * a)), rounding);
   if (hot)
     draw_->AddRectFilled(min, max, Col(glow, 0.3f * a), rounding);
   draw_->AddRect(min, max, hot ? Col(glow, a) : IM_COL32(255, 255, 255, int(60 * a)), rounding,

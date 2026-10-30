@@ -201,8 +201,12 @@ float CenteredText(ImDrawList* draw, ImFont* font, float size, float center_x, f
     if (wrap_at == begin)
       wrap_at = stop;
     const ImVec2 extent = font->CalcTextSizeA(size, FLT_MAX, 0.0f, begin, wrap_at);
-    draw->AddText(font, size, ImVec2(std::floor(center_x - extent.x * 0.5f), line_y), color, begin,
+    const ImVec2 at(std::floor(center_x - extent.x * 0.5f), line_y);
+    const float shadow = std::max(1.0f, size * 0.07f);
+    draw->AddText(font, size, ImVec2(at.x + shadow, at.y + shadow),
+                  IM_COL32(0, 0, 0, int(200 * ((color >> IM_COL32_A_SHIFT) & 0xFF) / 255.0f)), begin,
                   wrap_at);
+    draw->AddText(font, size, at, color, begin, wrap_at);
     line_y += size * 1.3f;
     begin = wrap_at;
     while (begin < stop && *begin == ' ')
@@ -487,6 +491,8 @@ class IntroDialog final : public rex::ui::ImGuiDialog {
 
       if (kVersionString[0] != '\0') {
         const std::string version = std::string("v") + kVersionString;
+        draw->AddText(font, 18.0f * unit, ImVec2(24.0f * unit + 1.5f * unit, 24.0f * unit + 1.5f * unit),
+                      IM_COL32(0, 0, 0, int(200 * body_in)), version.c_str());
         draw->AddText(font, 18.0f * unit, ImVec2(24.0f * unit, 24.0f * unit),
                       IM_COL32(255, 255, 255, int(255 * body_in)), version.c_str());
       }
@@ -588,7 +594,7 @@ class IntroDialog final : public rex::ui::ImGuiDialog {
     ImGui::PopID();
     const float rounding = 6.0f * unit;
     const float a = alpha * (install.in_progress ? 0.4f : 1.0f);
-    draw->AddRectFilled(min, max, IM_COL32(0, 0, 0, int((hovered ? 150 : 100) * a)), rounding);
+    draw->AddRectFilled(min, max, IM_COL32(0, 0, 0, int((hovered ? 225 : 195) * a)), rounding);
     draw->AddRect(min, max, Color(green, (hovered ? 1.0f : 0.7f) * a), rounding, 0,
                   std::max(1.0f, (hovered ? 2.0f : 1.0f) * unit));
     // Shrunk to fit the column.
@@ -695,10 +701,12 @@ class IntroDialog final : public rex::ui::ImGuiDialog {
         draw->AddCircle(dot, r, Color(kText, 0.45f * alpha), 0, std::max(1.0f, 1.5f * unit));
       }
       const float text_alpha = state == PhaseState::kActive   ? 1.0f
-                               : state == PhaseState::kDone   ? 0.85f
-                                                              : 0.4f;
-      draw->AddText(font, label_size, ImVec2(std::floor(cx - extent.x * 0.5f), top + 2.4f * r),
-                    Color(kText, text_alpha * alpha), name);
+                               : state == PhaseState::kDone   ? 0.95f
+                                                              : 0.6f;
+      const ImVec2 label_at(std::floor(cx - extent.x * 0.5f), top + 2.4f * r);
+      draw->AddText(font, label_size, ImVec2(label_at.x + 1.5f * unit, label_at.y + 1.5f * unit),
+                    IM_COL32(0, 0, 0, int(200 * text_alpha * alpha)), name);
+      draw->AddText(font, label_size, label_at, Color(kText, text_alpha * alpha), name);
     }
     float used = 2.4f * 6.0f * unit + label_size + 18.0f * unit;
 
@@ -725,7 +733,7 @@ class IntroDialog final : public rex::ui::ImGuiDialog {
                            Color(kText, alpha), work_title_);
     if (!work_detail_.empty())
       used += CenteredText(draw, font, 18.0f * unit, size.x * 0.5f, top + used, wrap,
-                           Color(kText, 0.6f * alpha), work_detail_);
+                           Color(kText, 0.85f * alpha), work_detail_);
     return used;
   }
 
@@ -1005,7 +1013,7 @@ class IntroDialog final : public rex::ui::ImGuiDialog {
                               Color(kAccent, 0.09f * fade * fade * pulse * a), rounding + grow);
         }
       }
-      draw->AddRectFilled(min, max, IM_COL32(0, 0, 0, int((active ? 150 : 100) * a)), rounding);
+      draw->AddRectFilled(min, max, IM_COL32(0, 0, 0, int((active ? 225 : 195) * a)), rounding);
       if (picked)
         draw->AddRectFilled(min, max, Color(kAccent, 0.25f * a), rounding);
       if (corner && active)
@@ -1090,7 +1098,7 @@ class IntroDialog final : public rex::ui::ImGuiDialog {
     ImGui::PopID();
     const float a = alpha * (usable && !working_ && !busy_ ? 1.0f : 0.4f);
     const float rounding = 6.0f * unit;
-    draw->AddRectFilled(min, max, IM_COL32(0, 0, 0, int((hot ? 150 : 100) * a)), rounding);
+    draw->AddRectFilled(min, max, IM_COL32(0, 0, 0, int((hot ? 225 : 195) * a)), rounding);
     if (hot)
       draw->AddRectFilled(min, max, Color(kQuitRed, 0.3f * a), rounding);
     draw->AddRect(min, max, hot ? Color(kQuitRed, a) : IM_COL32(255, 255, 255, int(60 * a)), rounding,
@@ -1186,7 +1194,7 @@ class IntroDialog final : public rex::ui::ImGuiDialog {
     if (!Library() && prompt_.confirm.empty())
       text += std::string("\n") + Tr(IntroText::kDialogNeedsMouse);
     CenteredText(draw, font, 17.0f * unit, size.x * 0.5f, size.y - 112.0f * unit,
-                 std::min(640.0f * unit, size.x - 32.0f), Color(kText, 0.7f * alpha), text);
+                 std::min(640.0f * unit, size.x - 32.0f), Color(kText, 0.9f * alpha), text);
   }
 
   static bool MouseMoved() {
@@ -1266,7 +1274,7 @@ class IntroDialog final : public rex::ui::ImGuiDialog {
     draw->AddText(font, caption, ImVec2(min.x, min.y - caption * 1.4f), Color(kText, 0.6f * a),
                   Tr(IntroText::kLanguage));
     const bool focused = on_picker_ || picker_open_;
-    draw->AddRectFilled(min, max, IM_COL32(0, 0, 0, int((focused ? 150 : 100) * a)), rounding);
+    draw->AddRectFilled(min, max, IM_COL32(0, 0, 0, int((focused ? 225 : 195) * a)), rounding);
     draw->AddRect(min, max, focused ? Color(kAccent, a) : IM_COL32(255, 255, 255, int(60 * a)),
                   rounding, 0, std::max(1.0f, (focused ? 2.0f : 1.0f) * unit));
     const char* name = IntroLanguageName(current);
@@ -1342,7 +1350,7 @@ class IntroDialog final : public rex::ui::ImGuiDialog {
     const bool on = IntroMusicEnabled();
     const bool hovered = ImGui::IsItemHovered() || focused;
     const float a = alpha;
-    draw->AddRectFilled(min, max, IM_COL32(0, 0, 0, int((hovered ? 150 : 100) * a)), 6.0f * unit);
+    draw->AddRectFilled(min, max, IM_COL32(0, 0, 0, int((hovered ? 225 : 195) * a)), 6.0f * unit);
     draw->AddRect(min, max, hovered ? Color(kAccent, a) : IM_COL32(255, 255, 255, int(60 * a)),
                   6.0f * unit, 0, std::max(1.0f, (hovered ? 2.0f : 1.0f) * unit));
 
