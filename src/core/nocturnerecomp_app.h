@@ -27,8 +27,10 @@
 #include <rex/version.h>
 #include <rex/ui/imgui_drawer.h>
 #include <rex/ui/imgui_theme.h>
+#include <rex/ui/overlay/hint_toast.h>
 #include <rex/ui/overlay/shader_debugger_overlay.h>
 #include <rex/ui/presenter.h>
+#include <rex/ui/ui_text.h>
 #include <rex/ui/window.h>
 #include <rexglue_guide/guide.h>
 
@@ -113,8 +115,9 @@ class NocturnerecompApp : public rex::ReXApp {
     // Called after FinishGameDataPaths has latched the mounted version.
     config.game_targets = nocturne::GameTargets;
 
-    // One-shot toast shown top-left as the game starts
-    config.startup_hint = "Press F4 to open settings.";
+    // The SDK's own overlays (mod manager, shader debugger, F3 debug) ask this
+    // for their text; null keeps their English.
+    rex::ui::SetUiTextProvider(&nocturne::SdkUiText);
 
     // This project renders the guest itself (src/gpu), so the SDK stays
     // headless. An older config file can still name a plugin; clearing it here,
@@ -569,6 +572,14 @@ class NocturnerecompApp : public rex::ReXApp {
     nocturne::PlumeSetOverlayDrawer(imgui_drawer());
     window()->app_context().CallInUIThreadSynchronous(
         [this] { nocturne::InitNativeRenderer(window()); });
+
+    // One-shot toast shown top-left as the game starts. Made here rather than
+    // through RuntimeConfig::startup_hint, which is fixed English before the
+    // interface language is known.
+    if (imgui_drawer()) {
+      startup_hint_ = std::make_unique<rex::ui::HintToastDialog>(imgui_drawer());
+      startup_hint_->Show(nocturne::Tr("settings", "startup_hint"));
+    }
   }
 
   // The host swap chain follows the window. Only records the request: this
@@ -600,6 +611,7 @@ class NocturnerecompApp : public rex::ReXApp {
   std::unique_ptr<rex::ui::ImGuiDialog> touch_controls_overlay_;
   std::unique_ptr<rex::ui::ImGuiDialog> movie_overlay_;
   std::unique_ptr<rex::ui::ImGuiDialog> ui_scale_applier_;
+  std::unique_ptr<rex::ui::HintToastDialog> startup_hint_;
 
   std::filesystem::path user_settings_path() const { return user_data_root() / "settings.toml"; }
 };
