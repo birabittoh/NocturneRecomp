@@ -34,6 +34,10 @@ bool JpVoicesAvailable();
 // After the image is mapped and before the guest starts.
 void InstallJpVoices(rex::Runtime* runtime);
 
+// JP's voices are what plays: linked over World's, or JP's folder is the one
+// mounted.
+bool JpVoicesPlaying();
+
 // Applies a voices or language change: the tables and the link switch over, and
 // each bank plays the new choice from its next load. Runs from the per-frame
 // hook (GraphicsSettings_PerFrame), on the thread that loads the banks, so a

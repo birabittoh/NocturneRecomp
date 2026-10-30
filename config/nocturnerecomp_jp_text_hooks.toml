@@ -1,0 +1,55 @@
+# JP's Japanese PS1-side text on World's code, included by
+# nocturnerecomp_manifest.toml. Each hook does nothing unless the PS1 side is in
+# Japanese with JP's text in place (and the setting it follows asks for it).
+# See src/jp/jp_text.h.
+
+# The prologue scroll. sub_823A6CA8 keeps the text it is given (r3) and picks a
+# starting column by language; sub_823A6F38 tests `language == 1` before each
+# character to take the Shift-JIS path. With JP's prologue (the original
+# English one) the text, the column and both tests are JP's.
+[[midasm_hook]]
+address = 0x823A6CB4
+name = "JpTextPrologueText"
+registers = ["r3"]
+
+[[midasm_hook]]
+address = 0x823A6D7C
+name = "JpTextPrologueColumn"
+
+[[midasm_hook]]
+address = 0x823A6FDC
+name = "JpTextPrologueLanguage"
+registers = ["r8"]
+
+[[midasm_hook]]
+address = 0x823A73CC
+name = "JpTextPrologueLanguage"
+registers = ["r9"]
+
+# The PS1 file select (src/jp/jp_file_select.cpp). sub_8239B508 draws a line of
+# text unless it already shows; on lines 4 and 5 (the messages) JP's wording.
+[[midasm_hook]]
+address = 0x8239B508
+name = "JpFileSelectDrawLine"
+registers = ["r3"]
+return_on_true = true
+
+# sub_82394FF8(card, slot, line): a slot's three lines, JP's way.
+[[midasm_hook]]
+address = 0x82394FF8
+name = "JpFileSelectDrawSlot"
+registers = ["r3"]
+return_on_true = true
+
+# sub_82395228: World's small-font area name beside a slot, which JP lacks.
+[[midasm_hook]]
+address = 0x82395228
+name = "JpFileSelectDrawSlotArea"
+registers = ["r3"]
+return_on_true = true
+
+# sub_8239AEC8(text, line), on entry: the menu options in JP's words.
+[[midasm_hook]]
+address = 0x8239AEC8
+name = "JpFileSelectMenuOption"
+registers = ["r3"]

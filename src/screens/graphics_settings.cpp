@@ -33,6 +33,7 @@
 
 #include "core/function_hooks.h"
 #include "jp/jp_artwork.h"
+#include "jp/jp_text.h"
 #include "jp/jp_voices.h"
 #include "screens/language_switch.h"
 #include "game/player_status.h"
@@ -1177,6 +1178,7 @@ extern "C" void GraphicsSettings_PerFrame(PPCContext& ctx, uint8_t* base) {
   ApplyPendingLanguageSwitch(ctx, base);
   ApplyPendingArtwork(base);
   ApplyPendingVoices();
+  ApplyPendingJpText();
 
   ApplyRequestedPreset(ctx, base);
   ApplyPendingCustomRatioRequest(base);

@@ -105,6 +105,7 @@
 #include "core/settings.h"
 #include "core/target.h"
 #include "jp/jp_artwork.h"
+#include "jp/jp_text.h"
 #include "jp/jp_voices.h"
 
 #include <fmt/format.h>
@@ -607,10 +608,16 @@ constexpr NativeText kReleaseTexts[3] = {NativeText{"release_auto"}, NativeText{
                                          NativeText{"release_world"}};
 constexpr NativeText kVoicesLabel{"voices_label"};
 constexpr NativeText kArtworkLabel{"artwork_label"};
+constexpr NativeText kPrologueLabel{"prologue_label"};
 constexpr NativeText kChoiceNeedsBoth{"choice_needs_both"};
 
 bool ReleaseChoiceAvailable(const OptionRow& row) {
-  return std::string_view(row.cvar) == "voices" ? JpVoicesAvailable() : JpArtworkAvailable();
+  const std::string_view cvar = row.cvar;
+  if (cvar == "voices")
+    return JpVoicesAvailable();
+  if (cvar == "prologue")
+    return JpPrologueAvailable();
+  return JpArtworkAvailable();
 }
 
 bool ReleaseChoiceLocked(const OptionRow& row) {
@@ -657,7 +664,8 @@ constexpr uint32_t kFullscreenRow = kVanillaRowCount;
 constexpr uint32_t kLanguageRow = kVanillaRowCount + kFullscreenRows;
 constexpr uint32_t kVoicesRow = kLanguageRow + 1;
 constexpr uint32_t kArtworkRow = kLanguageRow + 2;
-constexpr uint32_t kSettingsRowCount = kLanguageRow + 3;
+constexpr uint32_t kPrologueRow = kLanguageRow + 3;
+constexpr uint32_t kSettingsRowCount = kLanguageRow + 4;
 
 constexpr OptionRow kSettingsRows[] = {
     {
@@ -744,6 +752,19 @@ constexpr OptionRow kSettingsRows[] = {
         .live = true,
         .locked = &ReleaseChoiceLocked,
         .tooltip = NativeText{"tip_artwork"},
+    },
+    {
+        .list_row = kPrologueRow,
+        .label = kPrologueLabel,
+        .value_count = 3,
+        .values = kReleaseTexts,
+        .get = &GetReleaseChoice,
+        .commit = &CommitReleaseChoice,
+        .reset = &ResetReleaseChoice,
+        .cvar = "prologue",
+        .live = true,
+        .locked = &ReleaseChoiceLocked,
+        .tooltip = NativeText{"tip_prologue"},
     },
 };
 

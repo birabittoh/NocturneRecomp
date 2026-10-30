@@ -46,6 +46,7 @@
 #include "game/fast_forward.h"
 #include "text/font_overlay.h"
 #include "jp/jp_artwork.h"
+#include "jp/jp_text.h"
 #include "jp/jp_voices.h"
 #include "gen/fonts.generated.h"
 #include "game_data.h"
@@ -362,6 +363,10 @@ class NocturnerecompApp : public rex::ReXApp {
 
     // JP's artwork over World's, switched live (see jp_artwork.h).
     nocturne::BindJpArtwork();
+
+    // JP's Japanese PS1-side text and glyphs where World's are unfinished
+    // (see jp_text.h).
+    nocturne::InstallJpText(runtime());
 
     // The constructor is what registers the Android back button bind.
     host_menu_ = std::make_unique<nocturne::HostMenu>(window());

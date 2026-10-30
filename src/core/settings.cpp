@@ -8,6 +8,7 @@
 #include "screens/graphics_settings.h"
 #include "host_menu.h"
 #include "jp/jp_artwork.h"
+#include "jp/jp_text.h"
 #include "jp/jp_voices.h"
 #include "core/target.h"
 #include "rando/rando_runtime.h"
@@ -172,11 +173,12 @@ constexpr std::array<const char*, 4> kEnhancementTabs = {
 // <cvar> and <cvar>_desc.
 constexpr std::array<const char*, 2> kIntroSkipCvarNames = {"skip_intros", "skip_richter"};
 
-constexpr std::array<const char*, 17> kBasicCvarNames = {
+constexpr std::array<const char*, 18> kBasicCvarNames = {
     "fullscreen",       "vsync",         "user_language",
     "gpu_backend",      "vulkan_device", "audio_mute",      "audio_volume",
     "graphics_style_enhanced", "touch_controls", "touch_movement", "touch_function_keys", "touch_scale",
-    "touch_opacity", "touch_hide_delay", "voices", "artwork", "ui_scale"};
+    "touch_opacity", "touch_hide_delay", "voices", "artwork", "prologue",
+    "ui_scale"};
 
 constexpr std::array kUiScaleSteps = {0.75, 1.0, 1.25, 1.5, 1.75, 2.0, 2.5, 3.0};
 
@@ -400,6 +402,7 @@ class CuratedSettingsDialog : public rex::ui::ImGuiDialog {
     DrawLanguageRow();
     DrawReleaseChoiceRow("voices", Tr("settings", "voices"), JpVoicesAvailable());
     DrawReleaseChoiceRow("artwork", Tr("settings", "artwork"), JpArtworkAvailable());
+    DrawReleaseChoiceRow("prologue", Tr("settings", "prologue"), JpPrologueAvailable());
     DrawStartScreenRow();
 
     ImGui::SeparatorText(Tr("settings", "section_audio"));

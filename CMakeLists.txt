@@ -374,6 +374,8 @@ set(NOCTURNERECOMP_SOURCES
     src/core/host_timer_resolution.cpp
     src/hooks/intro_skips.cpp
     src/jp/jp_artwork.cpp
+    src/jp/jp_file_select.cpp
+    src/jp/jp_text.cpp
     src/jp/jp_voices.cpp
     src/screens/language_switch.cpp
     src/text/latin1_font.cpp

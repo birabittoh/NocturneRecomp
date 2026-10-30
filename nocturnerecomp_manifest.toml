@@ -16,5 +16,6 @@ includes = [
   "config/nocturnerecomp_rando_hooks.toml",
   "config/nocturnerecomp_xact_hooks.toml",
   "config/nocturnerecomp_jp_voices_hooks.toml",
+  "config/nocturnerecomp_jp_text_hooks.toml",
   "config/nocturnerecomp_movie_hooks.toml",
 ]

@@ -231,6 +231,10 @@ bool JpVoicesAvailable() {
   return JpOverlaysAvailable();
 }
 
+bool JpVoicesPlaying() {
+  return g_linked || (!JpDir().empty() && !JpOverlaysAvailable());
+}
+
 void InstallJpVoices(rex::Runtime* runtime) {
   if (!JpVoicesAvailable() || !runtime || !runtime->file_system())
     return;
