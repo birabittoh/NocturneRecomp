@@ -187,6 +187,16 @@ add_custom_command(
     VERBATIM
 )
 
+# Our changes to the submodules (patches/<submodule>/*.patch) go onto their
+# working trees before anything reads them; scripts/apply-patches.py is idempotent.
+execute_process(
+    COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/scripts/apply-patches.py
+    RESULT_VARIABLE NOCTURNE_PATCHES_RESULT
+)
+if(NOT NOCTURNE_PATCHES_RESULT EQUAL 0)
+    message(FATAL_ERROR "Applying patches/ to the submodules failed")
+endif()
+
 # The randomizer's code patches compiled into hooks (see src/rando/rando_hooks.h):
 # translated from the instructions in assets/default.xex and the core's code
 # caves. src/gen/rando_hooks.generated.cpp is a gitignored build artifact; the
