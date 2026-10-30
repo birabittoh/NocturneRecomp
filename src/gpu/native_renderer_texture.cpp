@@ -10,9 +10,12 @@
 #include <utility>
 #include <vector>
 
+#include <rex/cvar.h>
+#include <rex/graphics/pipeline/texture/replacement.h>
 #include <rex/logging.h>
-#include <rex/system/xmemory.h>
 #include <rex/memory/utils.h>
+#include <rex/runtime.h>
+#include <rex/system/xmemory.h>
 
 namespace nocturne {
 namespace {
@@ -291,6 +294,11 @@ struct MirroredTexture {
   // The frame serial the source was last hashed in: at most once a frame.
   uint64_t hashed_frame = ~0ull;
   bool failed = false;
+  // Whether the host texture is a mod's image, which has its own extent and
+  // format. See the replacement section.
+  bool replaced = false;
+  uint32_t replaced_width = 0;
+  uint32_t replaced_height = 0;
 };
 
 // Everything that changes how the bytes are read is in the key, so a texture
@@ -355,6 +363,113 @@ bool Upload(RenderCommandList* commands, const TextureFetch& fetch, const Format
                      RenderTextureBarrier(entry.texture.get(), RenderTextureLayout::SHADER_READ));
   g_staging[g_slot].push_back(std::move(staging));
   return true;
+}
+
+// ---------------------------------------------------------------------------
+// Replacement
+//
+// The SDK's content hash scheme, as Eternal Sonata's mirror carries it:
+// mods/<name>/textures/<hash16>.png|.dds, keyed by an XXH3 of level 0's guest
+// bytes (tiled, big endian, as the game loaded them), so the key follows a
+// texture's contents rather than its address. A match replaces the host
+// texture at the image's own extent. The guest keeps its fetch constant and
+// the shaders sample with normalized coordinates, so nothing else has to know.
+//
+// Colour formats only, and a single mip level (the sampler never leaves level
+// 0). There is no dump path here: the SDK's own dumper names files the same
+// way.
+
+using rex::graphics::TextureReplacement;
+using rex::graphics::TextureReplacementData;
+
+constexpr uint32_t kMaxReplacementExtent = 16384;
+
+std::unique_ptr<TextureReplacement> g_replacement;
+bool g_replacement_initialized = false;
+uint64_t g_replaced = 0;
+
+// Textures swapped out for a different extent or format. Descriptor sets the
+// draw path cached still point at them, so they live until shutdown.
+std::vector<std::unique_ptr<RenderTexture>> g_retired;
+
+bool ReplaceableFormat(uint32_t format) {
+  return format == 3 || format == 4 || format == 6 || (format >= 18 && format <= 20);
+}
+
+// Null when no enabled mod ships textures, so the hash is only paid for when
+// something can use it.
+TextureReplacement* ActiveReplacement() {
+  if (!g_replacement_initialized) {
+    g_replacement_initialized = true;
+    if (rex::Runtime* runtime = rex::Runtime::instance())
+      g_replacement = std::make_unique<TextureReplacement>(runtime->ModOverlayRoots("textures"),
+                                                           runtime->ModDumpRoot());
+  }
+  if (!g_replacement || g_replacement->mod_roots().empty())
+    return nullptr;
+  return g_replacement.get();
+}
+
+// Upload a replacement's RGBA8 pixels, into the entry's texture when it already has
+// that extent and format, as after a refresh.
+bool UploadReplacement(RenderCommandList* commands, const TextureReplacementData& data,
+                       MirroredTexture& entry) {
+  RenderDevice* device = PlumeDevice();
+  const uint32_t row_bytes = AlignUp(data.width * 4, kUploadRowAlignment);
+  const uint64_t bytes = uint64_t(row_bytes) * data.height;
+  auto staging = device->createBuffer(RenderBufferDesc::UploadBuffer(bytes));
+  if (!staging)
+    return false;
+  auto* mapped = static_cast<uint8_t*>(staging->map());
+  if (mapped == nullptr)
+    return false;
+  for (uint32_t y = 0; y < data.height; ++y)
+    std::memcpy(mapped + size_t(y) * row_bytes, data.pixels.data() + size_t(y) * data.width * 4,
+                size_t(data.width) * 4);
+  staging->unmap();
+
+  const bool fits = entry.texture && entry.replaced && entry.replaced_width == data.width &&
+                    entry.replaced_height == data.height;
+  if (!fits) {
+    auto created = device->createTexture(RenderTextureDesc::Texture2D(
+        data.width, data.height, 1, RenderFormat::R8G8B8A8_UNORM));
+    if (!created)
+      return false;
+    if (entry.texture)
+      g_retired.push_back(std::move(entry.texture));
+    entry.texture = std::move(created);
+  }
+  commands->barriers(RenderBarrierStage::COPY,
+                     RenderTextureBarrier(entry.texture.get(), RenderTextureLayout::COPY_DEST));
+  commands->copyTextureRegion(
+      RenderTextureCopyLocation::Subresource(entry.texture.get()),
+      RenderTextureCopyLocation::PlacedFootprint(staging.get(), RenderFormat::R8G8B8A8_UNORM,
+                                                 data.width, data.height, 1, row_bytes / 4));
+  commands->barriers(RenderBarrierStage::GRAPHICS,
+                     RenderTextureBarrier(entry.texture.get(), RenderTextureLayout::SHADER_READ));
+  g_staging[g_slot].push_back(std::move(staging));
+  entry.replaced = true;
+  entry.replaced_width = data.width;
+  entry.replaced_height = data.height;
+  return true;
+}
+
+// The mod image for `source`'s level 0, or null.
+const TextureReplacementData* FindReplacementImage(const TextureFetch& fetch,
+                                                   const uint8_t* source, uint64_t bytes,
+                                                   uint64_t& hash) {
+  if (!ReplaceableFormat(fetch.format))
+    return nullptr;
+  TextureReplacement* replacement = ActiveReplacement();
+  if (replacement == nullptr)
+    return nullptr;
+  hash = TextureReplacement::HashGuestData(source, size_t(bytes));
+  const TextureReplacementData* image = replacement->FindReplacement(hash);
+  if (image == nullptr || image->width == 0 || image->height == 0 ||
+      image->width > kMaxReplacementExtent || image->height > kMaxReplacementExtent ||
+      image->pixels.size() < size_t(image->width) * image->height * 4)
+    return nullptr;
+  return image;
 }
 
 RenderTextureAddressMode MapClamp(uint32_t clamp) {
@@ -456,6 +571,25 @@ RenderTexture* MirrorTexture(RenderCommandList* commands, uint8_t* base,
   if (entry.texture && hash == entry.hash)
     return entry.texture.get();
   const bool refresh = entry.texture != nullptr;
+
+  uint64_t content_hash = 0;
+  if (const TextureReplacementData* image =
+          FindReplacementImage(fetch, source, layout.source_bytes, content_hash)) {
+    if (UploadReplacement(commands, *image, entry)) {
+      entry.hash = hash;
+      if (++g_replaced <= 32)
+        REXLOG_INFO("native_renderer: replaced {}x{} fmt {} texture {:016x} with a {}x{} image",
+                    fetch.width, fetch.height, fetch.format, content_hash, image->width,
+                    image->height);
+      return entry.texture.get();
+    }
+  }
+  // The decode only refreshes in place a texture it made itself.
+  if (entry.replaced) {
+    if (entry.texture)
+      g_retired.push_back(std::move(entry.texture));
+    entry.replaced = false;
+  }
   if (!Upload(commands, fetch, info, layout, source, entry)) {
     entry.failed = true;
     REXLOG_WARN("native_renderer: could not upload texture {}x{} format {} at {:08X}", fetch.width,
@@ -504,6 +638,8 @@ void ShutdownTextureMirror() {
   REXLOG_INFO("native_renderer: texture mirror: {} textures, {} uploads, {} refreshes",
               g_textures.size(), g_uploads, g_refreshes);
   g_textures.clear();
+  g_retired.clear();
+  g_replacement.reset();
   g_samplers.clear();
   for (auto& staging : g_staging)
     staging.clear();
