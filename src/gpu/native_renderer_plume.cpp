@@ -13,6 +13,8 @@
 #include <string>
 #include <vector>
 
+#include <SDL3/SDL.h>
+
 #include <rex/cvar.h>
 #include <rex/logging.h>
 #include <rex/ui/ui_drawer.h>
@@ -351,7 +353,6 @@ void GrowReleaseSemaphores() {
     g_backend.release_semaphores.push_back(g_backend.device->createCommandSemaphore());
 }
 
-#ifdef _WIN32
 // DXGI_ERROR_DEVICE_REMOVED / _HUNG / _RESET / _DRIVER_INTERNAL_ERROR, and
 // VK_ERROR_DEVICE_LOST.
 bool IsDeviceLostCode(uint32_t code) {
@@ -368,9 +369,10 @@ bool DeviceLost() {
 }
 
 // A lost device never comes back, and nothing here rebuilds one, so the window
-// would sit frozen on its last frame with every input dead. Say so, and offer
-// the other backend, which is what gets a player past a driver that only
-// misbehaves under one API. Asked once; runs on the guest GPU thread, which has
+// would sit frozen on its last frame with every input dead. Say so. On Windows
+// the other backend is offered, which is what gets a player past a driver that
+// only misbehaves under one API; elsewhere Vulkan is the only backend, so the
+// game just closes. Asked once; runs on the guest GPU thread, which has
 // nothing left to draw anyway.
 void PromptDeviceLost() {
   static bool prompted = false;
@@ -378,6 +380,7 @@ void PromptDeviceLost() {
     return;
   prompted = true;
 
+#ifdef _WIN32
   const bool on_vulkan = g_backend.api_name == "Vulkan";
   const char* other_name = on_vulkan ? "d3d12" : "vulkan";
   const char* other_label = on_vulkan ? "D3D12" : "Vulkan";
@@ -391,14 +394,18 @@ void PromptDeviceLost() {
   const int answer = MessageBoxW(nullptr, reinterpret_cast<const wchar_t*>(wide_message.c_str()),
                                  reinterpret_cast<const wchar_t*>(wide_title.c_str()),
                                  MB_YESNO | MB_ICONERROR | MB_SETFOREGROUND | MB_TOPMOST);
-  if (answer == IDYES) {
-    rex::cvar::SetFlagByName("gpu_backend", other_name, /*persist=*/true);
-    if (RestartNow())
-      return;
-  }
+  if (answer == IDYES && SaveGpuBackend(other_name) && RestartNow())
+    return;
+  if (answer == IDYES)
+    REXLOG_ERROR("native_renderer: could not switch gpu_backend to {}", other_name);
+#else
+  REXLOG_ERROR("native_renderer: the {} device was lost; closing", g_backend.api_name);
+  const std::string message = TrArgs("renderer", "device_lost_closing", {g_backend.api_name});
+  const std::string title = Tr("renderer", "device_lost_title");
+  SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_ERROR, title.c_str(), message.c_str(), nullptr);
+#endif
   QuitNow();
 }
-#endif
 
 void ApplyResize() {
   if (!g_backend.swap_chain->resize()) {
@@ -795,10 +802,8 @@ void PlumePresentFrame() {
   ++g_frames_presented;
   if (have_swap_chain)
     SettleWindowSize();
-#ifdef _WIN32
   if (have_swap_chain && (g_present_failures != 0 || g_resize_failures != 0) && DeviceLost())
     PromptDeviceLost();
-#endif
   if (g_frames_presented % 600 == 0) {
     REXLOG_DEBUG(
         "native_renderer: Plume presented {} frames ({} acquire failures, {} present failures, "

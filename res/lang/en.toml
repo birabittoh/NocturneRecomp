@@ -262,6 +262,7 @@ rando_candles = "Candles"
 [renderer]
 device_lost_title = "Graphics Device Lost"
 device_lost = "The graphics driver stopped responding while running on {}, and the game cannot continue.\n\nSwitch to {} and restart? You can change this later in Settings.\n\nChoose No to close the game."
+device_lost_closing = "The graphics driver stopped responding while running on {}, and the game cannot continue.\n\nThe game will now close."
 
 [intro]
 start = "Start"

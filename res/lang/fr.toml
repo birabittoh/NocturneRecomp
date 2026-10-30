@@ -256,6 +256,7 @@ rando_candles = "Bougies"
 [renderer]
 device_lost_title = "Périphérique graphique perdu"
 device_lost = "Le pilote graphique ne répond plus avec {} et le jeu ne peut pas continuer.\n\nPasser à {} et redémarrer ? Vous pourrez le modifier plus tard dans les Paramètres.\n\nChoisissez Non pour fermer le jeu."
+device_lost_closing = "Le pilote graphique ne répond plus avec {} et le jeu ne peut pas continuer.\n\nLe jeu va se fermer."
 
 [intro]
 start = "Démarrer"

@@ -257,6 +257,7 @@ rando_candles = "Candele"
 [renderer]
 device_lost_title = "Dispositivo grafico perso"
 device_lost = "Il driver grafico ha smesso di rispondere con {} e il gioco non può continuare.\n\nPassare a {} e riavviare? Potrai cambiarlo più tardi nelle Impostazioni.\n\nScegli No per chiudere il gioco."
+device_lost_closing = "Il driver grafico ha smesso di rispondere con {} e il gioco non può continuare.\n\nIl gioco verrà chiuso."
 
 [intro]
 start = "Avvia"

@@ -1187,6 +1187,14 @@ void PersistWindowSize() {
   rex::cvar::SaveConfigSubset(g_user_settings_path, {"window_width", "window_height"});
 }
 
+bool SaveGpuBackend(std::string_view backend) {
+  if (g_user_settings_path.empty() || !rex::cvar::SetFlagByName("gpu_backend", backend, /*persist=*/true))
+    return false;
+  // SetFlagByName only marks the cvar; the next launch reads settings.toml.
+  rex::cvar::SaveConfigSubset(g_user_settings_path, BasicCvarNames());
+  return true;
+}
+
 bool RestartNow() {
 #if REX_PLATFORM_ANDROID
   // Replaces the process itself, so there is no window left to close here.

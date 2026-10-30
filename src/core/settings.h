@@ -139,6 +139,11 @@ void MarkCvarLive(std::string_view name);
 // The window and settings file PersistWindowSize acts on. Call at startup.
 void BindWindowTarget(rex::ui::Window* window, std::filesystem::path user_settings_path);
 
+// Sets gpu_backend ("d3d12" or "vulkan") and writes it to settings.toml, so the
+// next launch uses it. False, changing nothing on disk, if the value is refused
+// or BindWindowTarget has not run yet.
+bool SaveGpuBackend(std::string_view backend);
+
 // Relaunches the game and closes this instance, so the next launch picks up the
 // restart-scoped cvars changed this session. Safe from any thread (the close is
 // marshalled onto the UI thread). False, doing nothing, if the relaunch could
