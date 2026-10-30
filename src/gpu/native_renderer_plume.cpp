@@ -540,6 +540,8 @@ bool InitPlumeBackend(void* window_handle, void* window_view) {
   if (const char* api_override = std::getenv("NOCTURNE_RENDER_API"))
     backend = api_override;
   const bool force_vulkan = backend == "vulkan" || backend == "Vulkan" || backend == "vk";
+  REXLOG_INFO("native_renderer: gpu_backend is \"{}\"{}", backend,
+              std::getenv("NOCTURNE_RENDER_API") ? " (from NOCTURNE_RENDER_API)" : "");
   if (force_vulkan) {
     g_backend.render_interface = CreateVulkanInterface();
     g_backend.api_name = "Vulkan";
