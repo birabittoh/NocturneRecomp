@@ -162,6 +162,7 @@ release archive for the host platform; macOS `.dmg` files come from
 
 - [ReXGlue SDK](https://github.com/rexglue/rexglue-sdk)
 - [MottZilla's Randomizer](https://github.com/MottZilla/SOTN_XB_RANDO/)
+- [SOTN Decomp](https://github.com/xeeynamo/sotn-decomp)
 
 ## License
 
