@@ -283,13 +283,6 @@ def main():
             "-DCMAKE_CXX_COMPILER_LAUNCHER=sccache",
         ]
 
-    lib_suffix = lib_extension()
-    to_remove = [exe_name] + [f for f in os.listdir(".") if f.endswith(lib_suffix)]
-    for name in to_remove:
-        if os.path.isfile(name):
-            print(f"+ rm {name}")
-            os.remove(name)
-
     stamp_path = os.path.join("out", "codegen.stamp")
     new_hash = compute_codegen_hash(load_manifest(manifest_path), manifest_path)
     generated_present = os.path.exists(os.path.join("generated", "sources.cmake"))
@@ -315,6 +308,17 @@ def main():
         run(["cmake", "--build", "--preset", preset, "--parallel", str(os.cpu_count() or 1)])
     finally:
         blank_manifest_sdk_version(manifest_path)
+
+    if not os.path.exists(build_output):
+        print(f"error: build output not found at '{build_output}'", file=sys.stderr)
+        sys.exit(1)
+
+    lib_suffix = lib_extension()
+    to_remove = [exe_name] + [f for f in os.listdir(".") if f.endswith(lib_suffix)]
+    for name in to_remove:
+        if os.path.isfile(name):
+            print(f"+ rm {name}")
+            os.remove(name)
 
     print(f"+ cp {build_output} {exe_name}")
     shutil.copy2(build_output, exe_name)
