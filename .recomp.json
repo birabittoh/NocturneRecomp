@@ -1,0 +1,38 @@
+{
+  "$schema": "https://recomp.fyi/schema/v1.json",
+  "game": "Castlevania: Symphony of the Night",
+  "wikidata": "Q2007022",
+  "system": "Xbox 360",
+  "type": "recomp",
+  "project": "NocturneRecomp",
+  "toolchain": "ReXGlue SDK",
+  "approach": "Static recompilation of the Xbox Live Arcade PowerPC executable into native code, featuring a native renderer, randomizer and mod support.",
+  "status": "released",
+  "targets": [
+    "Windows",
+    "Linux",
+    "macOS",
+    "Android"
+  ],
+  "original": {
+    "region": "World",
+    "sha1": "88055ecfb131042522a28c9211b760f4d3ec4547"
+  },
+  "maintainers": [
+    {
+      "name": "BiRabittoh",
+      "link": "https://github.com/birabittoh"
+    }
+  ],
+  "links": [
+    {
+      "label": "Goopie",
+      "url": "https://goopie.xyz/#/library/nocturnerecomp"
+    },
+    {
+      "label": "Discord",
+      "url": "https://discord.gg/DJe2pXMH7S"
+    }
+  ],
+  "notes": "Building from source needs the World default.xex; game assets can come from the World or Japanese Xbox Live Arcade release."
+}
