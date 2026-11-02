@@ -90,9 +90,11 @@
 #include <algorithm>
 #include <array>
 #include <bit>
+#include <chrono>
 #include <cmath>
 #include <cstdint>
 #include <cstdlib>
+#include <cstring>
 #include <filesystem>
 #include <iterator>
 #include <string>
@@ -112,6 +114,8 @@
 #include <fmt/ranges.h>
 
 #include <rex/cvar.h>
+#include <rex/input/input.h>
+#include <rex/input/input_system.h>
 #include <rex/logging.h>
 #include <rex/memory/utils.h>
 #include <rex/platform.h>
@@ -2323,6 +2327,99 @@ void PushRightArrowPastValue(PPCContext& ctx, uint8_t* base, uint32_t screen) {
   }
 }
 
+// Holding left or right keeps cycling the selected row.
+//
+// The screen gets one left/right message per press: the list's handler
+// (sub_825D4A58) steps the row once for message button 0 (left) or 1
+// (right), and nothing repeats while the button stays down. So while one is
+// held past kRepeatDelay, this posts the same message to the screen every
+// kRepeatInterval, through the screen's own event handler, which plays the
+// sound and runs NativeOptions_CycleRow exactly as a press would.
+//
+// Only a hold that started while the screen was updating counts, so one
+// carried over from the screen before (or a dialog over this one) doesn't
+// start cycling the moment it opens.
+constexpr uint32_t kMsgButtonLeft = 0;
+constexpr uint32_t kMsgButtonRight = 1;
+constexpr auto kRepeatDelay = std::chrono::milliseconds(400);
+constexpr auto kRepeatInterval = std::chrono::milliseconds(90);
+constexpr int16_t kStickThreshold = 16384;
+constexpr uint32_t kRepeatMessageSize = 32;
+
+struct HeldDirection {
+  int direction = 0;  // -1 left, +1 right, 0 neither
+  uint32_t controller = 0;
+};
+
+// The first controller holding left or right, d-pad or left stick (the
+// keyboard's bindings and the touch controls land in the same state).
+HeldDirection ReadHeldDirection() {
+  rex::Runtime* runtime = rex::Runtime::instance();
+  auto* input = runtime ? static_cast<rex::input::InputSystem*>(runtime->input_system()) : nullptr;
+  if (input == nullptr) {
+    return {};
+  }
+  for (uint32_t user = 0; user < 4; ++user) {
+    rex::input::X_INPUT_STATE state{};
+    if (input->GetState(user, &state) != 0) {
+      continue;
+    }
+    const uint16_t buttons = state.gamepad.buttons;
+    const int16_t x = state.gamepad.thumb_lx;
+    const bool left = (buttons & rex::input::X_INPUT_GAMEPAD_DPAD_LEFT) != 0 || x < -kStickThreshold;
+    const bool right = (buttons & rex::input::X_INPUT_GAMEPAD_DPAD_RIGHT) != 0 || x > kStickThreshold;
+    if (left != right) {
+      return {left ? -1 : 1, user};
+    }
+  }
+  return {};
+}
+
+int g_repeat_direction = 0;
+bool g_repeat_armed = false;
+std::chrono::steady_clock::time_point g_repeat_next;
+std::chrono::steady_clock::time_point g_repeat_last_update;
+constexpr auto kRepeatGap = std::chrono::milliseconds(250);
+uint32_t g_repeat_message = 0;
+
+void RepeatHeldDirection(PPCContext& ctx, uint8_t* base, uint32_t screen) {
+  const HeldDirection held = ReadHeldDirection();
+  const auto now = std::chrono::steady_clock::now();
+  // The screen wasn't updating in between (closed, or covered): whatever is
+  // held now was held before it came back.
+  const bool resumed = now - g_repeat_last_update > kRepeatGap;
+  g_repeat_last_update = now;
+  if (resumed) {
+    g_repeat_direction = held.direction;
+    g_repeat_armed = false;
+    return;
+  }
+  if (held.direction != g_repeat_direction) {
+    // A new hold (or a release): armed only if it started here, from nothing.
+    g_repeat_armed = g_repeat_direction == 0 && held.direction != 0;
+    g_repeat_direction = held.direction;
+    g_repeat_next = now + kRepeatDelay;
+    return;
+  }
+  if (!g_repeat_armed || held.direction == 0 || now < g_repeat_next) {
+    return;
+  }
+  g_repeat_next = now + kRepeatInterval;
+
+  if (g_repeat_message == 0 && g_alloc_fn) {
+    g_repeat_message = CallGuest(ctx, base, g_alloc_fn, kRepeatMessageSize);
+  }
+  if (g_repeat_message == 0) {
+    return;
+  }
+  std::memset(base + g_repeat_message, 0, kRepeatMessageSize);
+  Write32BE(base, g_repeat_message + kMsgClass, kMsgClassButton);
+  Write32BE(base, g_repeat_message + kMsgButton,
+            held.direction < 0 ? kMsgButtonLeft : kMsgButtonRight);
+  Write32BE(base, g_repeat_message + kMsgController, held.controller);
+  CallGuest(ctx, base, kSettingsEventFnAddr, screen, g_repeat_message);
+}
+
 // Gives list row 2 the left/right arrows every other row gets.
 //
 // The screen's per-frame update (sub_825B4CC0) hides both arrow widgets
@@ -2343,6 +2440,7 @@ extern "C" void NativeOptions_SettingsUpdate(PPCContext& ctx, uint8_t* base) {
     g_original_settings_update_fn(ctx, base);
   }
   if (ours) {
+    RepeatHeldDirection(ctx, base, screen);
     UpdateDescription(ctx, base, screen);
     // The page's own prompt follows the selection onto and off its row.
     if (g_custom_prompt && PagePromptActive(base) != g_custom_prompt_shown) {
