@@ -23,6 +23,7 @@
 #include "core/game_state.h"
 #include "core/settings.h"
 #include "guest_shaders.h"
+#include "jp/movie_player.h"
 #include "native_renderer_shader_debug.h"
 #include "native_renderer_plume.h"
 #include "native_renderer_plume_internal.h"
@@ -31,10 +32,12 @@
 #include "shaders/blitVert.hlsl.dxil.h"
 #include "shaders/blitFrag.hlsl.dxil.h"
 #include "shaders/screenFilterFrag.hlsl.dxil.h"
+#include "shaders/movieFrag.hlsl.dxil.h"
 #endif
 #include "shaders/blitVert.hlsl.spirv.h"
 #include "shaders/blitFrag.hlsl.spirv.h"
 #include "shaders/screenFilterFrag.hlsl.spirv.h"
+#include "shaders/movieFrag.hlsl.spirv.h"
 
 namespace nocturne {
 namespace {
@@ -287,6 +290,26 @@ struct Resources {
   std::vector<std::unique_ptr<RenderPipeline>> custom_pipelines;
   std::vector<bool> custom_attempted;
 
+  // The JP movies (jp/movie_player.cpp), drawn into the PS1 box ahead of the
+  // screen filter with the blit's layout. The texture is the movie's size and
+  // is replaced, with its set, when one of another size starts; the replaced
+  // ones are kept until no frame in flight can still sample them. Frames are
+  // uploaded through one staging buffer per frame slot.
+  std::unique_ptr<RenderPipeline> movie_pipeline;
+  std::unique_ptr<RenderTexture> movie_texture;
+  std::unique_ptr<RenderDescriptorSet> movie_set;
+  uint32_t movie_width = 0;
+  uint32_t movie_height = 0;
+  uint64_t movie_serial = 0;
+  std::unique_ptr<RenderBuffer> movie_staging[kFramesInFlight];
+  uint64_t movie_staging_size[kFramesInFlight] = {};
+  struct RetiredMovieTexture {
+    std::unique_ptr<RenderTexture> texture;
+    std::unique_ptr<RenderDescriptorSet> set;
+    uint64_t frame = 0;
+  };
+  std::vector<RetiredMovieTexture> movie_retired;
+
   std::unique_ptr<RenderShader> vertex_shaders[256];
   std::unique_ptr<RenderShader> pixel_shaders[256];
 } g_res;
@@ -362,12 +385,17 @@ std::unique_ptr<RenderShader> CreateBuiltinShader(RenderDevice* device, const vo
   return nullptr;
 }
 
-bool CreateBlit(RenderDevice* device) {
-  const RenderDescriptorRange ranges[] = {
+// The blit's set: its texture, then its sampler.
+RenderDescriptorSetDesc BlitSetDesc() {
+  static const RenderDescriptorRange ranges[] = {
       RenderDescriptorRange(RenderDescriptorRangeType::TEXTURE, 0, 1),
       RenderDescriptorRange(RenderDescriptorRangeType::SAMPLER, 1, 1),
   };
-  const RenderDescriptorSetDesc set_desc(ranges, 2);
+  return RenderDescriptorSetDesc(ranges, 2);
+}
+
+bool CreateBlit(RenderDevice* device) {
+  const RenderDescriptorSetDesc set_desc = BlitSetDesc();
   // The player's gamma, as its reciprocal (see blit.frag.hlsl).
   const RenderPushConstantRange push_constants(0, 0, 0, sizeof(float),
                                                RenderShaderStageFlag::PIXEL);
@@ -420,6 +448,35 @@ bool CreateBlit(RenderDevice* device) {
   g_res.blit_set->setTexture(0, g_res.front.texture.get(), RenderTextureLayout::SHADER_READ);
   g_res.blit_set->setSampler(1, g_res.blit_sampler.get());
   return true;
+}
+
+// The movie pipeline: the blit's vertex shader and layout, movie.frag.hlsl,
+// drawing into the guest target.
+bool CreateMoviePipeline(RenderDevice* device) {
+#ifdef _WIN32
+  auto vertex = CreateBuiltinShader(device, blitVertBlobDXIL, sizeof(blitVertBlobDXIL),
+                                    blitVertBlobSPIRV, sizeof(blitVertBlobSPIRV), "VSMain");
+  auto pixel = CreateBuiltinShader(device, movieFragBlobDXIL, sizeof(movieFragBlobDXIL),
+                                   movieFragBlobSPIRV, sizeof(movieFragBlobSPIRV), "PSMain");
+#else
+  auto vertex = CreateBuiltinShader(device, nullptr, 0, blitVertBlobSPIRV,
+                                    sizeof(blitVertBlobSPIRV), "VSMain");
+  auto pixel = CreateBuiltinShader(device, nullptr, 0, movieFragBlobSPIRV,
+                                   sizeof(movieFragBlobSPIRV), "PSMain");
+#endif
+  if (!vertex || !pixel)
+    return false;
+  RenderGraphicsPipelineDesc desc;
+  desc.pipelineLayout = g_res.blit_layout.get();
+  desc.vertexShader = vertex.get();
+  desc.pixelShader = pixel.get();
+  desc.renderTargetFormat[0] = kTargetFormat;
+  desc.renderTargetCount = 1;
+  desc.renderTargetBlend[0] = RenderBlendDesc::Copy();
+  desc.cullMode = RenderCullMode::NONE;
+  desc.primitiveTopology = RenderPrimitiveTopology::TRIANGLE_LIST;
+  g_res.movie_pipeline = device->createGraphicsPipeline(desc);
+  return g_res.movie_pipeline != nullptr;
 }
 
 // screen_filter.frag.hlsl's push constants.
@@ -658,6 +715,9 @@ bool EnsureResources(RenderDevice* device) {
     REXLOG_ERROR("native_renderer: could not create the present blit");
     return false;
   }
+  // Not fatal: only the JP movies need it.
+  if (!CreateMoviePipeline(device))
+    REXLOG_ERROR("native_renderer: could not create the movie pipeline");
   // Not fatal: the game draws the same without it.
   if (!CreateScreenFilter(device))
     REXLOG_ERROR("native_renderer: could not create the screen filter");
@@ -1448,13 +1508,91 @@ void GuestClear(uint8_t* base, uint32_t device, uint32_t flags, uint32_t rect, u
   commands->clearColor(0, RenderColor(rgba[0], rgba[1], rgba[2], rgba[3]), &host_rect, 1);
 }
 
+// Draws the JP movie frame due now into the PS1 box, black until the first
+// one is out. False when no movie is playing (or it can't be drawn).
+bool DrawMovie(RenderCommandList* commands, const RenderViewport& viewport,
+               const RenderRect& scissor) {
+  MoviePicture picture;
+  if (!g_res.movie_pipeline || !CurrentMoviePicture(picture))
+    return false;
+  RenderDevice* device = PlumeDevice();
+
+  // Textures replaced by a movie of another size, once no frame can use them.
+  std::erase_if(g_res.movie_retired, [](const Resources::RetiredMovieTexture& retired) {
+    return g_frame_serial > retired.frame + kFramesInFlight;
+  });
+
+  const uint32_t width = picture.width, height = picture.height;
+  const bool have_frame =
+      picture.rgba && width && height && picture.rgba->size() >= size_t(width) * height * 4;
+  if (have_frame && (!g_res.movie_texture || width != g_res.movie_width ||
+                     height != g_res.movie_height)) {
+    if (g_res.movie_texture) {
+      g_res.movie_retired.push_back(
+          {std::move(g_res.movie_texture), std::move(g_res.movie_set), g_frame_serial});
+    }
+    g_res.movie_texture = device->createTexture(
+        RenderTextureDesc::Texture2D(width, height, 1, RenderFormat::R8G8B8A8_UNORM));
+    g_res.movie_set = device->createDescriptorSet(BlitSetDesc());
+    if (!g_res.movie_texture || !g_res.movie_set) {
+      g_res.movie_texture.reset();
+      g_res.movie_set.reset();
+      return false;
+    }
+    g_res.movie_set->setTexture(0, g_res.movie_texture.get(), RenderTextureLayout::SHADER_READ);
+    g_res.movie_set->setSampler(1, g_res.blit_sampler.get());
+    g_res.movie_width = width;
+    g_res.movie_height = height;
+    g_res.movie_serial = 0;
+  }
+
+  if (have_frame && picture.serial != g_res.movie_serial) {
+    // Rows padded to 256 bytes, as D3D12 wants them.
+    const uint32_t pitch = (width * 4 + 255) & ~255u;
+    const uint64_t bytes = uint64_t(pitch) * height;
+    const uint32_t slot = PlumeFrameSlot();
+    auto& staging = g_res.movie_staging[slot];
+    if (!staging || g_res.movie_staging_size[slot] < bytes) {
+      staging = device->createBuffer(RenderBufferDesc::UploadBuffer(bytes));
+      g_res.movie_staging_size[slot] = staging ? bytes : 0;
+    }
+    auto* mapped = staging ? static_cast<uint8_t*>(staging->map()) : nullptr;
+    if (mapped == nullptr)
+      return false;
+    for (uint32_t y = 0; y < height; ++y) {
+      std::memcpy(mapped + size_t(y) * pitch, picture.rgba->data() + size_t(y) * width * 4,
+                  size_t(width) * 4);
+    }
+    staging->unmap();
+    commands->barriers(RenderBarrierStage::COPY,
+                       RenderTextureBarrier(g_res.movie_texture.get(),
+                                            RenderTextureLayout::COPY_DEST));
+    commands->copyTextureRegion(
+        RenderTextureCopyLocation::Subresource(g_res.movie_texture.get()),
+        RenderTextureCopyLocation::PlacedFootprint(staging.get(), RenderFormat::R8G8B8A8_UNORM,
+                                                   width, height, 1, pitch / 4));
+    commands->barriers(RenderBarrierStage::GRAPHICS,
+                       RenderTextureBarrier(g_res.movie_texture.get(),
+                                            RenderTextureLayout::SHADER_READ));
+    g_res.movie_serial = picture.serial;
+    g_target_bound = false;
+  }
+
+  BindTarget(commands);
+  commands->setViewports(viewport);
+  commands->setScissors(scissor);
+  if (!have_frame || g_res.movie_serial == 0 || !g_res.movie_texture) {
+    commands->clearColor(0, RenderColor(0.0f, 0.0f, 0.0f, 1.0f), &scissor, 1);
+  } else {
+    commands->setGraphicsPipelineLayout(g_res.blit_layout.get());
+    commands->setPipeline(g_res.movie_pipeline.get());
+    commands->setGraphicsDescriptorSet(g_res.movie_set.get(), 0);
+    commands->drawInstanced(3, 1, 0, 0);
+  }
+  return true;
+}
+
 void GuestFilterPs1Picture(uint8_t* base) {
-  const ScreenFilterParams filter = CurrentScreenFilter();
-  if (filter.kind == ScreenFilterKind::kNone || !GameRunning(base))
-    return;
-  const bool custom = filter.kind == ScreenFilterKind::kCustom;
-  if (!custom && !g_res.filter_pipeline)
-    return;
   // The rect in render target pixels, against the full-screen one; signed,
   // since a stretch past the screen edges puts left and top below zero.
   const auto load = [base](uint32_t address) { return float(int32_t(Load32(base, address))); };
@@ -1465,6 +1603,23 @@ void GuestFilterPs1Picture(uint8_t* base) {
     return;
   RenderCommandList* commands = BeginRecording();
   if (commands == nullptr)
+    return;
+  const float sx = float(g_target_width) / max_w, sy = float(g_target_height) / max_h;
+  const float width = (right - left) * sx, height = (bottom - top) * sy;
+  const RenderViewport viewport(left * sx, top * sy, width, height, 0.0f, 1.0f);
+  const RenderRect scissor(std::max(int32_t(left * sx), 0), std::max(int32_t(top * sy), 0),
+                           std::min(int32_t(std::ceil(right * sx)), int32_t(g_target_width)),
+                           std::min(int32_t(std::ceil(bottom * sy)), int32_t(g_target_height)));
+
+  // A JP movie takes the box over, and the filter goes on top of it as on the
+  // game, wherever the movie plays (the opening plays at the title).
+  const bool movie = DrawMovie(commands, viewport, scissor);
+
+  const ScreenFilterParams filter = CurrentScreenFilter();
+  if (filter.kind == ScreenFilterKind::kNone || !(movie || GameRunning(base)))
+    return;
+  const bool custom = filter.kind == ScreenFilterKind::kCustom;
+  if (!custom && !g_res.filter_pipeline)
     return;
 
   RenderPipeline* custom_pipeline = nullptr;
@@ -1480,14 +1635,9 @@ void GuestFilterPs1Picture(uint8_t* base) {
     g_target_bound = false;
   }
 
-  const float sx = float(g_target_width) / max_w, sy = float(g_target_height) / max_h;
-  const float width = (right - left) * sx, height = (bottom - top) * sy;
   BindTarget(commands);
-  commands->setViewports(RenderViewport(left * sx, top * sy, width, height, 0.0f, 1.0f));
-  commands->setScissors(RenderRect(
-      std::max(int32_t(left * sx), 0), std::max(int32_t(top * sy), 0),
-      std::min(int32_t(std::ceil(right * sx)), int32_t(g_target_width)),
-      std::min(int32_t(std::ceil(bottom * sy)), int32_t(g_target_height))));
+  commands->setViewports(viewport);
+  commands->setScissors(scissor);
   if (custom) {
     const float tw = float(g_target_width), th = float(g_target_height);
     const CustomFilterConstants constants = {

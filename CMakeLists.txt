@@ -533,3 +533,8 @@ plume_compile_pixel_shader(nocturnerecomp
 # the blit's vertex shader).
 plume_compile_pixel_shader(nocturnerecomp
     "${CMAKE_SOURCE_DIR}/src/shaders/screen_filter.frag.hlsl" "screenFilterFrag" "PSMain")
+
+# The JP movies, drawn into the PS1 box ahead of the screen filter (with the
+# blit's vertex shader).
+plume_compile_pixel_shader(nocturnerecomp
+    "${CMAKE_SOURCE_DIR}/src/shaders/movie.frag.hlsl" "movieFrag" "PSMain")

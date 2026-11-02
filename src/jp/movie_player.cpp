@@ -2,9 +2,6 @@
 
 #include "jp/movie_player.h"
 
-#include <imgui.h>
-
-#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
@@ -25,9 +22,6 @@
 #include <rex/memory/utils.h>
 #include <rex/runtime.h>
 #include <rex/system/kernel_state.h>
-#include <rex/ui/imgui_dialog.h>
-#include <rex/ui/imgui_drawer.h>
-#include <rex/ui/immediate_drawer.h>
 
 #include "core/target.h"
 
@@ -52,7 +46,8 @@
 // JP draws the movie over a game that keeps running, with the game's sound
 // suspended. Here the hooks hold their state machine on the playing step
 // instead, so nothing advances underneath, and the movie is decoded and drawn
-// on the host (rex::audio::AsfMovieDecoder, MovieOverlay). Like JP's, the
+// on the host (rex::audio::AsfMovieDecoder) and drawn by the native renderer
+// into the guest's frame, under the screen filter (MoviePicture). Like JP's, the
 // picture fills the PS1 box: JP builds its XMV quad from the four corners of
 // the Change Screen Size rect (JP dword_82B32C90, sub_825E01E0), the rect the
 // game's layers are drawn in, so it follows the player's stretch and the
@@ -72,11 +67,6 @@ namespace {
 constexpr uint32_t kMovieIndex = 0x831751A0;   // dword_831751A0
 constexpr uint32_t kStrPlayerOn = 0x8318EE20;  // dword_8318EE20
 constexpr size_t kFramesAhead = 8;
-
-// The Change Screen Size rect (LTRB, guest display pixels) and the full display
-// it stretches towards; see graphics_settings.cpp.
-constexpr uint32_t kStretchRect = 0x82882C68;
-constexpr uint32_t kStretchRectMax = 0x82882C98;
 
 uint32_t ReadU32(uint32_t guest_address) {
   return rex::memory::load_and_swap<uint32_t>(
@@ -106,7 +96,7 @@ struct Frame {
   double pts = 0.0;
 };
 
-// One movie at a time: a worker decodes ahead, the overlay shows the frame
+// One movie at a time: a worker decodes ahead, the renderer shows the frame
 // due, the guest hooks start it and wait for it.
 class Movie {
  public:
@@ -120,6 +110,7 @@ class Movie {
     {
       std::lock_guard lock(mutex_);
       frames_.clear();
+      current_.reset();
       decode_done_ = false;
       started_ = false;
     }
@@ -144,6 +135,7 @@ class Movie {
     audio_.Stop();
     std::lock_guard lock(mutex_);
     frames_.clear();
+    current_.reset();
     phase_ = Phase::kIdle;
   }
 
@@ -152,27 +144,19 @@ class Movie {
     return phase_;
   }
 
-  // The frame due now, if it changed since the last call. Overlay thread.
-  bool TakeFrame(Frame& out, uint32_t& width, uint32_t& height) {
+  // The frame due now. False when nothing is playing; out.rgba stays null
+  // until the first frame is due. Called by the renderer, once a frame.
+  bool Picture(MoviePicture& out) {
     Update();
     std::lock_guard lock(mutex_);
-    if (phase_ != Phase::kPlaying || !started_)
+    if (phase_ != Phase::kPlaying)
       return false;
-    const double now = Elapsed();
-    bool taken = false;
-    while (!frames_.empty() && frames_.front().pts <= now) {
-      out = std::move(frames_.front());
-      frames_.pop_front();
-      taken = true;
-    }
-    if (taken)
-      space_.notify_all();
-    width = width_;
-    height = height_;
-    return taken;
+    out.rgba = current_;
+    out.width = width_;
+    out.height = height_;
+    out.serial = serial_;
+    return true;
   }
-
-  bool showing() const { return phase_ == Phase::kPlaying; }
 
  private:
   void Decode(const std::filesystem::path& path) {
@@ -222,12 +206,25 @@ class Movie {
     return std::chrono::duration<double>(std::chrono::steady_clock::now() - start_).count();
   }
 
-  // Ends playback once every frame is out and the movie's length has passed.
+  // Moves on to the frame due now, and ends playback once every frame is out
+  // and the movie's length has passed. Both the hooks and the renderer call
+  // it, so the movie runs to its end even on a frame nothing draws.
   void Update() {
     std::lock_guard lock(mutex_);
     if (phase_ != Phase::kPlaying || !started_)
       return;
-    if (decode_done_ && frames_.empty() && Elapsed() >= duration_) {
+    const double now = Elapsed();
+    bool taken = false;
+    while (!frames_.empty() && frames_.front().pts <= now) {
+      current_ = std::make_shared<const std::vector<uint8_t>>(std::move(frames_.front().rgba));
+      frames_.pop_front();
+      taken = true;
+    }
+    if (taken) {
+      ++serial_;
+      space_.notify_all();
+    }
+    if (decode_done_ && frames_.empty() && now >= duration_) {
       audio_.Stop();
       phase_ = Phase::kDone;
     }
@@ -237,6 +234,8 @@ class Movie {
   std::mutex mutex_;
   std::condition_variable space_;
   std::deque<Frame> frames_;
+  std::shared_ptr<const std::vector<uint8_t>> current_;
+  uint64_t serial_ = 0;
   std::atomic<bool> stop_{false};
   std::atomic<Phase> phase_{Phase::kIdle};
   bool decode_done_ = false;
@@ -294,78 +293,13 @@ Hold HoldForMovie(const char* name) {
   return Hold::kNoMovie;
 }
 
-class MovieOverlay final : public rex::ui::ImGuiDialog {
- public:
-  explicit MovieOverlay(rex::ui::ImGuiDrawer* drawer) : rex::ui::ImGuiDialog(drawer) {}
-
- protected:
-  void OnDraw(ImGuiIO& io) override {
-    if (!g_movie.showing()) {
-      textures_.clear();
-      return;
-    }
-    uint32_t width = 0;
-    uint32_t height = 0;
-    if (g_movie.TakeFrame(frame_, width, height) && imgui_drawer()->immediate_drawer()) {
-      auto texture = imgui_drawer()->immediate_drawer()->CreateTexture(
-          width, height, rex::ui::ImmediateTextureFilter::kLinear, false, frame_.rgba.data());
-      if (texture) {
-        // Earlier frames may still be in flight on the GPU; keep a few.
-        textures_.push_back(std::move(texture));
-        while (textures_.size() > 4)
-          textures_.pop_front();
-      }
-    }
-
-    ImVec2 min;
-    ImVec2 max;
-    if (!BoxOnWindow(io.DisplaySize, min, max))
-      return;
-    ImDrawList* draw = ImGui::GetForegroundDrawList();
-    if (textures_.empty()) {
-      draw->AddRectFilled(min, max, IM_COL32(0, 0, 0, 255));
-      return;
-    }
-    draw->AddImage(reinterpret_cast<ImTextureID>(textures_.back().get()), min, max);
-  }
-
-  // The PS1 box in window pixels. The presenter letterboxes the guest display
-  // into the window at its own aspect ratio, so the box is mapped through the
-  // same fit.
-  static bool BoxOnWindow(const ImVec2& window, ImVec2& min, ImVec2& max) {
-    const auto rect = [](uint32_t base, int i) {
-      return float(int32_t(ReadU32(base + 4 * i)));
-    };
-    const float display_x = rect(kStretchRectMax, 0);
-    const float display_y = rect(kStretchRectMax, 1);
-    const float display_w = rect(kStretchRectMax, 2) - display_x;
-    const float display_h = rect(kStretchRectMax, 3) - display_y;
-    if (display_w <= 0 || display_h <= 0)
-      return false;
-    const float scale = std::min(window.x / display_w, window.y / display_h);
-    const float x0 = (window.x - display_w * scale) * 0.5f;
-    const float y0 = (window.y - display_h * scale) * 0.5f;
-    min = ImVec2(x0 + (rect(kStretchRect, 0) - display_x) * scale,
-                 y0 + (rect(kStretchRect, 1) - display_y) * scale);
-    max = ImVec2(x0 + (rect(kStretchRect, 2) - display_x) * scale,
-                 y0 + (rect(kStretchRect, 3) - display_y) * scale);
-    return max.x > min.x && max.y > min.y;
-  }
-
- private:
-  Frame frame_;
-  std::deque<std::unique_ptr<rex::ui::ImmediateTexture>> textures_;
-};
-
 }  // namespace
 
 void BindMovies(rex::Runtime* runtime) {
   g_input = static_cast<rex::input::InputSystem*>(runtime->input_system());
 }
 
-std::unique_ptr<rex::ui::ImGuiDialog> CreateMovieOverlay(rex::ui::ImGuiDrawer* drawer) {
-  return std::make_unique<MovieOverlay>(drawer);
-}
+bool CurrentMoviePicture(MoviePicture& out) { return g_movie.Picture(out); }
 
 }  // namespace nocturne
 

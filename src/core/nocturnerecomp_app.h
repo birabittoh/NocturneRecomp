@@ -399,9 +399,8 @@ class NocturnerecompApp : public rex::ReXApp {
       input_sys->AddDriver(std::move(touch));
     }
 
-    // The JP release's story movies, drawn over the game (see movie_player.h).
+    // The JP release's story movies (see movie_player.h).
     nocturne::BindMovies(runtime());
-    movie_overlay_ = nocturne::CreateMovieOverlay(imgui_drawer());
 
     // The renderer loads no GPU plugin, so the SDK's per guest frame callback
     // (which drives the mod registry's tick) never fires; the swap hook does it.
@@ -633,7 +632,6 @@ class NocturnerecompApp : public rex::ReXApp {
   std::unique_ptr<nocturne::HostMenu> host_menu_;
   // Draws the on-screen pad; the driver it reads is owned by the input system.
   std::unique_ptr<rex::ui::ImGuiDialog> touch_controls_overlay_;
-  std::unique_ptr<rex::ui::ImGuiDialog> movie_overlay_;
   std::unique_ptr<rex::ui::ImGuiDialog> ui_scale_applier_;
   std::unique_ptr<LocalizedHintToast> startup_hint_;
 
