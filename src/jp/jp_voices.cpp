@@ -73,6 +73,29 @@ struct Sizes {
   uint32_t xwb = 0;
 };
 
+// World's sd_*.xsb/.xwb byte counts, the numbers its tables carry. Built in
+// because World's folder isn't there when JP is installed alone.
+constexpr std::pair<const char*, Sizes> kWorldBanks[] = {
+    {"alk", {751, 59392}},       {"cat", {661, 67584}},       {"catx", {970, 38912}},
+    {"chi", {484, 34816}},       {"chix", {360, 12288}},      {"chu", {1306, 579584}},
+    {"chux", {303, 10240}},      {"deth", {862, 247808}},     {"dora", {1707, 1630208}},
+    {"dora1", {791, 434176}},    {"frank", {717, 55296}},     {"gara", {689, 36864}},
+    {"gold", {1019, 270336}},    {"goldx", {663, 69632}},     {"j010", {30230, 921600}},
+    {"keru", {780, 40960}},      {"koa1", {652, 350208}},     {"koa2", {534, 34816}},
+    {"lib", {1398, 309248}},     {"libx", {300, 10240}},      {"mak", {565, 122880}},
+    {"mar", {450, 38912}},       {"medyu", {872, 77824}},     {"mino", {893, 208896}},
+    {"mirra", {719, 73728}},     {"mizu", {775, 141312}},     {"mizux", {562, 59392}},
+    {"nalk", {1078, 79872}},     {"olro", {2022, 147456}},    {"olst", {1230, 92160}},
+    {"olstx", {784, 86016}},     {"regi", {1096, 81920}},     {"rih", {722, 61440}},
+    {"rihi", {1706, 989184}},    {"rou", {1745, 708608}},     {"roux", {793, 73728}},
+    {"sakyu", {1408, 825344}},   {"siro", {1250, 286720}},    {"siro1", {1041, 102400}},
+    {"sirox", {477, 36864}},     {"sukyu", {995, 90112}},     {"syafu", {859, 845824}},
+    {"togi", {980, 104448}},     {"togix", {423, 24576}},     {"toke", {1196, 92160}},
+    {"tokex", {1123, 98304}},    {"top", {528, 256000}},      {"topx", {272, 8192}},
+    {"tou", {1304, 108544}},     {"toux", {483, 12288}},      {"tuka1", {964, 239616}},
+    {"tuka2", {573, 38912}},     {"verm", {919, 30720}},      {"verz", {725, 61440}},
+};
+
 bool g_active = false;
 // Every table entry the two releases disagree on: guest address, World's
 // byte count, JP's.
@@ -138,16 +161,15 @@ std::map<std::string, Sizes> BankSizes(const fs::path& dir) {
 // carry sd_tou's sizes, and JP's table has JP's sd_tou sizes there too.
 // Records the biggest bank of each kind, for the buffers. False when the
 // image isn't the one these addresses were read from.
-bool BuildTables(const fs::path& world_sound, const fs::path& jp_sound) {
+bool BuildTables(const fs::path& jp_sound) {
   if (Load(kStageTable) != kStageRow0.first || Load(kStageTable + 4) != kStageRow0.second ||
       LoadString(Load(kResidentTable)) != "game:\\data\\sound\\sd_alk.xsb") {
     REXLOG_WARN("jp voices: the bank tables are not where they should be");
     return false;
   }
-  const auto world = BankSizes(world_sound);
   const auto jp = BankSizes(jp_sound);
   std::map<std::pair<uint32_t, uint32_t>, std::string> by_world_sizes;
-  for (const auto& [name, sizes] : world)
+  for (const auto& [name, sizes] : kWorldBanks)
     by_world_sizes[{sizes.xsb, sizes.xwb}] = name;
 
   std::array<uint32_t, kKinds> sound_size{};
@@ -236,15 +258,24 @@ bool JpVoicesPlaying() {
 }
 
 void InstallJpVoices(rex::Runtime* runtime) {
-  if (!JpVoicesAvailable() || !runtime || !runtime->file_system())
+  if (JpDir().empty() || !runtime || !runtime->file_system())
     return;
 
-  const fs::path& jp = JpDir();
   std::error_code ec;
-  const fs::path jp_sound = jp / "DATA" / "sound";
-  const fs::path world_sound = GameDataRoot() / "DATA" / "sound";
+  const fs::path jp_sound = JpDir() / "DATA" / "sound";
   if (!fs::is_directory(jp_sound, ec)) {
     REXLOG_WARN("jp voices: {} is missing", jp_sound.string());
+    return;
+  }
+
+  // JP alone: its banks are the ones mounted, so they only need JP's sizes.
+  if (!JpVoicesAvailable()) {
+    if (!BuildTables(jp_sound))
+      return;
+    g_active = true;
+    for (const auto& value : g_table)
+      Store(value.address, value.jp);
+    REXLOG_INFO("jp voices: JP is mounted, its bank sizes are in use");
     return;
   }
 
@@ -255,7 +286,7 @@ void InstallJpVoices(rex::Runtime* runtime) {
     return;
   }
 
-  if (!BuildTables(world_sound, jp_sound))
+  if (!BuildTables(jp_sound))
     return;
 
   auto device = std::make_unique<rex::filesystem::HostPathDevice>(kMount, jp_sound, true);

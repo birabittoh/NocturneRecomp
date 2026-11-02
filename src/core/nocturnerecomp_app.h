@@ -371,7 +371,7 @@ class NocturnerecompApp : public rex::ReXApp {
     nocturne::InstallLatin1FontOverlay(runtime());
 
     // With World mounted, play JP's voice banks unless English ones are
-    // forced (see jp_voices.h).
+    // forced; with JP alone, read its banks at JP's sizes (see jp_voices.h).
     nocturne::InstallJpVoices(runtime());
 
     // JP's artwork over World's, switched live (see jp_artwork.h).

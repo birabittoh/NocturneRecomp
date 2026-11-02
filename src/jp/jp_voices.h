@@ -17,9 +17,14 @@
 // banks are read into buffers of our own (see the hooks in
 // config/nocturnerecomp_jp_voices_hooks.toml).
 //
-// Nothing happens when JP is not installed, or when JP is the mounted folder
-// already (its voices are then the only ones there are): JpVoicesAvailable()
-// is false, and the settings hide the voices row.
+// With JP alone installed, JP is the mounted folder and its banks are the
+// only ones there are, but the code is still World's: the tables get JP's
+// sizes and the buffers are sized the same way, for good, with nothing to
+// link or switch. Without that, a bank cut short at World's byte count plays
+// the wrong lines and the opening talk with Dracula never ends (issue #27).
+// JpVoicesAvailable() is false then, and the settings hide the voices row.
+//
+// Nothing happens when JP is not installed.
 #pragma once
 
 namespace rex {
@@ -31,7 +36,7 @@ namespace nocturne {
 // Both releases are installed and World is mounted, so there is a choice.
 bool JpVoicesAvailable();
 
-// After the image is mapped and before the guest starts.
+// After the image is mapped and before the guest starts. Also for JP alone.
 void InstallJpVoices(rex::Runtime* runtime);
 
 // JP's voices are what plays: linked over World's, or JP's folder is the one
