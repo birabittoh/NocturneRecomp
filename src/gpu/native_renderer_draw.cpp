@@ -18,6 +18,7 @@
 #include <rex/logging.h>
 #include <rex/system/xmemory.h>
 
+#include "core/game_state.h"
 #include "core/settings.h"
 #include "guest_shaders.h"
 #include "native_renderer_shader_debug.h"
@@ -27,9 +28,11 @@
 #ifdef _WIN32
 #include "shaders/blitVert.hlsl.dxil.h"
 #include "shaders/blitFrag.hlsl.dxil.h"
+#include "shaders/screenFilterFrag.hlsl.dxil.h"
 #endif
 #include "shaders/blitVert.hlsl.spirv.h"
 #include "shaders/blitFrag.hlsl.spirv.h"
+#include "shaders/screenFilterFrag.hlsl.spirv.h"
 
 namespace nocturne {
 namespace {
@@ -108,6 +111,12 @@ constexpr uint32_t kMaxDeclElements = 16;
 
 // D3DRESOLVE_CLEARRENDERTARGET.
 constexpr uint32_t kResolveClearTarget = 0x200;
+
+// graphics.stretch_rect, where the game draws the PS1 picture (LTRB in render
+// target pixels), and the full-screen rect it is sized against. See
+// screens/graphics_settings.cpp and docs/reverse-engineering.md.
+constexpr uint32_t kStretchRectAddr = 0x82882C68u;
+constexpr uint32_t kStretchRectMaxAddr = 0x82882C98u;
 
 uint32_t Load32(const uint8_t* base, uint32_t address) {
   const uint8_t* p = rex::memory::GuestPtr<const uint8_t*>(const_cast<uint8_t*>(base), address);
@@ -263,6 +272,8 @@ struct Resources {
   std::unique_ptr<RenderPipeline> blit_pipeline;
   std::unique_ptr<RenderSampler> blit_sampler;
   std::unique_ptr<RenderDescriptorSet> blit_set;
+  std::unique_ptr<RenderPipelineLayout> filter_layout;
+  std::unique_ptr<RenderPipeline> filter_pipeline;
 
   std::unique_ptr<RenderShader> vertex_shaders[256];
   std::unique_ptr<RenderShader> pixel_shaders[256];
@@ -399,6 +410,62 @@ bool CreateBlit(RenderDevice* device) {
   return true;
 }
 
+// screen_filter.frag.hlsl's push constants.
+struct FilterConstants {
+  uint32_t filter;
+  float strength;
+};
+
+// The screen filter: the blit's full-viewport triangle, drawn into the guest
+// target with the filter's factor multiplied into what is there.
+bool CreateScreenFilter(RenderDevice* device) {
+  const RenderPushConstantRange push_constants(0, 0, 0, sizeof(FilterConstants),
+                                               RenderShaderStageFlag::PIXEL);
+  RenderPipelineLayoutDesc layout_desc;
+  layout_desc.pushConstantRanges = &push_constants;
+  layout_desc.pushConstantRangesCount = 1;
+  g_res.filter_layout = device->createPipelineLayout(layout_desc);
+  if (!g_res.filter_layout)
+    return false;
+
+#ifdef _WIN32
+  auto vertex = CreateBuiltinShader(device, blitVertBlobDXIL, sizeof(blitVertBlobDXIL),
+                                    blitVertBlobSPIRV, sizeof(blitVertBlobSPIRV), "VSMain");
+  auto pixel = CreateBuiltinShader(device, screenFilterFragBlobDXIL,
+                                   sizeof(screenFilterFragBlobDXIL), screenFilterFragBlobSPIRV,
+                                   sizeof(screenFilterFragBlobSPIRV), "PSMain");
+#else
+  auto vertex = CreateBuiltinShader(device, nullptr, 0, blitVertBlobSPIRV,
+                                    sizeof(blitVertBlobSPIRV), "VSMain");
+  auto pixel = CreateBuiltinShader(device, nullptr, 0, screenFilterFragBlobSPIRV,
+                                   sizeof(screenFilterFragBlobSPIRV), "PSMain");
+#endif
+  if (!vertex || !pixel)
+    return false;
+
+  // dst * src on colour; alpha left as the guest wrote it.
+  RenderBlendDesc blend;
+  blend.blendEnabled = true;
+  blend.srcBlend = RenderBlend::ZERO;
+  blend.dstBlend = RenderBlend::SRC_COLOR;
+  blend.blendOp = RenderBlendOperation::ADD;
+  blend.srcBlendAlpha = RenderBlend::ZERO;
+  blend.dstBlendAlpha = RenderBlend::ONE;
+  blend.blendOpAlpha = RenderBlendOperation::ADD;
+
+  RenderGraphicsPipelineDesc desc;
+  desc.pipelineLayout = g_res.filter_layout.get();
+  desc.vertexShader = vertex.get();
+  desc.pixelShader = pixel.get();
+  desc.renderTargetFormat[0] = kTargetFormat;
+  desc.renderTargetCount = 1;
+  desc.renderTargetBlend[0] = blend;
+  desc.cullMode = RenderCullMode::NONE;
+  desc.primitiveTopology = RenderPrimitiveTopology::TRIANGLE_LIST;
+  g_res.filter_pipeline = device->createGraphicsPipeline(desc);
+  return g_res.filter_pipeline != nullptr;
+}
+
 // The texture and sampler set layouts. One range per slot rather than one
 // sixteen wide: Plume turns a range into a single Vulkan binding with an array
 // count, and the HLSL declares sixteen separate objects at bindings 0..15 (see
@@ -462,6 +529,9 @@ bool EnsureResources(RenderDevice* device) {
     REXLOG_ERROR("native_renderer: could not create the present blit");
     return false;
   }
+  // Not fatal: the game draws the same without it.
+  if (!CreateScreenFilter(device))
+    REXLOG_ERROR("native_renderer: could not create the screen filter");
 
   g_res.ready = true;
   return true;
@@ -1243,6 +1313,39 @@ void GuestClear(uint8_t* base, uint32_t device, uint32_t flags, uint32_t rect, u
   }
   BindTarget(commands);
   commands->clearColor(0, RenderColor(rgba[0], rgba[1], rgba[2], rgba[3]), &host_rect, 1);
+}
+
+void GuestFilterPs1Picture(uint8_t* base) {
+  const ScreenFilterParams filter = CurrentScreenFilter();
+  if (filter.kind == ScreenFilterKind::kNone || !g_res.filter_pipeline || !GameRunning(base))
+    return;
+  // The rect in render target pixels, against the full-screen one; signed,
+  // since a stretch past the screen edges puts left and top below zero.
+  const auto load = [base](uint32_t address) { return float(int32_t(Load32(base, address))); };
+  const float max_w = load(kStretchRectMaxAddr + 8), max_h = load(kStretchRectMaxAddr + 12);
+  const float left = load(kStretchRectAddr), top = load(kStretchRectAddr + 4);
+  const float right = load(kStretchRectAddr + 8), bottom = load(kStretchRectAddr + 12);
+  if (max_w <= 0.0f || max_h <= 0.0f || right <= left || bottom <= top)
+    return;
+  RenderCommandList* commands = BeginRecording();
+  if (commands == nullptr)
+    return;
+
+  const float sx = float(g_target_width) / max_w, sy = float(g_target_height) / max_h;
+  BindTarget(commands);
+  commands->setViewports(
+      RenderViewport(left * sx, top * sy, (right - left) * sx, (bottom - top) * sy, 0.0f, 1.0f));
+  commands->setScissors(RenderRect(
+      std::max(int32_t(left * sx), 0), std::max(int32_t(top * sy), 0),
+      std::min(int32_t(std::ceil(right * sx)), int32_t(g_target_width)),
+      std::min(int32_t(std::ceil(bottom * sy)), int32_t(g_target_height))));
+  commands->setGraphicsPipelineLayout(g_res.filter_layout.get());
+  commands->setPipeline(g_res.filter_pipeline.get());
+  const FilterConstants constants = {uint32_t(filter.kind), filter.strength};
+  commands->setGraphicsPushConstants(0, &constants, 0, sizeof(constants));
+  commands->drawInstanced(3, 1, 0, 0);
+  // The next guest draw puts the target's own viewport and scissor back.
+  g_target_bound = false;
 }
 
 void CompositeGuestImage(RenderCommandList* commands, const RenderFramebuffer* framebuffer,

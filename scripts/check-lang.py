@@ -15,7 +15,7 @@ en = langs["en"]
 problems = 0
 
 # Keys that exist in some languages only: the stock game text is right in the others.
-OPTIONAL = {("native", "graphics_label")}
+OPTIONAL = set()
 
 
 def report(msg):

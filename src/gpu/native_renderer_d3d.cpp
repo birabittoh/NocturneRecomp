@@ -14,6 +14,7 @@
 
 #include <rex/hook.h>
 #include <rex/system/xmemory.h>
+#include <rex/system/kernel_state.h>
 #include <rex/logging.h>
 
 #include <rex/chrono/clock.h>
@@ -351,4 +352,14 @@ REX_HOOK_RAW(D3DDevice__ThrottleWait_Poll) {
 REX_HOOK_RAW(D3DDevice__BlockUntilGpuIdle) {
   (void)base;
   ctx.r3.u64 = 0;
+}
+
+// Midasm hook in XenonFramework::DrawLayers (sub_82582AC0) at 0x82583174,
+// between the PS1 side's layers and the UI manager's draw. The screen filter
+// goes on here rather than at present, so the pause menu drawn next lands on
+// top of it.
+void ScreenFilterBeforeUi() {
+  uint8_t* base = REX_KERNEL_STATE()->memory()->virtual_membase();
+  FlushInline(base);
+  nocturne::GuestFilterPs1Picture(base);
 }

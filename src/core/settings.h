@@ -9,6 +9,7 @@
 
 #pragma once
 
+#include <cstdint>
 #include <filesystem>
 #include <functional>
 #include <memory>
@@ -51,6 +52,35 @@ const char* DisplayGammaOptionLabel(int index);
 int DisplayGammaOptionIndex();
 void SetDisplayGammaOption(int index);
 float DisplayGamma();
+
+// screen_filter: the effect the native renderer lays over the PS1 picture
+// (screen_filter.frag.hlsl), or the game's own Enhanced graphics style. Like
+// display_gamma, a fixed list shared by the overlay's combo and the native
+// settings page; each option's text is a [native] lang
+// key. Setting an option only changes the cvar; callers persist it.
+// CurrentScreenFilter is what the blit applies, the kind matching the shader's
+// FILTER_* values.
+enum class ScreenFilterKind : uint32_t { kNone = 0, kScanlines = 1, kLcdGrid = 2 };
+struct ScreenFilterParams {
+  ScreenFilterKind kind;
+  // How dark the gaps between lines (or cells) get, 0 to 1.
+  float strength;
+};
+int ScreenFilterOptionCount();
+const char* ScreenFilterOptionTextKey(int index);
+int ScreenFilterOptionIndex();
+// Whether the option picked is Enhanced: the game's own graphics style, which
+// SetScreenFilterOption turns on (and every other option off).
+bool ScreenFilterIsEnhanced();
+void SetScreenFilterOption(int index);
+// screen_filter_intensity, in 5% steps: option i is
+// ScreenFilterIntensityOptionPercent(i) percent.
+int ScreenFilterIntensityOptionCount();
+int ScreenFilterIntensityOptionIndex();
+int ScreenFilterIntensityOptionPercent(int index);
+void SetScreenFilterIntensityOption(int index);
+// The filter with its intensity applied.
+ScreenFilterParams CurrentScreenFilter();
 
 // Overrides the SDK's built-in cvar defaults with the game's own. Call once,
 // before rex::ReXApp::SetupEnvironment() (i.e. before any config file is

@@ -63,6 +63,22 @@ REXCVAR_DEFINE_DOUBLE(display_gamma, 1.0, "Game",
                       "the console; above 1 brightens.")
     .range(0.5, 2.0);
 
+REXCVAR_DECLARE(bool, graphics_style_enhanced);  // graphics_settings.cpp
+
+// Laid over the PS1 picture by the native renderer (see ScreenFilterParams),
+// except "smooth", which is the game's own Enhanced graphics style
+// (graphics_style_enhanced, which smooths the pixels) rather than an effect of
+// ours.
+REXCVAR_DEFINE_STRING(screen_filter, "none", "Game",
+                      "Effect laid over the PS1 picture: none, scanlines, lcd_grid, or smooth "
+                      "(the game's Enhanced graphics)")
+    .allowed({"none", "scanlines", "lcd_grid", "smooth"});
+
+// How strong screen_filter's effect is, in percent.
+REXCVAR_DEFINE_INT32(screen_filter_intensity, 50, "Game",
+                     "Strength of the screen filter's effect, in percent (5 to 100)")
+    .range(5, 100);
+
 namespace {
 
 // Fixed pixel sizes in the settings overlay, which ScaleAllSizes cannot reach.
@@ -180,18 +196,38 @@ constexpr std::array<const char*, 4> kEnhancementTabs = {
 // <cvar> and <cvar>_desc.
 constexpr std::array<const char*, 2> kIntroSkipCvarNames = {"skip_intros", "skip_richter"};
 
-constexpr std::array<const char*, 19> kBasicCvarNames = {
+constexpr std::array<const char*, 21> kBasicCvarNames = {
     "fullscreen",       "vsync",         "user_language",
     "gpu_backend",      "vulkan_device", "audio_mute",      "audio_volume",
     "graphics_style_enhanced", "touch_controls", "touch_movement", "touch_function_keys", "touch_scale",
     "touch_opacity", "touch_hide_delay", "voices", "artwork", "prologue",
-    "ui_scale", "display_gamma"};
+    "ui_scale", "display_gamma", "screen_filter", "screen_filter_intensity"};
 
 constexpr std::array kUiScaleSteps = {0.75, 1.0, 1.25, 1.5, 1.75, 2.0, 2.5, 3.0};
 
 constexpr std::array kDisplayGammaSteps = {0.8, 0.9, 1.0, 1.1, 1.2, 1.3, 1.4};
 constexpr std::array<const char*, 7> kDisplayGammaLabels = {"0.8", "0.9", "1.0", "1.1",
                                                             "1.2", "1.3", "1.4"};
+
+// screen_filter's values, in the order both settings UIs list them, with the
+// [native] key naming each, what the renderer draws for it, and how dark its
+// gaps get at 100% intensity.
+struct ScreenFilterOption {
+  const char* value;
+  const char* text_key;
+  ScreenFilterKind kind;
+  float full_strength;
+};
+constexpr std::array<ScreenFilterOption, 4> kScreenFilters = {{
+    {"none", "filter_none", ScreenFilterKind::kNone, 0.0f},
+    {"scanlines", "filter_scanlines", ScreenFilterKind::kScanlines, 1.0f},
+    // Darkened on both axes, so it reaches as dark with less.
+    {"lcd_grid", "filter_lcd_grid", ScreenFilterKind::kLcdGrid, 0.7f},
+    {"smooth", "filter_smooth", ScreenFilterKind::kNone, 0.0f},
+}};
+constexpr int kEnhancedFilterIndex = 3;
+
+constexpr int kScreenFilterIntensityStep = 5;
 
 // audio_volume is stored (and applied to samples by the SDL audio driver) as
 // linear amplitude, but human loudness perception is roughly logarithmic --
@@ -427,8 +463,9 @@ class CuratedSettingsDialog : public rex::ui::ImGuiDialog {
 #endif
     DrawVsyncRow();
     DrawUiScaleRow();
-    DrawGraphicsStyleRow();
     DrawGammaRow();
+    DrawScreenFilterRow();
+    DrawScreenFilterIntensityRow();
     // The native renderer reads both: gpu_backend picks D3D12 or Vulkan (only
     // Windows has the choice) and vulkan_device the adapter when Vulkan is in use.
 #ifdef _WIN32
@@ -1006,25 +1043,54 @@ class CuratedSettingsDialog : public rex::ui::ImGuiDialog {
     ImGui::PopID();
   }
 
-  void DrawGraphicsStyleRow() {
-    const auto* entry = rex::cvar::GetFlagInfo("graphics_style_enhanced");
-    if (!entry)
+  // Applies live, like gamma.
+  void DrawScreenFilterRow() {
+    if (!rex::cvar::GetFlagInfo("screen_filter"))
       return;
-    ImGui::TextUnformatted(Tr("settings", "enhanced_graphics"));
-    RowTip("tip_graphics");
+    const int current = ScreenFilterOptionIndex();
+
+    ImGui::TextUnformatted(Tr("settings", "screen_filter"));
+    RowTip("tip_screen_filter");
     ImGui::SameLine(Px(180.0f));
-    ImGui::PushID("graphics_style_enhanced");
-    bool enhanced = entry->getter() == "true";
-    // rex::ui::ToggleSwitch directly rather than DrawCvarWidget's generic
-    // bool path: that one calls rex::cvar::SetFlagByName itself, which --
-    // unlike this row -- doesn't apply the change to guest memory or persist
-    // it (see RequestGraphicsStyle's doc comment). ToggleSwitch matches the
-    // pill-toggle look DrawCvarWidget uses for every other Boolean row
-    // (Mute Audio, Fullscreen, ...) without going through its own apply path.
-    if (rex::ui::ToggleSwitch("##v", &enhanced)) {
-      RequestGraphicsStyle(enhanced);
+    ImGui::SetNextItemWidth(Px(160.0f));
+    ImGui::PushID("screen_filter");
+    if (ImGui::BeginCombo("##v", Tr("native", ScreenFilterOptionTextKey(current)))) {
+      for (int i = 0; i < ScreenFilterOptionCount(); ++i) {
+        const bool selected = i == current;
+        if (ImGui::Selectable(Tr("native", ScreenFilterOptionTextKey(i)), selected)) {
+          SetScreenFilterOption(i);
+          SaveBasic();
+        }
+        if (selected)
+          ImGui::SetItemDefaultFocus();
+      }
+      ImGui::EndCombo();
     }
-    RowTip("tip_graphics");
+    RowTip("tip_screen_filter");
+    ImGui::PopID();
+  }
+
+  // Applies live, every step of the drag, like gamma.
+  void DrawScreenFilterIntensityRow() {
+    if (!rex::cvar::GetFlagInfo("screen_filter_intensity"))
+      return;
+    int idx = ScreenFilterIntensityOptionIndex();
+    // A format string to the slider, hence the doubled percent sign.
+    char label[16];
+    std::snprintf(label, sizeof(label), "%d%%%%", ScreenFilterIntensityOptionPercent(idx));
+
+    ImGui::TextUnformatted(Tr("settings", "screen_filter_intensity"));
+    RowTip("tip_screen_filter_intensity");
+    ImGui::SameLine(Px(180.0f));
+    ImGui::SetNextItemWidth(Px(160.0f));
+    ImGui::PushID("screen_filter_intensity");
+    if (ImGui::SliderInt("##v", &idx, 0, ScreenFilterIntensityOptionCount() - 1, label,
+                         ImGuiSliderFlags_NoInput)) {
+      SetScreenFilterIntensityOption(idx);
+    }
+    if (ImGui::IsItemDeactivatedAfterEdit())
+      SaveBasic();
+    RowTip("tip_screen_filter_intensity");
     ImGui::PopID();
   }
 
@@ -1405,6 +1471,65 @@ void SetDisplayGammaOption(int index) {
 
 float DisplayGamma() {
   return static_cast<float>(std::clamp(REXCVAR_GET(display_gamma), 0.5, 2.0));
+}
+
+int ScreenFilterOptionCount() { return static_cast<int>(kScreenFilters.size()); }
+
+const char* ScreenFilterOptionTextKey(int index) {
+  if (index < 0 || index >= ScreenFilterOptionCount())
+    return nullptr;
+  return kScreenFilters[index].text_key;
+}
+
+int ScreenFilterOptionIndex() {
+  const std::string current = REXCVAR_GET(screen_filter);
+  for (int i = 0; i < ScreenFilterOptionCount(); ++i) {
+    if (current == kScreenFilters[i].value) {
+      // From before Enhanced was a filter: the style was its own setting, and
+      // a config that turned it on has no filter to say so.
+      if (i == 0 && REXCVAR_GET(graphics_style_enhanced))
+        return kEnhancedFilterIndex;
+      return i;
+    }
+  }
+  return 0;
+}
+
+bool ScreenFilterIsEnhanced() { return ScreenFilterOptionIndex() == kEnhancedFilterIndex; }
+
+// The style goes through RequestGraphicsStyle, applied on the next guest frame
+// and saved to the profile from there; setting graphics_style_enhanced
+// directly would be read back as the game's menu changing it.
+void SetScreenFilterOption(int index) {
+  if (index < 0 || index >= ScreenFilterOptionCount())
+    return;
+  rex::cvar::SetFlagByName("screen_filter", kScreenFilters[index].value, /*persist=*/true);
+  RequestGraphicsStyle(index == kEnhancedFilterIndex);
+}
+
+int ScreenFilterIntensityOptionCount() { return 100 / kScreenFilterIntensityStep; }
+
+int ScreenFilterIntensityOptionIndex() {
+  const int percent = std::clamp(int(REXCVAR_GET(screen_filter_intensity)), 5, 100);
+  return (percent + kScreenFilterIntensityStep / 2) / kScreenFilterIntensityStep - 1;
+}
+
+int ScreenFilterIntensityOptionPercent(int index) {
+  return (index + 1) * kScreenFilterIntensityStep;
+}
+
+void SetScreenFilterIntensityOption(int index) {
+  if (index < 0 || index >= ScreenFilterIntensityOptionCount())
+    return;
+  rex::cvar::SetFlagByName("screen_filter_intensity",
+                           std::to_string(ScreenFilterIntensityOptionPercent(index)),
+                           /*persist=*/true);
+}
+
+ScreenFilterParams CurrentScreenFilter() {
+  const ScreenFilterOption& option = kScreenFilters[ScreenFilterOptionIndex()];
+  const float intensity = std::clamp(int(REXCVAR_GET(screen_filter_intensity)), 5, 100) / 100.0f;
+  return {option.kind, option.full_strength * intensity};
 }
 
 float UiScale() { return static_cast<float>(std::clamp(REXCVAR_GET(ui_scale), 0.5, 3.0)); }

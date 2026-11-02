@@ -173,6 +173,21 @@ rendering style over the same HD texture data) remains unlocated.
 Resolving this would need the actual pointer/table structure this port
 uses in place of the PS1 stage header, not heuristic scanning.
 
+## Where the PS1 picture is drawn
+
+There is no separate PS1 texture: the game renders the PS1 side's picture
+directly into its one 1280x720 render target, within
+`graphics.stretch_rect` (`0x82882C68`, LTRB in render-target pixels; the
+full-screen bounds are at `0x82882C98`). That rect is what the "Change
+Screen Size" screen and the stretch presets resize (see
+`src/screens/graphics_settings.cpp`). So anything meant to apply to the PS1
+picture alone, like the `screen_filter` cvar's scanlines, has to work on that
+region of the frame, not on a texture. The frame is drawn by
+`XenonFramework::DrawLayers` (`sub_82582AC0`): the PS1 side's layers first,
+then, at `0x82583174`, the UI manager's draw (the Xbox pause menu and the
+screens opened from it), then the swap. The screen filter is applied at that
+point, so the UI lands on top of it.
+
 ## Modding these tables
 
 Two mechanisms, detailed in `docs/making-mods.md`'s "Patching static game

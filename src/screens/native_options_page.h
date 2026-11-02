@@ -88,11 +88,23 @@ struct OptionRow {
   // differs from what is shown.
   bool follow = false;
 
-  // Override rows only: force the stock setting this row displaced to its
-  // maximum, so whatever now backs the row has the full range to work with
-  // rather than being multiplied down by a leftover value nobody can reach
-  // any more.
+  // The stock setting (0 Graphics, 1 Volume) this row now stands in for,
+  // which pin_stock_to_max and stock_value act on in the game's own table; -1
+  // for the one at list_row, if any. A row can stand in for one stock setting
+  // while sitting on another's line, or on a line of its own.
+  int32_t stock_row = -1;
+
+  // Force the stock setting this row stands in for to its maximum, so
+  // whatever now backs the row has the full range to work with rather than
+  // being multiplied down by a leftover value nobody can reach any more.
   bool pin_stock_to_max = false;
+
+  // The value to hold the stock setting this row stands in for at in the
+  // game's own table, re-asked at every bind and after every change to the
+  // row. For a stock setting something else still applies, so that the
+  // game's Accept writes back what that something set rather than the value
+  // the row had when the screen opened.
+  int32_t (*stock_value)(const OptionRow& row) = nullptr;
 
   // Override rows only: returning false leaves the row completely alone:
   // the stock row keeps its vanilla behaviour, model copy-back and all.
@@ -147,6 +159,15 @@ struct OptionsPage {
   // address of its glyph's image name. A null key shows none.
   NativeText prompt_text;
   uint32_t prompt_glyph = 0;
+
+  // The row (list_row) that prompt, and stretch_prompt's Y with it, belongs
+  // to: shown and taken only while that row is selected. -1 for the whole
+  // page.
+  int32_t prompt_row = -1;
+
+  // The shoulder buttons' "CHANGE PAGE" prompt, after that one: for a page
+  // whose fourth prompt is taken by something else.
+  bool page_prompt = false;
 
   // Text drawn to the right of the title, whatever the rows do (a credit),
   // past where the title's right arrow goes so it stays put with or without

@@ -76,6 +76,11 @@ void GuestDrawTessellatedQuad(uint8_t* base, uint32_t device, uint32_t control_p
 void GuestResolve(uint8_t* base, uint32_t device, uint32_t flags, uint32_t destination,
                   uint32_t clear_color);
 
+// The PS1 side's picture is complete and the game's own UI is about to be drawn
+// over it: lays the screen filter (the screen_filter cvar) over the picture's
+// rect (graphics.stretch_rect), so the UI lands on top of it unfiltered.
+void GuestFilterPs1Picture(uint8_t* base);
+
 // The guest's ClearF: (device, flags, rect or null, float4 colour pointer).
 // Clears the render target to the colour, within the rect when there is one.
 void GuestClear(uint8_t* base, uint32_t device, uint32_t flags, uint32_t rect, uint32_t color);

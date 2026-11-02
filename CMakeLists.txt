@@ -528,3 +528,8 @@ plume_compile_vertex_shader(nocturnerecomp
     "${CMAKE_SOURCE_DIR}/src/shaders/blit.vert.hlsl" "blitVert" "VSMain")
 plume_compile_pixel_shader(nocturnerecomp
     "${CMAKE_SOURCE_DIR}/src/shaders/blit.frag.hlsl" "blitFrag" "PSMain")
+
+# The screen filter, laid over the PS1 picture in the guest target (drawn with
+# the blit's vertex shader).
+plume_compile_pixel_shader(nocturnerecomp
+    "${CMAKE_SOURCE_DIR}/src/shaders/screen_filter.frag.hlsl" "screenFilterFrag" "PSMain")

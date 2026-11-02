@@ -272,3 +272,11 @@ address = 0x825CFC68
 name = "GraphicsSettings_SetWidgetTextHook"
 registers = ["r3"]
 return_on_true = true
+
+# Screen filter (src/gpu/native_renderer_d3d.cpp). XenonFramework::DrawLayers
+# (sub_82582AC0), on the call that fetches the UI manager to draw it: the PS1
+# side's layers are all drawn by here, and the Xbox UI (pause menu included)
+# is drawn right after.
+[[midasm_hook]]
+address = 0x82583174
+name = "ScreenFilterBeforeUi"
