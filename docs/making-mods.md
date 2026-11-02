@@ -125,8 +125,10 @@ dxc -T ps_6_0 -E PSMain -spirv -fspv-target-env=vulkan1.0 -fvk-use-dx-layout -Fo
 
 In `NocturneRecomp-Mods`, `scripts/compile_filters.py` does this for every
 `src/*/filters/` folder, reading `source` and `defines` from each filter's
-toml so one source can build several filters. `src/crt_filter/` is a worked
-example: scanlines, an aperture grille, colour bleed, bloom and halation.
+toml so one source can build several filters. The game's own CRT filter,
+`src/shaders/crt.frag.hlsl`, is written against the same contract and is a
+worked example: scanlines, an aperture grille, colour bleed, bloom and
+halation.
 
 ## Code mods
 

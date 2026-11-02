@@ -74,7 +74,7 @@ REXCVAR_DECLARE(bool, graphics_style_enhanced);  // graphics_settings.cpp
 // ours. No allowed list: a mod's filter is "<mod>/<stem>", and one whose mod is
 // off reads as none without the setting being lost.
 REXCVAR_DEFINE_STRING(screen_filter, "none", "Game",
-                      "Effect laid over the PS1 picture: none, scanlines, lcd_grid, smooth (the "
+                      "Effect laid over the PS1 picture: none, scanlines, lcd_grid, crt, smooth (the "
                       "game's Enhanced graphics), or a mod's filter as <mod>/<name>");
 
 // How strong screen_filter's effect is, in percent.
@@ -230,14 +230,15 @@ struct ScreenFilterOption {
   ScreenFilterKind kind;
   float full_strength;
 };
-constexpr std::array<ScreenFilterOption, 4> kScreenFilters = {{
+constexpr std::array<ScreenFilterOption, 5> kScreenFilters = {{
     {"none", "filter_none", ScreenFilterKind::kNone, 0.0f},
     {"scanlines", "filter_scanlines", ScreenFilterKind::kScanlines, 1.0f},
     // Darkened on both axes, so it reaches as dark with less.
     {"lcd_grid", "filter_lcd_grid", ScreenFilterKind::kLcdGrid, 0.7f},
+    {"crt", "filter_crt", ScreenFilterKind::kCrt, 1.0f},
     {"smooth", "filter_smooth", ScreenFilterKind::kNone, 0.0f},
 }};
-constexpr int kEnhancedFilterIndex = 3;
+constexpr int kEnhancedFilterIndex = 4;
 
 constexpr int kScreenFilterIntensityStep = 5;
 constexpr int kScreenCurvatureStep = 5;

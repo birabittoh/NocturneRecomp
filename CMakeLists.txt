@@ -543,3 +543,8 @@ plume_compile_pixel_shader(nocturnerecomp
 # (with the blit's vertex shader, in the mod filters' layout).
 plume_compile_pixel_shader(nocturnerecomp
     "${CMAKE_SOURCE_DIR}/src/shaders/curvature.frag.hlsl" "curvatureFrag" "PSMain")
+
+# The CRT screen filter (drawn with the blit's vertex shader, in the mod
+# filters' layout).
+plume_compile_pixel_shader(nocturnerecomp
+    "${CMAKE_SOURCE_DIR}/src/shaders/crt.frag.hlsl" "crtFrag" "PSMain")

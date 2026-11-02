@@ -34,12 +34,14 @@
 #include "shaders/screenFilterFrag.hlsl.dxil.h"
 #include "shaders/movieFrag.hlsl.dxil.h"
 #include "shaders/curvatureFrag.hlsl.dxil.h"
+#include "shaders/crtFrag.hlsl.dxil.h"
 #endif
 #include "shaders/blitVert.hlsl.spirv.h"
 #include "shaders/blitFrag.hlsl.spirv.h"
 #include "shaders/screenFilterFrag.hlsl.spirv.h"
 #include "shaders/movieFrag.hlsl.spirv.h"
 #include "shaders/curvatureFrag.hlsl.spirv.h"
+#include "shaders/crtFrag.hlsl.spirv.h"
 
 namespace nocturne {
 namespace {
@@ -291,6 +293,8 @@ struct Resources {
   std::unique_ptr<RenderDescriptorSet> custom_set;
   std::vector<std::unique_ptr<RenderPipeline>> custom_pipelines;
   std::vector<bool> custom_attempted;
+  // The built-in CRT filter, drawn the way a mod's is.
+  std::unique_ptr<RenderPipeline> crt_pipeline;
   // The Screen Curvature setting's pass: in the mod filters' layout, reading
   // the same copy of the target, blended over the backdrop, the frame as it
   // was before the first PS1 layer (backdrop_frame says which frame's it is).
@@ -607,6 +611,40 @@ std::vector<uint8_t> ReadFileBytes(const std::filesystem::path& path) {
   return bytes;
 }
 
+// A filter drawn in the mod filters' layout, its output replacing the target's.
+std::unique_ptr<RenderPipeline> CreateFilterPipeline(RenderDevice* device, RenderShader* vertex,
+                                                     RenderShader* pixel) {
+  RenderGraphicsPipelineDesc desc;
+  desc.pipelineLayout = g_res.custom_layout.get();
+  desc.vertexShader = vertex;
+  desc.pixelShader = pixel;
+  desc.renderTargetFormat[0] = kTargetFormat;
+  desc.renderTargetCount = 1;
+  desc.renderTargetBlend[0] = RenderBlendDesc::Copy();
+  desc.cullMode = RenderCullMode::NONE;
+  desc.primitiveTopology = RenderPrimitiveTopology::TRIANGLE_LIST;
+  return device->createGraphicsPipeline(desc);
+}
+
+// The built-in CRT filter: the blit's vertex shader and crt.frag.hlsl.
+bool CreateCrtPipeline(RenderDevice* device) {
+#ifdef _WIN32
+  auto vertex = CreateBuiltinShader(device, blitVertBlobDXIL, sizeof(blitVertBlobDXIL),
+                                    blitVertBlobSPIRV, sizeof(blitVertBlobSPIRV), "VSMain");
+  auto pixel = CreateBuiltinShader(device, crtFragBlobDXIL, sizeof(crtFragBlobDXIL),
+                                   crtFragBlobSPIRV, sizeof(crtFragBlobSPIRV), "PSMain");
+#else
+  auto vertex = CreateBuiltinShader(device, nullptr, 0, blitVertBlobSPIRV,
+                                    sizeof(blitVertBlobSPIRV), "VSMain");
+  auto pixel = CreateBuiltinShader(device, nullptr, 0, crtFragBlobSPIRV,
+                                   sizeof(crtFragBlobSPIRV), "PSMain");
+#endif
+  if (!vertex || !pixel)
+    return false;
+  g_res.crt_pipeline = CreateFilterPipeline(device, vertex.get(), pixel.get());
+  return g_res.crt_pipeline != nullptr;
+}
+
 // The pipeline for mod filter `index`, built from its blob for the backend in
 // use the first time it is asked for.
 RenderPipeline* CustomFilterPipeline(RenderDevice* device, int index) {
@@ -643,16 +681,7 @@ RenderPipeline* CustomFilterPipeline(RenderDevice* device, int index) {
     return nullptr;
   }
 
-  RenderGraphicsPipelineDesc desc;
-  desc.pipelineLayout = g_res.custom_layout.get();
-  desc.vertexShader = vertex.get();
-  desc.pixelShader = pixel.get();
-  desc.renderTargetFormat[0] = kTargetFormat;
-  desc.renderTargetCount = 1;
-  desc.renderTargetBlend[0] = RenderBlendDesc::Copy();
-  desc.cullMode = RenderCullMode::NONE;
-  desc.primitiveTopology = RenderPrimitiveTopology::TRIANGLE_LIST;
-  g_res.custom_pipelines[index] = device->createGraphicsPipeline(desc);
+  g_res.custom_pipelines[index] = CreateFilterPipeline(device, vertex.get(), pixel.get());
   if (!g_res.custom_pipelines[index])
     REXLOG_ERROR("native_renderer: could not build screen filter {}'s pipeline", filter.value);
   else
@@ -775,8 +804,11 @@ bool EnsureResources(RenderDevice* device) {
   if (!CreateCustomFilterLayout(device)) {
     REXLOG_ERROR("native_renderer: could not create the mod screen filters' resources");
     g_res.custom_layout.reset();
-  } else if (!CreateCurvaturePipeline(device)) {
-    REXLOG_ERROR("native_renderer: could not create the screen curvature pass");
+  } else {
+    if (!CreateCrtPipeline(device))
+      REXLOG_ERROR("native_renderer: could not create the CRT screen filter");
+    if (!CreateCurvaturePipeline(device))
+      REXLOG_ERROR("native_renderer: could not create the screen curvature pass");
   }
 
   g_res.ready = true;
@@ -1655,20 +1687,24 @@ void CopyTargetToSource(RenderCommandList* commands) {
   g_target_bound = false;
 }
 
-// The screen_filter cvar's effect over the picture: a built-in one multiplied
-// into it, or a mod's redrawing it. `picture` says where it is.
+// The screen_filter cvar's effect over the picture: Scanlines or LCD Grid
+// multiplied into it, or CRT or a mod's redrawing it. `picture` says where it
+// is.
 void DrawScreenFilter(RenderCommandList* commands, const RenderViewport& viewport,
                       const RenderRect& scissor, const CustomFilterConstants& picture) {
   const ScreenFilterParams filter = CurrentScreenFilter();
   if (filter.kind == ScreenFilterKind::kNone)
     return;
-  const bool custom = filter.kind == ScreenFilterKind::kCustom;
+  const bool custom =
+      filter.kind == ScreenFilterKind::kCrt || filter.kind == ScreenFilterKind::kCustom;
   if (!custom && !g_res.filter_pipeline)
     return;
 
   RenderPipeline* custom_pipeline = nullptr;
   if (custom) {
-    custom_pipeline = CustomFilterPipeline(PlumeDevice(), filter.custom);
+    custom_pipeline = filter.kind == ScreenFilterKind::kCrt
+                          ? g_res.crt_pipeline.get()
+                          : CustomFilterPipeline(PlumeDevice(), filter.custom);
     if (custom_pipeline == nullptr)
       return;
     // The filter reads the picture and draws it anew, so it samples a copy.

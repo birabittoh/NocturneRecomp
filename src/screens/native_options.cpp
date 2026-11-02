@@ -455,6 +455,7 @@ constexpr NativeText kScreenFilterLabel{"screen_filter_label"};
 constexpr NativeText kScreenFilterTexts[] = {NativeText{"filter_none"},
                                              NativeText{"filter_scanlines"},
                                              NativeText{"filter_lcd_grid"},
+                                             NativeText{"filter_crt"},
                                              NativeText{"filter_smooth"}};
 
 // The built-in options, then the mods' filters by their own names.
@@ -977,8 +978,8 @@ bool g_settings_laid_out = false;
 bool g_settings_intensity_shown = false;
 
 // OptionsPage::relayout for the first page: Filter Intensity only while the
-// filter has an intensity to set (Scanlines, LCD Grid), the rows below it
-// moving up a line while it is gone.
+// filter has an intensity to set (Scanlines, LCD Grid, CRT), the rows below
+// it moving up a line while it is gone.
 bool RelayoutSettingsPage() {
   const bool shown = CurrentScreenFilter().kind != ScreenFilterKind::kNone;
   if (g_settings_laid_out && shown == g_settings_intensity_shown) {

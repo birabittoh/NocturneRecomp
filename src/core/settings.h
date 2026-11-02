@@ -62,14 +62,21 @@ float DisplayGamma();
 // CurrentScreenFilter is what the blit applies, the kind matching the shader's
 // FILTER_* values.
 //
-// After the built-in options come the custom filters enabled mods ship
-// (kCustom; see docs/making-mods.md's "Screen filters"), each a precompiled
-// pixel shader that samples the PS1 picture and draws over it.
-enum class ScreenFilterKind : uint32_t { kNone = 0, kScanlines = 1, kLcdGrid = 2, kCustom = 3 };
+// kCrt (crt.frag.hlsl) is built in but drawn like a mod's filter. After the
+// built-in options come the custom filters enabled mods ship (kCustom; see
+// docs/making-mods.md's "Screen filters"), each a precompiled pixel shader
+// that samples the PS1 picture and draws over it.
+enum class ScreenFilterKind : uint32_t {
+  kNone = 0,
+  kScanlines = 1,
+  kLcdGrid = 2,
+  kCrt = 3,
+  kCustom = 4,
+};
 struct ScreenFilterParams {
   ScreenFilterKind kind;
-  // How dark the gaps between lines (or cells) get, 0 to 1. A custom filter's
-  // intensity, 0.05 to 1.
+  // How dark the gaps between lines (or cells) get, 0 to 1. CRT's and a custom
+  // filter's intensity, 0.05 to 1.
   float strength;
   // The custom filter (CustomScreenFilters) under kCustom, -1 otherwise.
   int custom = -1;
