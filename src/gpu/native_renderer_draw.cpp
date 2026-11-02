@@ -10,6 +10,8 @@
 #include <cstdlib>
 #include <chrono>
 #include <cstring>
+#include <filesystem>
+#include <fstream>
 #include <iterator>
 #include <memory>
 #include <string>
@@ -275,6 +277,16 @@ struct Resources {
   std::unique_ptr<RenderPipelineLayout> filter_layout;
   std::unique_ptr<RenderPipeline> filter_pipeline;
 
+  // A mod's screen filter (CustomScreenFilters): the target copied into
+  // custom_source for it to sample, and its pipeline, loaded the first time
+  // it is picked (null when that failed, not tried again).
+  TrackedTexture custom_source;
+  std::unique_ptr<RenderPipelineLayout> custom_layout;
+  std::unique_ptr<RenderSampler> point_sampler;
+  std::unique_ptr<RenderDescriptorSet> custom_set;
+  std::vector<std::unique_ptr<RenderPipeline>> custom_pipelines;
+  std::vector<bool> custom_attempted;
+
   std::unique_ptr<RenderShader> vertex_shaders[256];
   std::unique_ptr<RenderShader> pixel_shaders[256];
 } g_res;
@@ -466,6 +478,123 @@ bool CreateScreenFilter(RenderDevice* device) {
   return g_res.filter_pipeline != nullptr;
 }
 
+// A mod's screen filter's push constants: the contract every one is compiled
+// against (docs/making-mods.md, "Screen filters").
+struct CustomFilterConstants {
+  // Where the PS1 picture sits in the source texture, in its uv: offset, then
+  // size. The draw's own uv runs 0..1 across the picture.
+  float source_rect[4];
+  // The source texture's size and the picture's, in pixels.
+  float texture_size[2];
+  float output_size[2];
+  // screen_filter_intensity, 0.05 to 1.
+  float intensity;
+  uint32_t frame_count;
+  float pad[2];
+};
+
+// What every mod's filter shares: the source copy of the target, sampled
+// through a linear sampler (binding 1) and a point one (binding 2).
+bool CreateCustomFilterLayout(RenderDevice* device) {
+  const RenderDescriptorRange ranges[] = {
+      RenderDescriptorRange(RenderDescriptorRangeType::TEXTURE, 0, 1),
+      RenderDescriptorRange(RenderDescriptorRangeType::SAMPLER, 1, 1),
+      RenderDescriptorRange(RenderDescriptorRangeType::SAMPLER, 2, 1),
+  };
+  const RenderDescriptorSetDesc set_desc(ranges, 3);
+  const RenderPushConstantRange push_constants(0, 0, 0, sizeof(CustomFilterConstants),
+                                               RenderShaderStageFlag::PIXEL);
+  RenderPipelineLayoutDesc layout_desc;
+  layout_desc.pushConstantRanges = &push_constants;
+  layout_desc.pushConstantRangesCount = 1;
+  layout_desc.descriptorSetDescs = &set_desc;
+  layout_desc.descriptorSetDescsCount = 1;
+  g_res.custom_layout = device->createPipelineLayout(layout_desc);
+  if (!g_res.custom_layout)
+    return false;
+
+  RenderSamplerDesc sampler_desc;
+  sampler_desc.minFilter = RenderFilter::NEAREST;
+  sampler_desc.magFilter = RenderFilter::NEAREST;
+  sampler_desc.addressU = RenderTextureAddressMode::CLAMP;
+  sampler_desc.addressV = RenderTextureAddressMode::CLAMP;
+  sampler_desc.addressW = RenderTextureAddressMode::CLAMP;
+  g_res.point_sampler = device->createSampler(sampler_desc);
+  g_res.custom_set = device->createDescriptorSet(set_desc);
+  if (!g_res.point_sampler || !g_res.custom_set || !CreateTarget(device, g_res.custom_source))
+    return false;
+  g_res.custom_set->setTexture(0, g_res.custom_source.texture.get(),
+                               RenderTextureLayout::SHADER_READ);
+  g_res.custom_set->setSampler(1, g_res.blit_sampler.get());
+  g_res.custom_set->setSampler(2, g_res.point_sampler.get());
+  return true;
+}
+
+std::vector<uint8_t> ReadFileBytes(const std::filesystem::path& path) {
+  std::vector<uint8_t> bytes;
+  std::ifstream file(path, std::ios::binary | std::ios::ate);
+  if (!file)
+    return bytes;
+  bytes.resize(size_t(file.tellg()));
+  file.seekg(0);
+  if (!file.read(reinterpret_cast<char*>(bytes.data()), std::streamsize(bytes.size())))
+    bytes.clear();
+  return bytes;
+}
+
+// The pipeline for mod filter `index`, built from its blob for the backend in
+// use the first time it is asked for.
+RenderPipeline* CustomFilterPipeline(RenderDevice* device, int index) {
+  const auto& filters = CustomScreenFilters();
+  if (index < 0 || size_t(index) >= filters.size() || !g_res.custom_layout)
+    return nullptr;
+  if (g_res.custom_pipelines.size() < filters.size()) {
+    g_res.custom_pipelines.resize(filters.size());
+    g_res.custom_attempted.resize(filters.size());
+  }
+  if (g_res.custom_attempted[index])
+    return g_res.custom_pipelines[index].get();
+  g_res.custom_attempted[index] = true;
+
+  const CustomScreenFilter& filter = filters[index];
+  const RenderShaderFormat format = PlumeShaderFormat();
+  const bool dxil = format == RenderShaderFormat::DXIL;
+  const std::vector<uint8_t> blob = ReadFileBytes(dxil ? filter.dxil : filter.spirv);
+  if (blob.empty()) {
+    REXLOG_ERROR("native_renderer: could not read screen filter {}'s {} blob", filter.value,
+                 dxil ? "DXIL" : "SPIR-V");
+    return nullptr;
+  }
+#ifdef _WIN32
+  auto vertex = CreateBuiltinShader(device, blitVertBlobDXIL, sizeof(blitVertBlobDXIL),
+                                    blitVertBlobSPIRV, sizeof(blitVertBlobSPIRV), "VSMain");
+#else
+  auto vertex = CreateBuiltinShader(device, nullptr, 0, blitVertBlobSPIRV,
+                                    sizeof(blitVertBlobSPIRV), "VSMain");
+#endif
+  auto pixel = device->createShader(blob.data(), blob.size(), "PSMain", format);
+  if (!vertex || !pixel) {
+    REXLOG_ERROR("native_renderer: screen filter {} has no usable PSMain", filter.value);
+    return nullptr;
+  }
+
+  RenderGraphicsPipelineDesc desc;
+  desc.pipelineLayout = g_res.custom_layout.get();
+  desc.vertexShader = vertex.get();
+  desc.pixelShader = pixel.get();
+  desc.renderTargetFormat[0] = kTargetFormat;
+  desc.renderTargetCount = 1;
+  desc.renderTargetBlend[0] = RenderBlendDesc::Copy();
+  desc.cullMode = RenderCullMode::NONE;
+  desc.primitiveTopology = RenderPrimitiveTopology::TRIANGLE_LIST;
+  g_res.custom_pipelines[index] = device->createGraphicsPipeline(desc);
+  if (!g_res.custom_pipelines[index])
+    REXLOG_ERROR("native_renderer: could not build screen filter {}'s pipeline", filter.value);
+  else
+    REXLOG_INFO("native_renderer: loaded screen filter {}", filter.value);
+  return g_res.custom_pipelines[index].get();
+}
+
 // The texture and sampler set layouts. One range per slot rather than one
 // sixteen wide: Plume turns a range into a single Vulkan binding with an array
 // count, and the HLSL declares sixteen separate objects at bindings 0..15 (see
@@ -532,6 +661,10 @@ bool EnsureResources(RenderDevice* device) {
   // Not fatal: the game draws the same without it.
   if (!CreateScreenFilter(device))
     REXLOG_ERROR("native_renderer: could not create the screen filter");
+  if (!CreateCustomFilterLayout(device)) {
+    REXLOG_ERROR("native_renderer: could not create the mod screen filters' resources");
+    g_res.custom_layout.reset();
+  }
 
   g_res.ready = true;
   return true;
@@ -1317,7 +1450,10 @@ void GuestClear(uint8_t* base, uint32_t device, uint32_t flags, uint32_t rect, u
 
 void GuestFilterPs1Picture(uint8_t* base) {
   const ScreenFilterParams filter = CurrentScreenFilter();
-  if (filter.kind == ScreenFilterKind::kNone || !g_res.filter_pipeline || !GameRunning(base))
+  if (filter.kind == ScreenFilterKind::kNone || !GameRunning(base))
+    return;
+  const bool custom = filter.kind == ScreenFilterKind::kCustom;
+  if (!custom && !g_res.filter_pipeline)
     return;
   // The rect in render target pixels, against the full-screen one; signed,
   // since a stretch past the screen edges puts left and top below zero.
@@ -1331,18 +1467,46 @@ void GuestFilterPs1Picture(uint8_t* base) {
   if (commands == nullptr)
     return;
 
+  RenderPipeline* custom_pipeline = nullptr;
+  if (custom) {
+    custom_pipeline = CustomFilterPipeline(PlumeDevice(), filter.custom);
+    if (custom_pipeline == nullptr)
+      return;
+    // The filter reads the picture and draws it anew, so it samples a copy.
+    g_res.target.Transition(commands, RenderTextureLayout::COPY_SOURCE);
+    g_res.custom_source.Transition(commands, RenderTextureLayout::COPY_DEST);
+    commands->copyTexture(g_res.custom_source.texture.get(), g_res.target.texture.get());
+    g_res.custom_source.Transition(commands, RenderTextureLayout::SHADER_READ);
+    g_target_bound = false;
+  }
+
   const float sx = float(g_target_width) / max_w, sy = float(g_target_height) / max_h;
+  const float width = (right - left) * sx, height = (bottom - top) * sy;
   BindTarget(commands);
-  commands->setViewports(
-      RenderViewport(left * sx, top * sy, (right - left) * sx, (bottom - top) * sy, 0.0f, 1.0f));
+  commands->setViewports(RenderViewport(left * sx, top * sy, width, height, 0.0f, 1.0f));
   commands->setScissors(RenderRect(
       std::max(int32_t(left * sx), 0), std::max(int32_t(top * sy), 0),
       std::min(int32_t(std::ceil(right * sx)), int32_t(g_target_width)),
       std::min(int32_t(std::ceil(bottom * sy)), int32_t(g_target_height))));
-  commands->setGraphicsPipelineLayout(g_res.filter_layout.get());
-  commands->setPipeline(g_res.filter_pipeline.get());
-  const FilterConstants constants = {uint32_t(filter.kind), filter.strength};
-  commands->setGraphicsPushConstants(0, &constants, 0, sizeof(constants));
+  if (custom) {
+    const float tw = float(g_target_width), th = float(g_target_height);
+    const CustomFilterConstants constants = {
+        .source_rect = {left * sx / tw, top * sy / th, width / tw, height / th},
+        .texture_size = {tw, th},
+        .output_size = {width, height},
+        .intensity = filter.strength,
+        .frame_count = uint32_t(g_frame_serial),
+    };
+    commands->setGraphicsPipelineLayout(g_res.custom_layout.get());
+    commands->setPipeline(custom_pipeline);
+    commands->setGraphicsDescriptorSet(g_res.custom_set.get(), 0);
+    commands->setGraphicsPushConstants(0, &constants, 0, sizeof(constants));
+  } else {
+    commands->setGraphicsPipelineLayout(g_res.filter_layout.get());
+    commands->setPipeline(g_res.filter_pipeline.get());
+    const FilterConstants constants = {uint32_t(filter.kind), filter.strength};
+    commands->setGraphicsPushConstants(0, &constants, 0, sizeof(constants));
+  }
   commands->drawInstanced(3, 1, 0, 0);
   // The next guest draw puts the target's own viewport and scissor back.
   g_target_bound = false;
@@ -1442,6 +1606,16 @@ void GuestResizeTarget(uint32_t width, uint32_t height) {
     return;
   }
   g_res.blit_set->setTexture(0, g_res.front.texture.get(), RenderTextureLayout::SHADER_READ);
+  if (g_res.custom_layout) {
+    g_res.custom_source = TrackedTexture{};
+    if (CreateTarget(device, g_res.custom_source)) {
+      g_res.custom_set->setTexture(0, g_res.custom_source.texture.get(),
+                                   RenderTextureLayout::SHADER_READ);
+    } else {
+      REXLOG_ERROR("native_renderer: could not rebuild the mod screen filters' source");
+      g_res.custom_layout.reset();
+    }
+  }
   g_dump.buffer.reset();
   g_dump.pending = false;
   g_targets_cleared = false;

@@ -21,6 +21,7 @@
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
+#include <mutex>
 #include <optional>
 #include <string>
 #include <string_view>
@@ -35,12 +36,14 @@
 #include <rex/logging/macros.h>
 #include <rex/platform.h>
 #include <rex/platform/process.h>
+#include <rex/runtime.h>
 #include <rex/system/auto_updater.h>
 #include <rex/system/mod_registry.h>
 #include <rex/ui/imgui_widgets.h>
 #include <rex/ui/overlay/settings_overlay.h>
 #include <rex/ui/window.h>
 #include <imgui.h>
+#include <toml++/toml.hpp>
 
 #if REX_HAS_VULKAN
 #include <rex/ui/vulkan/provider.h>
@@ -68,11 +71,11 @@ REXCVAR_DECLARE(bool, graphics_style_enhanced);  // graphics_settings.cpp
 // Laid over the PS1 picture by the native renderer (see ScreenFilterParams),
 // except "smooth", which is the game's own Enhanced graphics style
 // (graphics_style_enhanced, which smooths the pixels) rather than an effect of
-// ours.
+// ours. No allowed list: a mod's filter is "<mod>/<stem>", and one whose mod is
+// off reads as none without the setting being lost.
 REXCVAR_DEFINE_STRING(screen_filter, "none", "Game",
-                      "Effect laid over the PS1 picture: none, scanlines, lcd_grid, or smooth "
-                      "(the game's Enhanced graphics)")
-    .allowed({"none", "scanlines", "lcd_grid", "smooth"});
+                      "Effect laid over the PS1 picture: none, scanlines, lcd_grid, smooth (the "
+                      "game's Enhanced graphics), or a mod's filter as <mod>/<name>");
 
 // How strong screen_filter's effect is, in percent.
 REXCVAR_DEFINE_INT32(screen_filter_intensity, 50, "Game",
@@ -1054,10 +1057,19 @@ class CuratedSettingsDialog : public rex::ui::ImGuiDialog {
     ImGui::SameLine(Px(180.0f));
     ImGui::SetNextItemWidth(Px(160.0f));
     ImGui::PushID("screen_filter");
-    if (ImGui::BeginCombo("##v", Tr("native", ScreenFilterOptionTextKey(current)))) {
+    // A mod's filter by its own name, the built-in ones translated.
+    const auto option_text = [](int index) {
+      const CustomScreenFilter* custom = ScreenFilterOptionCustom(index);
+      return custom ? custom->name.c_str() : Tr("native", ScreenFilterOptionTextKey(index));
+    };
+    if (ImGui::BeginCombo("##v", option_text(current))) {
       for (int i = 0; i < ScreenFilterOptionCount(); ++i) {
         const bool selected = i == current;
-        if (ImGui::Selectable(Tr("native", ScreenFilterOptionTextKey(i)), selected)) {
+        // By index, as two mods may name a filter the same.
+        ImGui::PushID(i);
+        const bool picked = ImGui::Selectable(option_text(i), selected);
+        ImGui::PopID();
+        if (picked) {
           SetScreenFilterOption(i);
           SaveBasic();
         }
@@ -1473,17 +1485,99 @@ float DisplayGamma() {
   return static_cast<float>(std::clamp(REXCVAR_GET(display_gamma), 0.5, 2.0));
 }
 
-int ScreenFilterOptionCount() { return static_cast<int>(kScreenFilters.size()); }
+namespace {
+
+std::string PathUtf8(const std::filesystem::path& path) {
+  const std::u8string text = path.u8string();
+  return std::string(text.begin(), text.end());
+}
+
+// One mod's filters/ folder, sorted by stem. A filter needs both blobs, so it
+// runs whichever backend is in use.
+void ScanFilterFolder(const std::filesystem::path& root, std::vector<CustomScreenFilter>& out) {
+  const std::string mod = PathUtf8(root.parent_path().filename());
+  std::vector<std::filesystem::path> blobs;
+  std::error_code ec;
+  for (const auto& entry : std::filesystem::directory_iterator(root, ec)) {
+    if (entry.is_regular_file(ec) && entry.path().extension() == ".dxil")
+      blobs.push_back(entry.path());
+  }
+  std::sort(blobs.begin(), blobs.end());
+  for (const std::filesystem::path& dxil : blobs) {
+    std::filesystem::path spirv = dxil;
+    spirv.replace_extension(".spv");
+    const std::string stem = PathUtf8(dxil.stem());
+    if (!std::filesystem::is_regular_file(spirv, ec)) {
+      REXLOG_WARN("screen filter {}/{}: no {}.spv next to its .dxil, skipped", mod, stem, stem);
+      continue;
+    }
+    CustomScreenFilter filter;
+    filter.value = mod + "/" + stem;
+    filter.name = stem;
+    std::filesystem::path info = dxil;
+    info.replace_extension(".toml");
+    if (std::filesystem::is_regular_file(info, ec)) {
+      try {
+        const toml::table table = toml::parse_file(PathUtf8(info));
+        if (const auto name = table["name"].value<std::string>(); name && !name->empty())
+          filter.name = *name;
+      } catch (const toml::parse_error& e) {
+        REXLOG_WARN("screen filter {}: {}", filter.value, e.what());
+      }
+    }
+    filter.name_u16 = Utf8ToUtf16(filter.name);
+    filter.dxil = dxil;
+    filter.spirv = std::move(spirv);
+    out.push_back(std::move(filter));
+  }
+}
+
+}  // namespace
+
+const std::vector<CustomScreenFilter>& CustomScreenFilters() {
+  static std::mutex mutex;
+  static bool scanned = false;
+  static std::vector<CustomScreenFilter> filters;
+  std::lock_guard lock(mutex);
+  if (scanned)
+    return filters;
+  rex::Runtime* runtime = rex::Runtime::instance();
+  if (runtime == nullptr)
+    return filters;
+  scanned = true;
+  for (const std::filesystem::path& root : runtime->ModOverlayRoots("filters"))
+    ScanFilterFolder(root, filters);
+  const size_t room = kMaxScreenFilterOptions - kScreenFilters.size();
+  if (filters.size() > room) {
+    REXLOG_WARN("{} mod screen filters, only the first {} are listed", filters.size(), room);
+    filters.resize(room);
+  }
+  for (const CustomScreenFilter& filter : filters)
+    REXLOG_INFO("screen filter {} (\"{}\") from a mod", filter.value, filter.name);
+  return filters;
+}
+
+int ScreenFilterOptionCount() {
+  return static_cast<int>(kScreenFilters.size() + CustomScreenFilters().size());
+}
 
 const char* ScreenFilterOptionTextKey(int index) {
-  if (index < 0 || index >= ScreenFilterOptionCount())
+  if (index < 0 || index >= static_cast<int>(kScreenFilters.size()))
     return nullptr;
   return kScreenFilters[index].text_key;
 }
 
+const CustomScreenFilter* ScreenFilterOptionCustom(int index) {
+  const int custom = index - static_cast<int>(kScreenFilters.size());
+  const auto& filters = CustomScreenFilters();
+  if (custom < 0 || custom >= static_cast<int>(filters.size()))
+    return nullptr;
+  return &filters[custom];
+}
+
 int ScreenFilterOptionIndex() {
   const std::string current = REXCVAR_GET(screen_filter);
-  for (int i = 0; i < ScreenFilterOptionCount(); ++i) {
+  for (int i = 0; i < static_cast<int>(kScreenFilters.size()); ++i) {
     if (current == kScreenFilters[i].value) {
       // From before Enhanced was a filter: the style was its own setting, and
       // a config that turned it on has no filter to say so.
@@ -1491,6 +1585,11 @@ int ScreenFilterOptionIndex() {
         return kEnhancedFilterIndex;
       return i;
     }
+  }
+  const auto& filters = CustomScreenFilters();
+  for (size_t i = 0; i < filters.size(); ++i) {
+    if (current == filters[i].value)
+      return static_cast<int>(kScreenFilters.size() + i);
   }
   return 0;
 }
@@ -1503,7 +1602,9 @@ bool ScreenFilterIsEnhanced() { return ScreenFilterOptionIndex() == kEnhancedFil
 void SetScreenFilterOption(int index) {
   if (index < 0 || index >= ScreenFilterOptionCount())
     return;
-  rex::cvar::SetFlagByName("screen_filter", kScreenFilters[index].value, /*persist=*/true);
+  const CustomScreenFilter* custom = ScreenFilterOptionCustom(index);
+  rex::cvar::SetFlagByName("screen_filter", custom ? custom->value : kScreenFilters[index].value,
+                           /*persist=*/true);
   RequestGraphicsStyle(index == kEnhancedFilterIndex);
 }
 
@@ -1527,8 +1628,11 @@ void SetScreenFilterIntensityOption(int index) {
 }
 
 ScreenFilterParams CurrentScreenFilter() {
-  const ScreenFilterOption& option = kScreenFilters[ScreenFilterOptionIndex()];
+  const int index = ScreenFilterOptionIndex();
   const float intensity = std::clamp(int(REXCVAR_GET(screen_filter_intensity)), 5, 100) / 100.0f;
+  if (index >= static_cast<int>(kScreenFilters.size()))
+    return {ScreenFilterKind::kCustom, intensity, index - static_cast<int>(kScreenFilters.size())};
+  const ScreenFilterOption& option = kScreenFilters[index];
   return {option.kind, option.full_strength * intensity};
 }
 

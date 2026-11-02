@@ -33,6 +33,7 @@ mods/<name>/
   dlc/<name>/  overlays an installed DLC package
   textures/    texture replacements: <hash16>.dds or .png (flat dir)
   shaders/     shader replacements (DXBC/SPIR-V binaries)
+  filters/     screen filters for the Screen Filter setting (see below)
   mod.toml     descriptive metadata (see below)
   icon.png     shown in the F1 mod manager overlay
 ```
@@ -44,6 +45,85 @@ hash (dump one with `texture_dump_enabled = true` in `nocturnerecomp.toml` to
 find the hash for a texture you want to replace).
 
 See the `NocturneRecomp-Mods` repo's `src/` directory for some working examples.
+
+## Screen filters
+
+A mod can add its own effects to the Screen Filter setting (both the F4
+overlay's combo and the game's own Settings page), listed after the built-in
+ones under the name it gives them. Each is a pixel shader, shipped
+precompiled in the mod's `filters/` folder:
+
+```
+mods/<name>/filters/
+  <stem>.dxil   for D3D12
+  <stem>.spv    for Vulkan (Android included)
+  <stem>.toml   optional: name = "Shown Name" (the stem otherwise)
+```
+
+Both blobs are required; a filter missing one is skipped with a warning in
+the log. The setting stores the filter as `screen_filter = "<mod>/<stem>"`,
+so turning the mod off reads as no filter, and turning it back on brings the
+choice back. Filters are read once at startup, so a newly enabled mod's
+filters show up after a restart.
+
+The game draws the PS1 picture into its frame, then the filter, then its
+own UI (the pause menu), so the filter applies to the picture alone and
+within the screen size the player set. The filter is drawn over the
+picture's rect and its output replaces what is there; it reads the picture
+from a copy of the frame. Its entry point is `PSMain`, and it has to declare
+exactly these bindings and constants:
+
+```hlsl
+struct VSOutput {
+    float4 position : SV_POSITION;  // pixel in the frame
+    float2 uv       : TEXCOORD0;    // 0..1 across the PS1 picture
+};
+
+[[vk::binding(0, 0)]] Texture2D<float4> sourceTexture : register(t0);
+[[vk::binding(1, 0)]] SamplerState linearSampler : register(s1);
+[[vk::binding(2, 0)]] SamplerState pointSampler : register(s2);
+
+[[vk::push_constant]]
+struct Constants {
+    float4 sourceRect;   // the picture in sourceTexture's uv: offset, size
+    float2 textureSize;  // sourceTexture, in pixels
+    float2 outputSize;   // the picture as drawn, in pixels
+    float intensity;     // the Filter Intensity setting, 0.05 to 1
+    uint frameCount;
+    float2 pad;
+} constants;
+
+float4 PSMain(VSOutput input) : SV_TARGET {
+    float2 uv = constants.sourceRect.xy + input.uv * constants.sourceRect.zw;
+    return float4(sourceTexture.Sample(linearSampler, uv).rgb, 1.0);
+}
+```
+
+`intensity` is the one setting the player gets for a filter, and the game
+does nothing with it but pass it in: scale the effect's strength with it
+(how dark the scanlines get, how much bloom), and keep what isn't a strength
+(a curved screen's shape, a mask's pitch) fixed, or a separate filter.
+
+The picture is the PS1's 256x240 display scaled up, so effects tied to the
+original lines (scanlines) should be laid out on that grid rather than on
+`outputSize`. Clamp what you sample to the picture's rect
+(`saturate(input.uv)` before mapping it), or the frame around it bleeds in.
+
+Compile with a DXC that has the SPIR-V backend (the Windows SDK's has none;
+NocturneRecomp's build fetches one for Plume, under
+`out/build/<preset>/_deps/plume_dxc-src/bin/`), with the same flags as the
+game's own shaders:
+
+```
+dxc -T ps_6_0 -E PSMain -Wno-ignored-attributes -Fo <stem>.dxil <stem>.hlsl
+dxc -T ps_6_0 -E PSMain -spirv -fspv-target-env=vulkan1.0 -fvk-use-dx-layout -Fo <stem>.spv <stem>.hlsl
+```
+
+In `NocturneRecomp-Mods`, `scripts/compile_filters.py` does this for every
+`src/*/filters/` folder, reading `source` and `defines` from each filter's
+toml so one source can build several filters. `src/crt_filter/` is a worked
+example: scanlines, an aperture grille, bloom and halation, built flat and,
+with `-D CURVED`, curved.
 
 ## Code mods
 

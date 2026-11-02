@@ -453,6 +453,17 @@ constexpr NativeText kScreenFilterTexts[] = {NativeText{"filter_none"},
                                              NativeText{"filter_lcd_grid"},
                                              NativeText{"filter_smooth"}};
 
+// The built-in options, then the mods' filters by their own names.
+const char16_t* ScreenFilterText(int32_t value) {
+  if (static_cast<size_t>(value) < std::size(kScreenFilterTexts)) {
+    return kScreenFilterTexts[value].Get();
+  }
+  const CustomScreenFilter* custom = ScreenFilterOptionCustom(value);
+  return custom ? custom->name_u16.c_str() : nullptr;
+}
+
+uint32_t ScreenFilterChoiceCount() { return static_cast<uint32_t>(ScreenFilterOptionCount()); }
+
 int32_t GetScreenFilterIndex(const OptionRow&) { return ScreenFilterOptionIndex(); }
 
 void CommitScreenFilterIndex(const OptionRow& row, int32_t value) {
@@ -773,8 +784,9 @@ constexpr OptionRow kSettingsRows[] = {
         // style.
         .list_row = kScreenFilterRow,
         .label = kScreenFilterLabel,
-        .value_count = std::size(kScreenFilterTexts),
-        .values = kScreenFilterTexts,
+        .value_count = kMaxScreenFilterOptions,
+        .value_text = &ScreenFilterText,
+        .live_value_count = &ScreenFilterChoiceCount,
         .get = &GetScreenFilterIndex,
         .commit = &CommitScreenFilterIndex,
         .cvar = "screen_filter",

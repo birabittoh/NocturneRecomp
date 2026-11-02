@@ -13,6 +13,7 @@
 #include <filesystem>
 #include <functional>
 #include <memory>
+#include <string>
 #include <string_view>
 #include <vector>
 
@@ -60,14 +61,41 @@ float DisplayGamma();
 // key. Setting an option only changes the cvar; callers persist it.
 // CurrentScreenFilter is what the blit applies, the kind matching the shader's
 // FILTER_* values.
-enum class ScreenFilterKind : uint32_t { kNone = 0, kScanlines = 1, kLcdGrid = 2 };
+//
+// After the built-in options come the custom filters enabled mods ship
+// (kCustom; see docs/making-mods.md's "Screen filters"), each a precompiled
+// pixel shader that samples the PS1 picture and draws over it.
+enum class ScreenFilterKind : uint32_t { kNone = 0, kScanlines = 1, kLcdGrid = 2, kCustom = 3 };
 struct ScreenFilterParams {
   ScreenFilterKind kind;
-  // How dark the gaps between lines (or cells) get, 0 to 1.
+  // How dark the gaps between lines (or cells) get, 0 to 1. A custom filter's
+  // intensity, 0.05 to 1.
   float strength;
+  // The custom filter (CustomScreenFilters) under kCustom, -1 otherwise.
+  int custom = -1;
 };
+// A mod's filter: mods/<mod>/filters/<stem>.dxil and .spv, both required,
+// and an optional <stem>.toml naming it (`name = "..."`).
+struct CustomScreenFilter {
+  // screen_filter's value for it, "<mod>/<stem>".
+  std::string value;
+  // Shown in both settings UIs: the toml's name, or the stem.
+  std::string name;
+  std::u16string name_u16;
+  std::filesystem::path dxil;
+  std::filesystem::path spirv;
+};
+// The enabled mods' filters, in mod priority order, then by stem. Read once,
+// the first time it is asked for once the runtime exists.
+const std::vector<CustomScreenFilter>& CustomScreenFilters();
+// The most options listed, built-in ones included; the mods' filters past it
+// are left out.
+inline constexpr int kMaxScreenFilterOptions = 64;
 int ScreenFilterOptionCount();
+// The [native] key naming a built-in option, or null for a custom one.
 const char* ScreenFilterOptionTextKey(int index);
+// The custom filter option `index` is, or null for a built-in one.
+const CustomScreenFilter* ScreenFilterOptionCustom(int index);
 int ScreenFilterOptionIndex();
 // Whether the option picked is Enhanced: the game's own graphics style, which
 // SetScreenFilterOption turns on (and every other option off).
