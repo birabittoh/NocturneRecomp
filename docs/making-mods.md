@@ -57,7 +57,8 @@ precompiled in the mod's `filters/` folder:
 mods/<name>/filters/
   <stem>.dxil   for D3D12
   <stem>.spv    for Vulkan (Android included)
-  <stem>.toml   optional: name = "Shown Name" (the stem otherwise)
+  <stem>.toml   optional: name = "Shown Name" (the stem otherwise), and
+                the passes drawn ahead of the filter's own (see below)
 ```
 
 Both blobs are required; a filter missing one is skipped with a warning in
@@ -108,6 +109,47 @@ Don't curve the picture yourself: the game's Screen Curvature setting bends
 it, with rounded corners, after your filter has drawn, so draw it flat and
 the player's curvature applies to it as to the built-in filters.
 
+### Multi-pass filters
+
+An effect that blurs or decodes the picture over many taps is too slow done
+afresh for every pixel of the screen, on a phone above all. Do that work once
+at a resolution of your choosing, in passes drawn ahead of `PSMain`, and
+have `PSMain` read their results. Each pass is listed in the filter's toml,
+in the order they are drawn:
+
+```toml
+name = "Soft Glow"
+
+[[passes]]
+name = "blur"         # its blobs: <stem>.blur.dxil and <stem>.blur.spv
+entry = "BlurPS"      # optional, default PSMain
+width = 512           # its image, in pixels (1 to 4096 each way)
+height = 240
+format = "rgba16f"    # optional: rgba8 (the default) or rgba16f
+```
+
+Up to 4 passes. A pass draws its whole image, with the same bindings and
+constants as `PSMain`: `input.uv` runs 0..1 across its image (map it through
+`sourceRect` to read the picture), and `outputSize` is still the picture's
+size on screen, not the pass's. Its output replaces the image's contents.
+
+The first pass's image is bound at `t3`, the second's at `t4`, and so on up
+to `t6`; every pass after it and `PSMain` can read it. A slot with no pass
+behind it holds a white texel.
+
+```hlsl
+[[vk::binding(3, 0)]] Texture2D<float4> blurTexture : register(t3);
+```
+
+Each pass needs both its blobs, compiled from its own entry point
+(`-E BlurPS`, with the same flags as below). A filter with a pass missing a
+blob, or with a pass the game cannot use (no name, an image size out of
+range, an unknown format), is skipped with a warning in the log. A blob whose
+name has a dot in it is a pass's, so filters' own stems can't contain one.
+
+Use rgba16f for anything that holds linear light or values beyond 0..1: it
+keeps the precision rgba8 would band away.
+
 The picture is the PS1's 256x240 display scaled up, so effects tied to the
 original lines (scanlines) should be laid out on that grid rather than on
 `outputSize`. Clamp what you sample to the picture's rect
@@ -125,10 +167,12 @@ dxc -T ps_6_0 -E PSMain -spirv -fspv-target-env=vulkan1.0 -fvk-use-dx-layout -Fo
 
 In `NocturneRecomp-Mods`, `scripts/compile_filters.py` does this for every
 `src/*/filters/` folder, reading `source` and `defines` from each filter's
-toml so one source can build several filters. The game's own CRT filter,
-`src/shaders/crt.frag.hlsl`, is written against the same contract and is a
-worked example: scanlines, an aperture grille, colour bleed, bloom and
-halation.
+toml so one source can build several filters, and compiling each pass from
+its `entry` (from the filter's source, unless the pass names a `source` of
+its own). The game's own CRT filter, `src/shaders/crt.frag.hlsl`, is written
+against the same contract and is a worked example of a multi-pass one: the
+PS1 lines decoded into a 1024x240 rgba16f image, bloom and halation into a
+512x240 one, then scanlines and an aperture grille drawn from them.
 
 ## Code mods
 

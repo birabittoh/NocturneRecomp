@@ -13,11 +13,13 @@
 //
 // Three passes, so that the costly parts run once per PS1 pixel rather than
 // once per screen pixel (a phone's GPU cannot afford a hundred taps on each of
-// a million of them):
+// a million of them). The first two are a multi-pass mod filter's passes
+// (making-mods.md, "Multi-pass filters"), their sizes and formats set in
+// native_renderer_draw.cpp's CreateCrtProgram:
 //   DecodePS: each PS1 line decoded like an analog signal (Row), into
-//     decodedTexture, CRT_DECODE_SIZE (twice the 512 grid across, so the
+//     decodedTexture, 1024x240 rgba16f (twice the 512 grid across, so the
 //     linear read between its texels follows the decode's own curve).
-//   GlowPS: bloom and halation, into glowTexture, CRT_GLOW_SIZE.
+//   GlowPS: bloom and halation, into glowTexture, 512x240 rgba16f.
 //   PSMain: the beams between two decoded lines, the glow, mask and vignette.
 
 struct VSOutput {

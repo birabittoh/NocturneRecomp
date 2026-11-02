@@ -1528,14 +1528,75 @@ std::string PathUtf8(const std::filesystem::path& path) {
   return std::string(text.begin(), text.end());
 }
 
+std::filesystem::path Utf8Path(const std::string& text) {
+  return std::filesystem::path(std::u8string(text.begin(), text.end()));
+}
+
+// A filter's [[passes]], each with both its blobs (<stem>.<name>.dxil and
+// .spv, next to the filter's own). False, with a warning, when one is wrong,
+// which skips the filter: drawn without a pass it would read nothing there.
+bool ReadFilterPasses(const toml::array& passes, const std::filesystem::path& folder,
+                      const std::string& stem, CustomScreenFilter& filter) {
+  if (passes.size() > kMaxScreenFilterPasses) {
+    REXLOG_WARN("screen filter {}: {} passes, at most {}, skipped", filter.value, passes.size(),
+                kMaxScreenFilterPasses);
+    return false;
+  }
+  std::error_code ec;
+  for (const toml::node& node : passes) {
+    const toml::table* table = node.as_table();
+    if (table == nullptr) {
+      REXLOG_WARN("screen filter {}: a pass that is not a table, skipped", filter.value);
+      return false;
+    }
+    CustomScreenFilterPass pass;
+    pass.name = (*table)["name"].value_or(std::string());
+    pass.entry = (*table)["entry"].value_or(std::string("PSMain"));
+    const int64_t width = (*table)["width"].value_or(int64_t(0));
+    const int64_t height = (*table)["height"].value_or(int64_t(0));
+    const std::string format = (*table)["format"].value_or(std::string("rgba8"));
+    if (pass.name.empty() || pass.entry.empty()) {
+      REXLOG_WARN("screen filter {}: a pass with no name or entry, skipped", filter.value);
+      return false;
+    }
+    if (width < 1 || width > kMaxScreenFilterPassSize || height < 1 ||
+        height > kMaxScreenFilterPassSize) {
+      REXLOG_WARN("screen filter {}: pass {} is {}x{}, not 1 to {} each way, skipped",
+                  filter.value, pass.name, width, height, kMaxScreenFilterPassSize);
+      return false;
+    }
+    if (format != "rgba8" && format != "rgba16f") {
+      REXLOG_WARN("screen filter {}: pass {} has format \"{}\", not rgba8 or rgba16f, skipped",
+                  filter.value, pass.name, format);
+      return false;
+    }
+    pass.width = uint32_t(width);
+    pass.height = uint32_t(height);
+    pass.float16 = format == "rgba16f";
+    const std::string blob = stem + "." + pass.name;
+    pass.dxil = folder / Utf8Path(blob + ".dxil");
+    pass.spirv = folder / Utf8Path(blob + ".spv");
+    if (!std::filesystem::is_regular_file(pass.dxil, ec) ||
+        !std::filesystem::is_regular_file(pass.spirv, ec)) {
+      REXLOG_WARN("screen filter {}: pass {} needs both {}.dxil and {}.spv, skipped", filter.value,
+                  pass.name, blob, blob);
+      return false;
+    }
+    filter.passes.push_back(std::move(pass));
+  }
+  return true;
+}
+
 // One mod's filters/ folder, sorted by stem. A filter needs both blobs, so it
-// runs whichever backend is in use.
+// runs whichever backend is in use. A blob whose stem has a dot in it is one
+// of a filter's passes (<stem>.<pass>), not a filter.
 void ScanFilterFolder(const std::filesystem::path& root, std::vector<CustomScreenFilter>& out) {
   const std::string mod = PathUtf8(root.parent_path().filename());
   std::vector<std::filesystem::path> blobs;
   std::error_code ec;
   for (const auto& entry : std::filesystem::directory_iterator(root, ec)) {
-    if (entry.is_regular_file(ec) && entry.path().extension() == ".dxil")
+    if (entry.is_regular_file(ec) && entry.path().extension() == ".dxil" &&
+        PathUtf8(entry.path().stem()).find('.') == std::string::npos)
       blobs.push_back(entry.path());
   }
   std::sort(blobs.begin(), blobs.end());
@@ -1557,6 +1618,9 @@ void ScanFilterFolder(const std::filesystem::path& root, std::vector<CustomScree
         const toml::table table = toml::parse_file(PathUtf8(info));
         if (const auto name = table["name"].value<std::string>(); name && !name->empty())
           filter.name = *name;
+        if (const toml::array* passes = table["passes"].as_array();
+            passes != nullptr && !ReadFilterPasses(*passes, root, stem, filter))
+          continue;
       } catch (const toml::parse_error& e) {
         REXLOG_WARN("screen filter {}: {}", filter.value, e.what());
       }
@@ -1588,8 +1652,10 @@ const std::vector<CustomScreenFilter>& CustomScreenFilters() {
     REXLOG_WARN("{} mod screen filters, only the first {} are listed", filters.size(), room);
     filters.resize(room);
   }
-  for (const CustomScreenFilter& filter : filters)
-    REXLOG_INFO("screen filter {} (\"{}\") from a mod", filter.value, filter.name);
+  for (const CustomScreenFilter& filter : filters) {
+    REXLOG_INFO("screen filter {} (\"{}\", {} pass(es) ahead of its own) from a mod",
+                filter.value, filter.name, filter.passes.size());
+  }
   return filters;
 }
 

@@ -62,10 +62,11 @@ float DisplayGamma();
 // CurrentScreenFilter is what the blit applies, the kind matching the shader's
 // FILTER_* values.
 //
-// kCrt (crt.frag.hlsl) is built in but drawn like a mod's filter. After the
-// built-in options come the custom filters enabled mods ship (kCustom; see
-// docs/making-mods.md's "Screen filters"), each a precompiled pixel shader
-// that samples the PS1 picture and draws over it.
+// kCrt (crt.frag.hlsl) is built in but drawn like a mod's filter, with two
+// passes ahead of its own. After the built-in options come the custom filters
+// enabled mods ship (kCustom; see docs/making-mods.md's "Screen filters"),
+// each a precompiled pixel shader that samples the PS1 picture and draws over
+// it, optionally after passes of its own.
 enum class ScreenFilterKind : uint32_t {
   kNone = 0,
   kScanlines = 1,
@@ -81,8 +82,26 @@ struct ScreenFilterParams {
   // The custom filter (CustomScreenFilters) under kCustom, -1 otherwise.
   int custom = -1;
 };
+// The most passes a filter draws ahead of its own, and the largest image one
+// may draw into, in pixels across or down.
+inline constexpr size_t kMaxScreenFilterPasses = 4;
+inline constexpr int64_t kMaxScreenFilterPassSize = 4096;
+// One of a filter's passes, from its toml's [[passes]]: an image of its own
+// size and format, drawn by <stem>.<name>.dxil or .spv (entry point `entry`)
+// and read by the passes after it and the filter's own.
+struct CustomScreenFilterPass {
+  std::string name;
+  std::string entry;
+  std::filesystem::path dxil;
+  std::filesystem::path spirv;
+  uint32_t width = 0;
+  uint32_t height = 0;
+  // rgba16f rather than rgba8.
+  bool float16 = false;
+};
 // A mod's filter: mods/<mod>/filters/<stem>.dxil and .spv, both required,
-// and an optional <stem>.toml naming it (`name = "..."`).
+// and an optional <stem>.toml naming it (`name = "..."`) and listing the
+// passes drawn ahead of it ([[passes]]).
 struct CustomScreenFilter {
   // screen_filter's value for it, "<mod>/<stem>".
   std::string value;
@@ -91,6 +110,7 @@ struct CustomScreenFilter {
   std::u16string name_u16;
   std::filesystem::path dxil;
   std::filesystem::path spirv;
+  std::vector<CustomScreenFilterPass> passes;
 };
 // The enabled mods' filters, in mod priority order, then by stem. Read once,
 // the first time it is asked for once the runtime exists.
