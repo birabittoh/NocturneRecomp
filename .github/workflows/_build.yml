@@ -37,7 +37,7 @@ jobs:
             runner: windows-latest
 
           - platform: linux-amd64
-            runner: ubuntu-latest
+            runner: ubuntu-24.04
 
           - platform: linux-arm64
             runner: ubuntu-24.04-arm
@@ -49,7 +49,7 @@ jobs:
             runner: macos-26
 
           - platform: android-arm64
-            runner: ubuntu-latest
+            runner: ubuntu-24.04
             # Host SDK for codegen (runs natively on x86_64 Linux)
             sdk_dir: linux-amd64
             # Target SDK for cross-compile (Android ARM64 libraries)
