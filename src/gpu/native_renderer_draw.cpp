@@ -33,11 +33,13 @@
 #include "shaders/blitFrag.hlsl.dxil.h"
 #include "shaders/screenFilterFrag.hlsl.dxil.h"
 #include "shaders/movieFrag.hlsl.dxil.h"
+#include "shaders/curvatureFrag.hlsl.dxil.h"
 #endif
 #include "shaders/blitVert.hlsl.spirv.h"
 #include "shaders/blitFrag.hlsl.spirv.h"
 #include "shaders/screenFilterFrag.hlsl.spirv.h"
 #include "shaders/movieFrag.hlsl.spirv.h"
+#include "shaders/curvatureFrag.hlsl.spirv.h"
 
 namespace nocturne {
 namespace {
@@ -289,6 +291,9 @@ struct Resources {
   std::unique_ptr<RenderDescriptorSet> custom_set;
   std::vector<std::unique_ptr<RenderPipeline>> custom_pipelines;
   std::vector<bool> custom_attempted;
+  // The Screen Curvature setting's pass: in the mod filters' layout, reading
+  // the same copy of the target.
+  std::unique_ptr<RenderPipeline> curvature_pipeline;
 
   // The JP movies (jp/movie_player.cpp), drawn into the PS1 box ahead of the
   // screen filter with the blit's layout. The texture is the movie's size and
@@ -652,6 +657,36 @@ RenderPipeline* CustomFilterPipeline(RenderDevice* device, int index) {
   return g_res.custom_pipelines[index].get();
 }
 
+// The Screen Curvature pass: the blit's vertex shader, curvature.frag.hlsl,
+// in the mod filters' layout, drawing into the guest target.
+bool CreateCurvaturePipeline(RenderDevice* device) {
+#ifdef _WIN32
+  auto vertex = CreateBuiltinShader(device, blitVertBlobDXIL, sizeof(blitVertBlobDXIL),
+                                    blitVertBlobSPIRV, sizeof(blitVertBlobSPIRV), "VSMain");
+  auto pixel = CreateBuiltinShader(device, curvatureFragBlobDXIL, sizeof(curvatureFragBlobDXIL),
+                                   curvatureFragBlobSPIRV, sizeof(curvatureFragBlobSPIRV),
+                                   "PSMain");
+#else
+  auto vertex = CreateBuiltinShader(device, nullptr, 0, blitVertBlobSPIRV,
+                                    sizeof(blitVertBlobSPIRV), "VSMain");
+  auto pixel = CreateBuiltinShader(device, nullptr, 0, curvatureFragBlobSPIRV,
+                                   sizeof(curvatureFragBlobSPIRV), "PSMain");
+#endif
+  if (!vertex || !pixel)
+    return false;
+  RenderGraphicsPipelineDesc desc;
+  desc.pipelineLayout = g_res.custom_layout.get();
+  desc.vertexShader = vertex.get();
+  desc.pixelShader = pixel.get();
+  desc.renderTargetFormat[0] = kTargetFormat;
+  desc.renderTargetCount = 1;
+  desc.renderTargetBlend[0] = RenderBlendDesc::Copy();
+  desc.cullMode = RenderCullMode::NONE;
+  desc.primitiveTopology = RenderPrimitiveTopology::TRIANGLE_LIST;
+  g_res.curvature_pipeline = device->createGraphicsPipeline(desc);
+  return g_res.curvature_pipeline != nullptr;
+}
+
 // The texture and sampler set layouts. One range per slot rather than one
 // sixteen wide: Plume turns a range into a single Vulkan binding with an array
 // count, and the HLSL declares sixteen separate objects at bindings 0..15 (see
@@ -724,6 +759,8 @@ bool EnsureResources(RenderDevice* device) {
   if (!CreateCustomFilterLayout(device)) {
     REXLOG_ERROR("native_renderer: could not create the mod screen filters' resources");
     g_res.custom_layout.reset();
+  } else if (!CreateCurvaturePipeline(device)) {
+    REXLOG_ERROR("native_renderer: could not create the screen curvature pass");
   }
 
   g_res.ready = true;
@@ -1592,6 +1629,76 @@ bool DrawMovie(RenderCommandList* commands, const RenderViewport& viewport,
   return true;
 }
 
+// Copies the target into custom_source, for a pass that redraws the picture
+// from what is there.
+void CopyTargetToSource(RenderCommandList* commands) {
+  g_res.target.Transition(commands, RenderTextureLayout::COPY_SOURCE);
+  g_res.custom_source.Transition(commands, RenderTextureLayout::COPY_DEST);
+  commands->copyTexture(g_res.custom_source.texture.get(), g_res.target.texture.get());
+  g_res.custom_source.Transition(commands, RenderTextureLayout::SHADER_READ);
+  g_target_bound = false;
+}
+
+// The screen_filter cvar's effect over the picture: a built-in one multiplied
+// into it, or a mod's redrawing it. `picture` says where it is.
+void DrawScreenFilter(RenderCommandList* commands, const RenderViewport& viewport,
+                      const RenderRect& scissor, const CustomFilterConstants& picture) {
+  const ScreenFilterParams filter = CurrentScreenFilter();
+  if (filter.kind == ScreenFilterKind::kNone)
+    return;
+  const bool custom = filter.kind == ScreenFilterKind::kCustom;
+  if (!custom && !g_res.filter_pipeline)
+    return;
+
+  RenderPipeline* custom_pipeline = nullptr;
+  if (custom) {
+    custom_pipeline = CustomFilterPipeline(PlumeDevice(), filter.custom);
+    if (custom_pipeline == nullptr)
+      return;
+    // The filter reads the picture and draws it anew, so it samples a copy.
+    CopyTargetToSource(commands);
+  }
+
+  BindTarget(commands);
+  commands->setViewports(viewport);
+  commands->setScissors(scissor);
+  if (custom) {
+    CustomFilterConstants constants = picture;
+    constants.intensity = filter.strength;
+    commands->setGraphicsPipelineLayout(g_res.custom_layout.get());
+    commands->setPipeline(custom_pipeline);
+    commands->setGraphicsDescriptorSet(g_res.custom_set.get(), 0);
+    commands->setGraphicsPushConstants(0, &constants, 0, sizeof(constants));
+  } else {
+    commands->setGraphicsPipelineLayout(g_res.filter_layout.get());
+    commands->setPipeline(g_res.filter_pipeline.get());
+    const FilterConstants constants = {uint32_t(filter.kind), filter.strength};
+    commands->setGraphicsPushConstants(0, &constants, 0, sizeof(constants));
+  }
+  commands->drawInstanced(3, 1, 0, 0);
+}
+
+// The Screen Curvature setting: the picture, filtered, bent like a CRT tube's
+// glass, with rounded corners. Read from a copy of the target, in the mod
+// filters' layout, its amount where their intensity goes.
+void DrawCurvature(RenderCommandList* commands, const RenderViewport& viewport,
+                   const RenderRect& scissor, const CustomFilterConstants& picture) {
+  const float curvature = ScreenCurvature();
+  if (curvature <= 0.0f || !g_res.curvature_pipeline)
+    return;
+  CopyTargetToSource(commands);
+  BindTarget(commands);
+  commands->setViewports(viewport);
+  commands->setScissors(scissor);
+  CustomFilterConstants constants = picture;
+  constants.intensity = curvature;
+  commands->setGraphicsPipelineLayout(g_res.custom_layout.get());
+  commands->setPipeline(g_res.curvature_pipeline.get());
+  commands->setGraphicsDescriptorSet(g_res.custom_set.get(), 0);
+  commands->setGraphicsPushConstants(0, &constants, 0, sizeof(constants));
+  commands->drawInstanced(3, 1, 0, 0);
+}
+
 void GuestFilterPs1Picture(uint8_t* base) {
   // The rect in render target pixels, against the full-screen one; signed,
   // since a stretch past the screen edges puts left and top below zero.
@@ -1614,50 +1721,18 @@ void GuestFilterPs1Picture(uint8_t* base) {
   // A JP movie takes the box over, and the filter goes on top of it as on the
   // game, wherever the movie plays (the opening plays at the title).
   const bool movie = DrawMovie(commands, viewport, scissor);
-
-  const ScreenFilterParams filter = CurrentScreenFilter();
-  if (filter.kind == ScreenFilterKind::kNone || !(movie || GameRunning(base)))
-    return;
-  const bool custom = filter.kind == ScreenFilterKind::kCustom;
-  if (!custom && !g_res.filter_pipeline)
+  if (!movie && !GameRunning(base))
     return;
 
-  RenderPipeline* custom_pipeline = nullptr;
-  if (custom) {
-    custom_pipeline = CustomFilterPipeline(PlumeDevice(), filter.custom);
-    if (custom_pipeline == nullptr)
-      return;
-    // The filter reads the picture and draws it anew, so it samples a copy.
-    g_res.target.Transition(commands, RenderTextureLayout::COPY_SOURCE);
-    g_res.custom_source.Transition(commands, RenderTextureLayout::COPY_DEST);
-    commands->copyTexture(g_res.custom_source.texture.get(), g_res.target.texture.get());
-    g_res.custom_source.Transition(commands, RenderTextureLayout::SHADER_READ);
-    g_target_bound = false;
-  }
-
-  BindTarget(commands);
-  commands->setViewports(viewport);
-  commands->setScissors(scissor);
-  if (custom) {
-    const float tw = float(g_target_width), th = float(g_target_height);
-    const CustomFilterConstants constants = {
-        .source_rect = {left * sx / tw, top * sy / th, width / tw, height / th},
-        .texture_size = {tw, th},
-        .output_size = {width, height},
-        .intensity = filter.strength,
-        .frame_count = uint32_t(g_frame_serial),
-    };
-    commands->setGraphicsPipelineLayout(g_res.custom_layout.get());
-    commands->setPipeline(custom_pipeline);
-    commands->setGraphicsDescriptorSet(g_res.custom_set.get(), 0);
-    commands->setGraphicsPushConstants(0, &constants, 0, sizeof(constants));
-  } else {
-    commands->setGraphicsPipelineLayout(g_res.filter_layout.get());
-    commands->setPipeline(g_res.filter_pipeline.get());
-    const FilterConstants constants = {uint32_t(filter.kind), filter.strength};
-    commands->setGraphicsPushConstants(0, &constants, 0, sizeof(constants));
-  }
-  commands->drawInstanced(3, 1, 0, 0);
+  const float tw = float(g_target_width), th = float(g_target_height);
+  const CustomFilterConstants picture = {
+      .source_rect = {left * sx / tw, top * sy / th, width / tw, height / th},
+      .texture_size = {tw, th},
+      .output_size = {width, height},
+      .frame_count = uint32_t(g_frame_serial),
+  };
+  DrawScreenFilter(commands, viewport, scissor, picture);
+  DrawCurvature(commands, viewport, scissor, picture);
   // The next guest draw puts the target's own viewport and scissor back.
   g_target_bound = false;
 }

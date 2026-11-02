@@ -538,3 +538,8 @@ plume_compile_pixel_shader(nocturnerecomp
 # blit's vertex shader).
 plume_compile_pixel_shader(nocturnerecomp
     "${CMAKE_SOURCE_DIR}/src/shaders/movie.frag.hlsl" "movieFrag" "PSMain")
+
+# The Screen Curvature setting, bending the PS1 picture once it is filtered
+# (with the blit's vertex shader, in the mod filters' layout).
+plume_compile_pixel_shader(nocturnerecomp
+    "${CMAKE_SOURCE_DIR}/src/shaders/curvature.frag.hlsl" "curvatureFrag" "PSMain")

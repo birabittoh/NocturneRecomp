@@ -79,7 +79,8 @@ void GuestResolve(uint8_t* base, uint32_t device, uint32_t flags, uint32_t desti
 // The PS1 side's picture is complete and the game's own UI is about to be drawn
 // over it: lays the screen filter (the screen_filter cvar) over the picture's
 // rect (graphics.stretch_rect), so the UI lands on top of it unfiltered. A
-// mod's filter redraws the rect from a copy of the frame instead.
+// mod's filter redraws the rect from a copy of the frame instead. Then the
+// screen_curvature setting bends the result, whatever the filter.
 void GuestFilterPs1Picture(uint8_t* base);
 
 // The guest's ClearF: (device, flags, rect or null, float4 colour pointer).

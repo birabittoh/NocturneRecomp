@@ -82,6 +82,14 @@ REXCVAR_DEFINE_INT32(screen_filter_intensity, 50, "Game",
                      "Strength of the screen filter's effect, in percent (5 to 100)")
     .range(5, 100);
 
+// How far the PS1 picture bulges, like a CRT tube's glass, in percent. The
+// native renderer bends the picture itself, after whatever filter is on, so
+// it applies with any filter or none.
+REXCVAR_DEFINE_INT32(screen_curvature, 0, "Game",
+                     "How far the PS1 picture bulges like a CRT tube, in percent (0 is flat, "
+                     "up to 100)")
+    .range(0, 100);
+
 namespace {
 
 // Fixed pixel sizes in the settings overlay, which ScaleAllSizes cannot reach.
@@ -199,12 +207,13 @@ constexpr std::array<const char*, 4> kEnhancementTabs = {
 // <cvar> and <cvar>_desc.
 constexpr std::array<const char*, 2> kIntroSkipCvarNames = {"skip_intros", "skip_richter"};
 
-constexpr std::array<const char*, 21> kBasicCvarNames = {
+constexpr std::array<const char*, 22> kBasicCvarNames = {
     "fullscreen",       "vsync",         "user_language",
     "gpu_backend",      "vulkan_device", "audio_mute",      "audio_volume",
     "graphics_style_enhanced", "touch_controls", "touch_movement", "touch_function_keys", "touch_scale",
     "touch_opacity", "touch_hide_delay", "voices", "artwork", "prologue",
-    "ui_scale", "display_gamma", "screen_filter", "screen_filter_intensity"};
+    "ui_scale", "display_gamma", "screen_filter", "screen_filter_intensity",
+    "screen_curvature"};
 
 constexpr std::array kUiScaleSteps = {0.75, 1.0, 1.25, 1.5, 1.75, 2.0, 2.5, 3.0};
 
@@ -231,6 +240,7 @@ constexpr std::array<ScreenFilterOption, 4> kScreenFilters = {{
 constexpr int kEnhancedFilterIndex = 3;
 
 constexpr int kScreenFilterIntensityStep = 5;
+constexpr int kScreenCurvatureStep = 5;
 
 // audio_volume is stored (and applied to samples by the SDL audio driver) as
 // linear amplitude, but human loudness perception is roughly logarithmic --
@@ -469,6 +479,7 @@ class CuratedSettingsDialog : public rex::ui::ImGuiDialog {
     DrawGammaRow();
     DrawScreenFilterRow();
     DrawScreenFilterIntensityRow();
+    DrawScreenCurvatureRow();
     // The native renderer reads both: gpu_backend picks D3D12 or Vulkan (only
     // Windows has the choice) and vulkan_device the adapter when Vulkan is in use.
 #ifdef _WIN32
@@ -1106,6 +1117,30 @@ class CuratedSettingsDialog : public rex::ui::ImGuiDialog {
     ImGui::PopID();
   }
 
+  // Applies live, every step of the drag, like gamma.
+  void DrawScreenCurvatureRow() {
+    if (!rex::cvar::GetFlagInfo("screen_curvature"))
+      return;
+    int idx = ScreenCurvatureOptionIndex();
+    // A format string to the slider, hence the doubled percent sign.
+    char label[16];
+    std::snprintf(label, sizeof(label), "%d%%%%", ScreenCurvatureOptionPercent(idx));
+
+    ImGui::TextUnformatted(Tr("settings", "screen_curvature"));
+    RowTip("tip_screen_curvature");
+    ImGui::SameLine(Px(180.0f));
+    ImGui::SetNextItemWidth(Px(160.0f));
+    ImGui::PushID("screen_curvature");
+    if (ImGui::SliderInt("##v", &idx, 0, ScreenCurvatureOptionCount() - 1, label,
+                         ImGuiSliderFlags_NoInput)) {
+      SetScreenCurvatureOption(idx);
+    }
+    if (ImGui::IsItemDeactivatedAfterEdit())
+      SaveBasic();
+    RowTip("tip_screen_curvature");
+    ImGui::PopID();
+  }
+
   void DrawLanguageRow() {
     const auto* entry = rex::cvar::GetFlagInfo("user_language");
     if (!entry)
@@ -1625,6 +1660,27 @@ void SetScreenFilterIntensityOption(int index) {
   rex::cvar::SetFlagByName("screen_filter_intensity",
                            std::to_string(ScreenFilterIntensityOptionPercent(index)),
                            /*persist=*/true);
+}
+
+int ScreenCurvatureOptionCount() { return 100 / kScreenCurvatureStep + 1; }
+
+int ScreenCurvatureOptionIndex() {
+  const int percent = std::clamp(int(REXCVAR_GET(screen_curvature)), 0, 100);
+  return (percent + kScreenCurvatureStep / 2) / kScreenCurvatureStep;
+}
+
+int ScreenCurvatureOptionPercent(int index) { return index * kScreenCurvatureStep; }
+
+void SetScreenCurvatureOption(int index) {
+  if (index < 0 || index >= ScreenCurvatureOptionCount())
+    return;
+  rex::cvar::SetFlagByName("screen_curvature",
+                           std::to_string(ScreenCurvatureOptionPercent(index)),
+                           /*persist=*/true);
+}
+
+float ScreenCurvature() {
+  return std::clamp(int(REXCVAR_GET(screen_curvature)), 0, 100) / 100.0f;
 }
 
 ScreenFilterParams CurrentScreenFilter() {

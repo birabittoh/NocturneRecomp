@@ -102,7 +102,11 @@ float4 PSMain(VSOutput input) : SV_TARGET {
 `intensity` is the one setting the player gets for a filter, and the game
 does nothing with it but pass it in: scale the effect's strength with it
 (how dark the scanlines get, how much bloom), and keep what isn't a strength
-(a curved screen's shape, a mask's pitch) fixed, or a separate filter.
+(a mask's pitch) fixed, or a separate filter.
+
+Don't curve the picture yourself: the game's Screen Curvature setting bends
+it, with rounded corners, after your filter has drawn, so draw it flat and
+the player's curvature applies to it as to the built-in filters.
 
 The picture is the PS1's 256x240 display scaled up, so effects tied to the
 original lines (scanlines) should be laid out on that grid rather than on
@@ -122,8 +126,7 @@ dxc -T ps_6_0 -E PSMain -spirv -fspv-target-env=vulkan1.0 -fvk-use-dx-layout -Fo
 In `NocturneRecomp-Mods`, `scripts/compile_filters.py` does this for every
 `src/*/filters/` folder, reading `source` and `defines` from each filter's
 toml so one source can build several filters. `src/crt_filter/` is a worked
-example: scanlines, an aperture grille, bloom and halation, built flat and,
-with `-D CURVED`, curved.
+example: scanlines, an aperture grille, colour bleed, bloom and halation.
 
 ## Code mods
 

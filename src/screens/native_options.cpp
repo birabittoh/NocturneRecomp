@@ -501,6 +501,28 @@ void CommitScreenFilterIntensityIndex(const OptionRow& row, int32_t value) {
   SaveCvar(row.cvar);
 }
 
+constexpr NativeText kScreenCurvatureLabel{"screen_curvature_label"};
+
+// ScreenCurvatureOptionPercent's steps, as text.
+constexpr const char16_t* kScreenCurvatureTexts[] = {
+    u"0%",  u"5%",  u"10%", u"15%", u"20%", u"25%", u"30%", u"35%", u"40%", u"45%", u"50%",
+    u"55%", u"60%", u"65%", u"70%", u"75%", u"80%", u"85%", u"90%", u"95%", u"100%"};
+
+const char16_t* ScreenCurvatureText(int32_t value) {
+  return static_cast<size_t>(value) < std::size(kScreenCurvatureTexts)
+             ? kScreenCurvatureTexts[value]
+             : nullptr;
+}
+
+int32_t GetScreenCurvatureIndex(const OptionRow&) { return ScreenCurvatureOptionIndex(); }
+
+void CommitScreenCurvatureIndex(const OptionRow& row, int32_t value) {
+  if (value == ScreenCurvatureOptionIndex())
+    return;
+  SetScreenCurvatureOption(value);
+  SaveCvar(row.cvar);
+}
+
 // --- Language -------------------------------------------------------------
 
 // `user_language` applies live (see language_switch.h): the next guest frame
@@ -731,7 +753,8 @@ constexpr uint32_t kPresetRow = kFullscreenRow + kFullscreenRows;
 constexpr uint32_t kGammaRow = kPresetRow + 1;
 constexpr uint32_t kScreenFilterRow = kGammaRow + 1;
 constexpr uint32_t kScreenFilterIntensityRow = kScreenFilterRow + 1;
-constexpr uint32_t kVolumeRow = kScreenFilterIntensityRow + 1;
+constexpr uint32_t kScreenCurvatureRow = kScreenFilterIntensityRow + 1;
+constexpr uint32_t kVolumeRow = kScreenCurvatureRow + 1;
 constexpr uint32_t kSettingsRowCount = kVolumeRow + 1;
 
 // The second page: language, and whose release to take voices, artwork and the
@@ -809,6 +832,18 @@ constexpr OptionRow kSettingsRows[] = {
         .cvar = "screen_filter_intensity",
         .live = true,
         .tooltip = NativeText{"tip_screen_filter_intensity"},
+    },
+    {
+        // Any filter or none: the renderer bends the picture itself.
+        .list_row = kScreenCurvatureRow,
+        .label = kScreenCurvatureLabel,
+        .value_count = std::size(kScreenCurvatureTexts),
+        .value_text = &ScreenCurvatureText,
+        .get = &GetScreenCurvatureIndex,
+        .commit = &CommitScreenCurvatureIndex,
+        .cvar = "screen_curvature",
+        .live = true,
+        .tooltip = NativeText{"tip_screen_curvature"},
     },
     {
         // The stock Volume setting's 0-10 spinner, backed by audio_volume; the

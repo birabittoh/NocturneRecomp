@@ -110,6 +110,16 @@ void SetScreenFilterIntensityOption(int index);
 // The filter with its intensity applied.
 ScreenFilterParams CurrentScreenFilter();
 
+// screen_curvature, in 5% steps from 0: option i is
+// ScreenCurvatureOptionPercent(i) percent. Not a filter's: the native renderer
+// bends the picture itself once the filter (if any) is on it.
+int ScreenCurvatureOptionCount();
+int ScreenCurvatureOptionIndex();
+int ScreenCurvatureOptionPercent(int index);
+void SetScreenCurvatureOption(int index);
+// 0 (flat) to 1.
+float ScreenCurvature();
+
 // Overrides the SDK's built-in cvar defaults with the game's own. Call once,
 // before rex::ReXApp::SetupEnvironment() (i.e. before any config file is
 // loaded), so a saved config or CLI/env override still takes precedence.
