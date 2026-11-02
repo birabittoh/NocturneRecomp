@@ -548,3 +548,7 @@ plume_compile_pixel_shader(nocturnerecomp
 # filters' layout).
 plume_compile_pixel_shader(nocturnerecomp
     "${CMAKE_SOURCE_DIR}/src/shaders/crt.frag.hlsl" "crtFrag" "PSMain")
+plume_compile_pixel_shader(nocturnerecomp
+    "${CMAKE_SOURCE_DIR}/src/shaders/crt.frag.hlsl" "crtDecodeFrag" "DecodePS")
+plume_compile_pixel_shader(nocturnerecomp
+    "${CMAKE_SOURCE_DIR}/src/shaders/crt.frag.hlsl" "crtGlowFrag" "GlowPS")

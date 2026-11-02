@@ -10,6 +10,15 @@
 // result replaces what is there. The effects (scanlines, mask, bloom,
 // vignette) scale with the Filter Intensity setting (constants.intensity), so
 // at its lowest the picture is close to untouched.
+//
+// Three passes, so that the costly parts run once per PS1 pixel rather than
+// once per screen pixel (a phone's GPU cannot afford a hundred taps on each of
+// a million of them):
+//   DecodePS: each PS1 line decoded like an analog signal (Row), into
+//     decodedTexture, CRT_DECODE_SIZE (twice the 512 grid across, so the
+//     linear read between its texels follows the decode's own curve).
+//   GlowPS: bloom and halation, into glowTexture, CRT_GLOW_SIZE.
+//   PSMain: the beams between two decoded lines, the glow, mask and vignette.
 
 struct VSOutput {
     float4 position : SV_POSITION;
@@ -19,6 +28,9 @@ struct VSOutput {
 [[vk::binding(0, 0)]] Texture2D<float4> sourceTexture : register(t0);
 [[vk::binding(1, 0)]] SamplerState linearSampler : register(s1);
 [[vk::binding(2, 0)]] SamplerState pointSampler : register(s2);
+// The first two passes' results, for the last one.
+[[vk::binding(3, 0)]] Texture2D<float4> decodedTexture : register(t3);
+[[vk::binding(4, 0)]] Texture2D<float4> glowTexture : register(t4);
 
 [[vk::push_constant]]
 struct Constants {
@@ -125,6 +137,13 @@ float3 Row(float x, float row) {
     return ToLinear(FromYIQ(float3(luma, chroma)));
 }
 
+// Line `row` as DecodePS left it, at x. Rows past the picture's edges read
+// its first or last one, as Row's own clamp does.
+float3 DecodedRow(float x, float row) {
+    float2 uv = float2(x, (row + 0.5) / PS1_SIZE.y);
+    return decodedTexture.SampleLevel(linearSampler, uv, 0).rgb;
+}
+
 // The beam's profile at `distance` lines from its centre: Gaussian, wider when
 // the line is brighter, as a real beam blooms with its current.
 float3 Beam(float distance, float3 color) {
@@ -137,8 +156,8 @@ float3 Scanlines(float2 p, float depth) {
     float y = p.y * PS1_SIZE.y - 0.5;
     float row = floor(y);
     float f = y - row;
-    float3 a = Row(p.x, row);
-    float3 b = Row(p.x, row + 1.0);
+    float3 a = DecodedRow(p.x, row);
+    float3 b = DecodedRow(p.x, row + 1.0);
     float3 lit = a * Beam(f, a) + b * Beam(1.0 - f, b);
     // The beams give back a little under what they cover; made up so that
     // the lines darken the gaps more than they dim the picture.
@@ -192,17 +211,25 @@ float3 Mask(float2 pixel, float depth) {
     return mask / (1.0 - depth * 2.0 / 3.0);
 }
 
+// Pass 1: the decoded line under this texel, linear.
+float4 DecodePS(VSOutput input) : SV_TARGET {
+    return float4(Row(input.uv.x, floor(input.uv.y * PS1_SIZE.y)), 1.0);
+}
+
+// Pass 2: the glow at this texel, at full intensity, linear.
+float4 GlowPS(VSOutput input) : SV_TARGET {
+    float3 bloom, haze;
+    Glow(input.uv, bloom, haze);
+    // Bloom: the bright parts spill over; halation: a faint haze of all of it.
+    return float4(bloom * BLOOM_STRENGTH + haze * HALATION_STRENGTH, 1.0);
+}
+
 float4 PSMain(VSOutput input) : SV_TARGET {
     float k = constants.intensity;
     float2 p = input.uv;
 
     float3 color = Scanlines(p, SCANLINE_DEPTH * k);
-
-    float3 bloom, haze;
-    Glow(p, bloom, haze);
-    // Bloom: the bright parts spill over; halation: a faint haze of all of it.
-    color += bloom * BLOOM_STRENGTH * k;
-    color += haze * HALATION_STRENGTH * k;
+    color += glowTexture.SampleLevel(linearSampler, p, 0).rgb * k;
 
     color *= Mask(input.position.xy, MASK_DEPTH * k);
 

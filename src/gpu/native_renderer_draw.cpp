@@ -35,6 +35,8 @@
 #include "shaders/movieFrag.hlsl.dxil.h"
 #include "shaders/curvatureFrag.hlsl.dxil.h"
 #include "shaders/crtFrag.hlsl.dxil.h"
+#include "shaders/crtDecodeFrag.hlsl.dxil.h"
+#include "shaders/crtGlowFrag.hlsl.dxil.h"
 #endif
 #include "shaders/blitVert.hlsl.spirv.h"
 #include "shaders/blitFrag.hlsl.spirv.h"
@@ -42,6 +44,8 @@
 #include "shaders/movieFrag.hlsl.spirv.h"
 #include "shaders/curvatureFrag.hlsl.spirv.h"
 #include "shaders/crtFrag.hlsl.spirv.h"
+#include "shaders/crtDecodeFrag.hlsl.spirv.h"
+#include "shaders/crtGlowFrag.hlsl.spirv.h"
 
 namespace nocturne {
 namespace {
@@ -248,9 +252,9 @@ struct TrackedTexture {
   }
 };
 
-bool CreateTarget(RenderDevice* device, TrackedTexture& target) {
-  target.texture =
-      device->createTexture(RenderTextureDesc::ColorTarget(g_target_width, g_target_height, kTargetFormat));
+bool CreateTarget(RenderDevice* device, TrackedTexture& target, uint32_t width, uint32_t height,
+                  RenderFormat format) {
+  target.texture = device->createTexture(RenderTextureDesc::ColorTarget(width, height, format));
   if (!target.texture)
     return false;
   const RenderTexture* attachment = target.texture.get();
@@ -259,6 +263,11 @@ bool CreateTarget(RenderDevice* device, TrackedTexture& target) {
   desc.colorAttachmentsCount = 1;
   target.framebuffer = device->createFramebuffer(desc);
   return target.framebuffer != nullptr;
+}
+
+// One the guest target's size and format.
+bool CreateTarget(RenderDevice* device, TrackedTexture& target) {
+  return CreateTarget(device, target, g_target_width, g_target_height, kTargetFormat);
 }
 
 // ---------------------------------------------------------------------------
@@ -293,8 +302,17 @@ struct Resources {
   std::unique_ptr<RenderDescriptorSet> custom_set;
   std::vector<std::unique_ptr<RenderPipeline>> custom_pipelines;
   std::vector<bool> custom_attempted;
-  // The built-in CRT filter, drawn the way a mod's is.
+  // The built-in CRT filter (crt.frag.hlsl), drawn like a mod's but in three
+  // passes: the PS1 lines decoded into crt_decoded and the glow into crt_glow,
+  // both at the PS1's own resolution, then the picture drawn from them. Its
+  // layout is the mod filters' plus those two (bindings 3 and 4).
+  std::unique_ptr<RenderPipelineLayout> crt_layout;
+  std::unique_ptr<RenderDescriptorSet> crt_set;
+  std::unique_ptr<RenderPipeline> crt_decode_pipeline;
+  std::unique_ptr<RenderPipeline> crt_glow_pipeline;
   std::unique_ptr<RenderPipeline> crt_pipeline;
+  TrackedTexture crt_decoded;
+  TrackedTexture crt_glow;
   // The Screen Curvature setting's pass: in the mod filters' layout, reading
   // the same copy of the target, blended over the backdrop, the frame as it
   // was before the first PS1 layer (backdrop_frame says which frame's it is).
@@ -611,14 +629,17 @@ std::vector<uint8_t> ReadFileBytes(const std::filesystem::path& path) {
   return bytes;
 }
 
-// A filter drawn in the mod filters' layout, its output replacing the target's.
+// A filter drawn in the mod filters' layout (or `layout`), its output
+// replacing what is in a target of `format`.
 std::unique_ptr<RenderPipeline> CreateFilterPipeline(RenderDevice* device, RenderShader* vertex,
-                                                     RenderShader* pixel) {
+                                                     RenderShader* pixel,
+                                                     RenderPipelineLayout* layout = nullptr,
+                                                     RenderFormat format = kTargetFormat) {
   RenderGraphicsPipelineDesc desc;
-  desc.pipelineLayout = g_res.custom_layout.get();
+  desc.pipelineLayout = layout != nullptr ? layout : g_res.custom_layout.get();
   desc.vertexShader = vertex;
   desc.pixelShader = pixel;
-  desc.renderTargetFormat[0] = kTargetFormat;
+  desc.renderTargetFormat[0] = format;
   desc.renderTargetCount = 1;
   desc.renderTargetBlend[0] = RenderBlendDesc::Copy();
   desc.cullMode = RenderCullMode::NONE;
@@ -626,23 +647,74 @@ std::unique_ptr<RenderPipeline> CreateFilterPipeline(RenderDevice* device, Rende
   return device->createGraphicsPipeline(desc);
 }
 
-// The built-in CRT filter: the blit's vertex shader and crt.frag.hlsl.
+// The CRT filter's intermediate images: the decoded lines twice the PS1's
+// 512 wide grid across (see crt.frag.hlsl), the glow on the grid. Float, as
+// they hold linear light.
+constexpr uint32_t kCrtDecodedWidth = 1024;
+constexpr uint32_t kCrtGlowWidth = 512;
+constexpr uint32_t kCrtHeight = 240;
+constexpr RenderFormat kCrtFormat = RenderFormat::R16G16B16A16_FLOAT;
+
+// The built-in CRT filter: the blit's vertex shader and crt.frag.hlsl's three
+// entry points, with its layout, set and intermediate images.
 bool CreateCrtPipeline(RenderDevice* device) {
+  const RenderDescriptorRange ranges[] = {
+      RenderDescriptorRange(RenderDescriptorRangeType::TEXTURE, 0, 1),
+      RenderDescriptorRange(RenderDescriptorRangeType::SAMPLER, 1, 1),
+      RenderDescriptorRange(RenderDescriptorRangeType::SAMPLER, 2, 1),
+      RenderDescriptorRange(RenderDescriptorRangeType::TEXTURE, 3, 1),
+      RenderDescriptorRange(RenderDescriptorRangeType::TEXTURE, 4, 1),
+  };
+  const RenderDescriptorSetDesc set_desc(ranges, uint32_t(std::size(ranges)));
+  const RenderPushConstantRange push_constants(0, 0, 0, sizeof(CustomFilterConstants),
+                                               RenderShaderStageFlag::PIXEL);
+  RenderPipelineLayoutDesc layout_desc;
+  layout_desc.pushConstantRanges = &push_constants;
+  layout_desc.pushConstantRangesCount = 1;
+  layout_desc.descriptorSetDescs = &set_desc;
+  layout_desc.descriptorSetDescsCount = 1;
+  g_res.crt_layout = device->createPipelineLayout(layout_desc);
+  g_res.crt_set = device->createDescriptorSet(set_desc);
+  if (!g_res.crt_layout || !g_res.crt_set ||
+      !CreateTarget(device, g_res.crt_decoded, kCrtDecodedWidth, kCrtHeight, kCrtFormat) ||
+      !CreateTarget(device, g_res.crt_glow, kCrtGlowWidth, kCrtHeight, kCrtFormat))
+    return false;
+  g_res.crt_set->setTexture(0, g_res.custom_source.texture.get(),
+                            RenderTextureLayout::SHADER_READ);
+  g_res.crt_set->setSampler(1, g_res.blit_sampler.get());
+  g_res.crt_set->setSampler(2, g_res.point_sampler.get());
+  g_res.crt_set->setTexture(3, g_res.crt_decoded.texture.get(), RenderTextureLayout::SHADER_READ);
+  g_res.crt_set->setTexture(4, g_res.crt_glow.texture.get(), RenderTextureLayout::SHADER_READ);
+
 #ifdef _WIN32
   auto vertex = CreateBuiltinShader(device, blitVertBlobDXIL, sizeof(blitVertBlobDXIL),
                                     blitVertBlobSPIRV, sizeof(blitVertBlobSPIRV), "VSMain");
+  auto decode = CreateBuiltinShader(device, crtDecodeFragBlobDXIL, sizeof(crtDecodeFragBlobDXIL),
+                                    crtDecodeFragBlobSPIRV, sizeof(crtDecodeFragBlobSPIRV),
+                                    "DecodePS");
+  auto glow = CreateBuiltinShader(device, crtGlowFragBlobDXIL, sizeof(crtGlowFragBlobDXIL),
+                                  crtGlowFragBlobSPIRV, sizeof(crtGlowFragBlobSPIRV), "GlowPS");
   auto pixel = CreateBuiltinShader(device, crtFragBlobDXIL, sizeof(crtFragBlobDXIL),
                                    crtFragBlobSPIRV, sizeof(crtFragBlobSPIRV), "PSMain");
 #else
   auto vertex = CreateBuiltinShader(device, nullptr, 0, blitVertBlobSPIRV,
                                     sizeof(blitVertBlobSPIRV), "VSMain");
+  auto decode = CreateBuiltinShader(device, nullptr, 0, crtDecodeFragBlobSPIRV,
+                                    sizeof(crtDecodeFragBlobSPIRV), "DecodePS");
+  auto glow = CreateBuiltinShader(device, nullptr, 0, crtGlowFragBlobSPIRV,
+                                  sizeof(crtGlowFragBlobSPIRV), "GlowPS");
   auto pixel = CreateBuiltinShader(device, nullptr, 0, crtFragBlobSPIRV,
                                    sizeof(crtFragBlobSPIRV), "PSMain");
 #endif
-  if (!vertex || !pixel)
+  if (!vertex || !decode || !glow || !pixel)
     return false;
-  g_res.crt_pipeline = CreateFilterPipeline(device, vertex.get(), pixel.get());
-  return g_res.crt_pipeline != nullptr;
+  RenderPipelineLayout* layout = g_res.crt_layout.get();
+  g_res.crt_decode_pipeline =
+      CreateFilterPipeline(device, vertex.get(), decode.get(), layout, kCrtFormat);
+  g_res.crt_glow_pipeline =
+      CreateFilterPipeline(device, vertex.get(), glow.get(), layout, kCrtFormat);
+  g_res.crt_pipeline = CreateFilterPipeline(device, vertex.get(), pixel.get(), layout);
+  return g_res.crt_decode_pipeline && g_res.crt_glow_pipeline && g_res.crt_pipeline;
 }
 
 // The pipeline for mod filter `index`, built from its blob for the backend in
@@ -805,8 +877,10 @@ bool EnsureResources(RenderDevice* device) {
     REXLOG_ERROR("native_renderer: could not create the mod screen filters' resources");
     g_res.custom_layout.reset();
   } else {
-    if (!CreateCrtPipeline(device))
+    if (!CreateCrtPipeline(device)) {
       REXLOG_ERROR("native_renderer: could not create the CRT screen filter");
+      g_res.crt_pipeline.reset();
+    }
     if (!CreateCurvaturePipeline(device))
       REXLOG_ERROR("native_renderer: could not create the screen curvature pass");
   }
@@ -1687,6 +1761,23 @@ void CopyTargetToSource(RenderCommandList* commands) {
   g_target_bound = false;
 }
 
+// One of the CRT filter's first passes, from the copy of the target into
+// `target` (kCrtHeight high), left ready for the last one to sample.
+void DrawCrtPass(RenderCommandList* commands, TrackedTexture& target, uint32_t width,
+                 RenderPipeline* pipeline, const CustomFilterConstants& constants) {
+  target.Transition(commands, RenderTextureLayout::COLOR_WRITE);
+  commands->setFramebuffer(target.framebuffer.get());
+  g_target_bound = false;
+  commands->setViewports(RenderViewport(0.0f, 0.0f, float(width), float(kCrtHeight)));
+  commands->setScissors(RenderRect(0, 0, int32_t(width), int32_t(kCrtHeight)));
+  commands->setGraphicsPipelineLayout(g_res.crt_layout.get());
+  commands->setPipeline(pipeline);
+  commands->setGraphicsDescriptorSet(g_res.crt_set.get(), 0);
+  commands->setGraphicsPushConstants(0, &constants, 0, sizeof(constants));
+  commands->drawInstanced(3, 1, 0, 0);
+  target.Transition(commands, RenderTextureLayout::SHADER_READ);
+}
+
 // The screen_filter cvar's effect over the picture: Scanlines or LCD Grid
 // multiplied into it, or CRT or a mod's redrawing it. `picture` says where it
 // is.
@@ -1700,26 +1791,33 @@ void DrawScreenFilter(RenderCommandList* commands, const RenderViewport& viewpor
   if (!custom && !g_res.filter_pipeline)
     return;
 
+  const bool crt = filter.kind == ScreenFilterKind::kCrt;
   RenderPipeline* custom_pipeline = nullptr;
   if (custom) {
-    custom_pipeline = filter.kind == ScreenFilterKind::kCrt
-                          ? g_res.crt_pipeline.get()
-                          : CustomFilterPipeline(PlumeDevice(), filter.custom);
+    custom_pipeline =
+        crt ? g_res.crt_pipeline.get() : CustomFilterPipeline(PlumeDevice(), filter.custom);
     if (custom_pipeline == nullptr)
       return;
     // The filter reads the picture and draws it anew, so it samples a copy.
     CopyTargetToSource(commands);
   }
 
+  CustomFilterConstants constants = picture;
+  constants.intensity = filter.strength;
+  if (crt) {
+    DrawCrtPass(commands, g_res.crt_decoded, kCrtDecodedWidth, g_res.crt_decode_pipeline.get(),
+                constants);
+    DrawCrtPass(commands, g_res.crt_glow, kCrtGlowWidth, g_res.crt_glow_pipeline.get(),
+                constants);
+  }
+
   BindTarget(commands);
   commands->setViewports(viewport);
   commands->setScissors(scissor);
   if (custom) {
-    CustomFilterConstants constants = picture;
-    constants.intensity = filter.strength;
-    commands->setGraphicsPipelineLayout(g_res.custom_layout.get());
+    commands->setGraphicsPipelineLayout(crt ? g_res.crt_layout.get() : g_res.custom_layout.get());
     commands->setPipeline(custom_pipeline);
-    commands->setGraphicsDescriptorSet(g_res.custom_set.get(), 0);
+    commands->setGraphicsDescriptorSet(crt ? g_res.crt_set.get() : g_res.custom_set.get(), 0);
     commands->setGraphicsPushConstants(0, &constants, 0, sizeof(constants));
   } else {
     commands->setGraphicsPipelineLayout(g_res.filter_layout.get());
@@ -1945,6 +2043,10 @@ void GuestResizeTarget(uint32_t width, uint32_t height) {
     if (CreateTarget(device, g_res.custom_source)) {
       g_res.custom_set->setTexture(0, g_res.custom_source.texture.get(),
                                    RenderTextureLayout::SHADER_READ);
+      if (g_res.crt_set) {
+        g_res.crt_set->setTexture(0, g_res.custom_source.texture.get(),
+                                  RenderTextureLayout::SHADER_READ);
+      }
     } else {
       REXLOG_ERROR("native_renderer: could not rebuild the mod screen filters' source");
       g_res.custom_layout.reset();
