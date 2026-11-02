@@ -292,8 +292,11 @@ struct Resources {
   std::vector<std::unique_ptr<RenderPipeline>> custom_pipelines;
   std::vector<bool> custom_attempted;
   // The Screen Curvature setting's pass: in the mod filters' layout, reading
-  // the same copy of the target.
+  // the same copy of the target, blended over the backdrop, the frame as it
+  // was before the first PS1 layer (backdrop_frame says which frame's it is).
   std::unique_ptr<RenderPipeline> curvature_pipeline;
+  TrackedTexture backdrop;
+  uint64_t backdrop_frame = UINT64_MAX;
 
   // The JP movies (jp/movie_player.cpp), drawn into the PS1 box ahead of the
   // screen filter with the blit's layout. The texture is the movie's size and
@@ -675,12 +678,25 @@ bool CreateCurvaturePipeline(RenderDevice* device) {
   if (!vertex || !pixel)
     return false;
   RenderGraphicsPipelineDesc desc;
+  // Over the backdrop by the shader's alpha (the tube's shape); alpha left as
+  // the guest wrote it.
+  RenderBlendDesc blend;
+  blend.blendEnabled = true;
+  blend.srcBlend = RenderBlend::SRC_ALPHA;
+  blend.dstBlend = RenderBlend::INV_SRC_ALPHA;
+  blend.blendOp = RenderBlendOperation::ADD;
+  blend.srcBlendAlpha = RenderBlend::ZERO;
+  blend.dstBlendAlpha = RenderBlend::ONE;
+  blend.blendOpAlpha = RenderBlendOperation::ADD;
+  if (!CreateTarget(device, g_res.backdrop))
+    return false;
+
   desc.pipelineLayout = g_res.custom_layout.get();
   desc.vertexShader = vertex.get();
   desc.pixelShader = pixel.get();
   desc.renderTargetFormat[0] = kTargetFormat;
   desc.renderTargetCount = 1;
-  desc.renderTargetBlend[0] = RenderBlendDesc::Copy();
+  desc.renderTargetBlend[0] = blend;
   desc.cullMode = RenderCullMode::NONE;
   desc.primitiveTopology = RenderPrimitiveTopology::TRIANGLE_LIST;
   g_res.curvature_pipeline = device->createGraphicsPipeline(desc);
@@ -1687,7 +1703,27 @@ void DrawCurvature(RenderCommandList* commands, const RenderViewport& viewport,
   if (curvature <= 0.0f || !g_res.curvature_pipeline)
     return;
   CopyTargetToSource(commands);
-  BindTarget(commands);
+  // Under the box, what was there before the picture; black on a frame with
+  // no backdrop. A little past the box, too: the guest's own picture reaches
+  // a pixel or so beyond the rect as rounded here, and that edge would stay
+  // as a line along the curved picture's side.
+  constexpr int32_t kMargin = 2;
+  const RenderBox box(std::max(scissor.left - kMargin, 0), std::max(scissor.top - kMargin, 0),
+                      std::min(scissor.right + kMargin, int32_t(g_target_width)),
+                      std::min(scissor.bottom + kMargin, int32_t(g_target_height)));
+  if (g_res.backdrop_frame == PlumeFrameSerial() && box.right > box.left &&
+      box.bottom > box.top) {
+    g_res.backdrop.Transition(commands, RenderTextureLayout::COPY_SOURCE);
+    g_res.target.Transition(commands, RenderTextureLayout::COPY_DEST);
+    commands->copyTextureRegion(RenderTextureCopyLocation::Subresource(g_res.target.texture.get()),
+                                RenderTextureCopyLocation::Subresource(g_res.backdrop.texture.get()),
+                                uint32_t(box.left), uint32_t(box.top), 0, &box);
+    g_target_bound = false;
+    BindTarget(commands);
+  } else {
+    BindTarget(commands);
+    commands->clearColor(0, RenderColor(0.0f, 0.0f, 0.0f, 1.0f), &scissor, 1);
+  }
   commands->setViewports(viewport);
   commands->setScissors(scissor);
   CustomFilterConstants constants = picture;
@@ -1697,6 +1733,43 @@ void DrawCurvature(RenderCommandList* commands, const RenderViewport& viewport,
   commands->setGraphicsDescriptorSet(g_res.custom_set.get(), 0);
   commands->setGraphicsPushConstants(0, &constants, 0, sizeof(constants));
   commands->drawInstanced(3, 1, 0, 0);
+}
+
+bool GuestWantsBackdrop(uint8_t* base, uint32_t rect) {
+  if (!g_res.curvature_pipeline || ScreenCurvature() <= 0.0f ||
+      g_res.backdrop_frame == PlumeFrameSerial())
+    return false;
+  // The draw's rect against the PS1 box, both in guest display pixels: a draw
+  // within it is the picture's (a whole layer or one of its ranges); one past
+  // it is what lies under it, the frame's backdrop above all.
+  const auto load = [base](uint32_t address) { return int32_t(Load32(base, address)); };
+  const int32_t left = load(rect), top = load(rect + 4);
+  const int32_t right = load(rect + 8), bottom = load(rect + 12);
+  const int32_t box_left = load(kStretchRectAddr), box_top = load(kStretchRectAddr + 4);
+  const int32_t box_right = load(kStretchRectAddr + 8), box_bottom = load(kStretchRectAddr + 12);
+  constexpr int32_t kSlack = 2;
+  const bool inside = right > left && bottom > top && left >= box_left - kSlack &&
+                      top >= box_top - kSlack && right <= box_right + kSlack &&
+                      bottom <= box_bottom + kSlack;
+  static uint32_t logged = 0;
+  if (logged < 16) {
+    ++logged;
+    REXLOG_INFO("native_renderer: layer at ({}, {}, {}, {}), PS1 box ({}, {}, {}, {}){}", left,
+                top, right, bottom, box_left, box_top, box_right, box_bottom,
+                inside ? ": curvature backdrop taken" : "");
+  }
+  return inside;
+}
+
+void GuestSnapshotBackdrop() {
+  RenderCommandList* commands = BeginRecording();
+  if (commands == nullptr || !g_res.backdrop.texture)
+    return;
+  g_res.target.Transition(commands, RenderTextureLayout::COPY_SOURCE);
+  g_res.backdrop.Transition(commands, RenderTextureLayout::COPY_DEST);
+  commands->copyTexture(g_res.backdrop.texture.get(), g_res.target.texture.get());
+  g_res.backdrop_frame = PlumeFrameSerial();
+  g_target_bound = false;
 }
 
 void GuestFilterPs1Picture(uint8_t* base) {
@@ -1839,6 +1912,14 @@ void GuestResizeTarget(uint32_t width, uint32_t height) {
     } else {
       REXLOG_ERROR("native_renderer: could not rebuild the mod screen filters' source");
       g_res.custom_layout.reset();
+    }
+  }
+  if (g_res.curvature_pipeline) {
+    g_res.backdrop = TrackedTexture{};
+    g_res.backdrop_frame = UINT64_MAX;
+    if (!CreateTarget(device, g_res.backdrop)) {
+      REXLOG_ERROR("native_renderer: could not rebuild the screen curvature's backdrop");
+      g_res.curvature_pipeline.reset();
     }
   }
   g_dump.buffer.reset();

@@ -2,7 +2,9 @@
 // PS1 picture like a CRT tube's glass, with rounded corners, once the screen
 // filter (if any) has drawn it. Redraws the picture's rect from a copy of the
 // target, in the mod filters' layout (docs/making-mods.md, "Screen filters"),
-// with the amount, 0 to 1, where their intensity goes.
+// with the amount, 0 to 1, where their intensity goes. Alpha is the tube's
+// shape: the renderer blends this over what lay under the picture, so past
+// the glass the frame's backdrop shows.
 
 struct VSOutput {
     float4 position : SV_POSITION;
@@ -44,5 +46,5 @@ float4 PSMain(VSOutput input) : SV_TARGET {
 
     float2 uv = constants.sourceRect.xy + saturate(p) * constants.sourceRect.zw;
     float3 color = sourceTexture.SampleLevel(linearSampler, uv, 0).rgb;
-    return float4(color * inside, 1.0);
+    return float4(color, inside);
 }

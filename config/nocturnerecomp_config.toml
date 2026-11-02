@@ -280,3 +280,18 @@ return_on_true = true
 [[midasm_hook]]
 address = 0x82583174
 name = "ScreenFilterBeforeUi"
+
+# Screen curvature's backdrop (src/gpu/native_renderer_d3d.cpp): the frame as
+# it is before the first PS1 layer lands on it, for the curved picture's
+# corners to show. Both of DrawLayers's layer draws, once its state is set: a
+# whole layer's (its screen rect at r1+0x80) and one of a paletted layer's
+# ranges (at r1+0xA0).
+[[midasm_hook]]
+address = 0x82582D64
+name = "CurvatureBackdropBeforeLayer"
+registers = ["r1"]
+
+[[midasm_hook]]
+address = 0x82583048
+name = "CurvatureBackdropBeforeRange"
+registers = ["r1"]

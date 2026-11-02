@@ -363,3 +363,20 @@ void ScreenFilterBeforeUi() {
   FlushInline(base);
   nocturne::GuestFilterPs1Picture(base);
 }
+
+// Midasm hooks on DrawLayers's two layer draws (0x82582D64, 0x82583048), with
+// the draw's screen rect on the stack: the first one inside the PS1 box keeps
+// the frame as it is under it, for screen curvature's corners.
+namespace {
+void CurvatureBackdropBefore(uint32_t rect) {
+  uint8_t* base = REX_KERNEL_STATE()->memory()->virtual_membase();
+  if (!nocturne::GuestWantsBackdrop(base, rect))
+    return;
+  FlushInline(base);
+  nocturne::GuestSnapshotBackdrop();
+}
+}  // namespace
+
+void CurvatureBackdropBeforeLayer(PPCRegister& r1) { CurvatureBackdropBefore(r1.u32 + 0x80); }
+
+void CurvatureBackdropBeforeRange(PPCRegister& r1) { CurvatureBackdropBefore(r1.u32 + 0xA0); }

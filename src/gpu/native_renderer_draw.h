@@ -83,6 +83,13 @@ void GuestResolve(uint8_t* base, uint32_t device, uint32_t flags, uint32_t desti
 // screen_curvature setting bends the result, whatever the filter.
 void GuestFilterPs1Picture(uint8_t* base);
 
+// Screen curvature's backdrop: whether a layer about to be drawn at the
+// screen rect at guest address `rect` (LTRB) is the first of the PS1 picture's
+// this frame, while the curvature is on, and then the frame as it is now, kept
+// for the curved picture's corners to show (GuestFilterPs1Picture).
+bool GuestWantsBackdrop(uint8_t* base, uint32_t rect);
+void GuestSnapshotBackdrop();
+
 // The guest's ClearF: (device, flags, rect or null, float4 colour pointer).
 // Clears the render target to the colour, within the rect when there is one.
 void GuestClear(uint8_t* base, uint32_t device, uint32_t flags, uint32_t rect, uint32_t color);
