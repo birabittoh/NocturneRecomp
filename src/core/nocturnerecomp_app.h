@@ -55,6 +55,9 @@
 #include "core/guest_image.h"
 #endif
 #include "host_menu.h"
+#if REX_PLATFORM_ANDROID
+#include "android_gpu_driver.h"
+#endif
 #include "screens/language_switch.h"
 #include "jp/movie_player.h"
 #include "screens/native_options.h"
@@ -616,6 +619,10 @@ class NocturnerecompApp : public rex::ReXApp {
     rexglue_guide::Shutdown();
     // Tear the host renderer down before the window goes away.
     nocturne::ShutdownPlumeBackend();
+#if REX_PLATFORM_ANDROID
+    // A deliberate quit, even seconds after starting, is no failed driver start.
+    nocturne::MarkRendererStarted();
+#endif
 
 #if REX_PLATFORM_WIN32 || REX_PLATFORM_GNU_LINUX
     rex::discord_rpc::Stop();

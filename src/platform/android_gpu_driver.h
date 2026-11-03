@@ -19,7 +19,8 @@ void PromptGpuDriverAfterFailedStart();
 // null for the system driver. Also marks the renderer start as in progress.
 void* LoadSelectedVulkanDriver();
 
-// Clears the in progress mark once the renderer is up.
+// Clears the in progress mark once the renderer is up, or on a deliberate
+// quit or restart.
 void MarkRendererStarted();
 
 bool CustomVulkanDriverSelected();
