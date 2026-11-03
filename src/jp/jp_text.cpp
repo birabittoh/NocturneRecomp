@@ -2,6 +2,7 @@
 
 #include "jp/jp_text.h"
 
+#include <algorithm>
 #include <cstring>
 #include <filesystem>
 #include <fstream>
@@ -161,6 +162,102 @@ constexpr ByteFix kVoiceCues[] = {
     {0x82CF2148u, 0xF0, 0xF8},  // Richter: 俺としたことが…。
     {0x82CEBF96u, 0x01, 0x0A},  // Shaft: なぜ、奴を城主として祭り上げた？
 };
+
+// The cutscene scripts (interpreted by sub_823A2F28) end a line with a pause
+// (`03 n`) and close its box (`06`), then open the next speaker's (`05 ..`)
+// and wait for the voice still playing to end (`0B`) before playing theirs
+// (`09 hi lo 0A`). Each language is timed to its own text: the Japanese
+// scripts (JP's, byte for byte) to JP's voices, the English ones to the
+// English voices. JP's are longer, so in English the box closed while the
+// line was still being spoken, and the next portrait sat waiting for it.
+// French, German, Italian and Spanish wait before closing (`03 n 0B 06 ..`),
+// which keeps up with any recording; while JP's voices play, English's wait
+// moves there too. It is the same bytes in a different order.
+constexpr uint32_t kScriptsBegin = 0x82CD0000u;
+constexpr uint32_t kScriptsEnd = 0x82D60000u;
+constexpr uint32_t kFirstVoice = 769;  // streamed voice cues, see kVoiceCues
+constexpr uint32_t kLastVoice = 1330;
+
+// The bytes between a box's close and the next wait: what the interpreter
+// reads there without speaking, waiting or closing (opcode -> length, 0 for
+// anything else). Text is ASCII, 1A + an accented letter, or two-byte glyphs.
+uint32_t QuietStep(const uint8_t* p) {
+  const uint8_t c = *p;
+  switch (c) {
+    case 0x01:
+      return 1;
+    case 0x02:
+    case 0x03:
+    case 0x10:
+    case 0x11:
+    case 0x1A:
+      return 2;
+    case 0x05:
+    case 0x07:
+    case 0x14:
+      return 3;
+    case 0x13:
+      return 6;
+    default:
+      return c >= 0x80 ? 2 : (c >= 0x20 && c < 0x7F ? 1 : 0);
+  }
+}
+
+// A box's close moved behind the wait: [close, wait) shifts up by one.
+struct VoiceWait {
+  uint32_t close;
+  uint32_t wait;
+};
+std::vector<VoiceWait> g_voice_waits;
+
+void FindVoiceWaits() {
+  const uint8_t* s = Guest(kScriptsBegin);
+  const uint32_t size = kScriptsEnd - kScriptsBegin;
+  for (uint32_t at = 0; at + 5 <= size; ++at) {
+    if (s[at] != 0x0B || s[at + 1] != 0x09 || s[at + 4] != 0x0A)
+      continue;
+    const uint32_t cue = uint32_t(s[at + 2]) << 4 | s[at + 3];
+    if (cue < kFirstVoice || cue > kLastVoice)
+      continue;
+    // Japanese lines keep their timing.
+    uint32_t lead = 0;
+    for (uint32_t k = at + 5; k < std::min(size, at + 53); ++k)
+      lead += IsLeadByte(s[k]);
+    if (lead >= 12)
+      continue;
+    // The nearest close that only quiet bytes separate from the wait; a later
+    // 06 is a parameter.
+    for (uint32_t close = at > 48 ? at - 48 : 0; close < at; ++close) {
+      if (s[close] != 0x06)
+        continue;
+      uint32_t k = close + 1;
+      while (k < at) {
+        const uint32_t n = QuietStep(s + k);
+        if (!n)
+          break;
+        k += n;
+      }
+      if (k == at) {
+        g_voice_waits.push_back({kScriptsBegin + close, kScriptsBegin + at});
+        break;
+      }
+    }
+  }
+}
+
+void ApplyVoiceWaits(bool jp_voices) {
+  for (const VoiceWait& v : g_voice_waits) {
+    const uint32_t n = v.wait - v.close;
+    std::vector<uint8_t> bytes(Guest(v.close), Guest(v.close) + n + 1);
+    if (jp_voices && bytes[0] == 0x06 && bytes[n] == 0x0B)
+      std::rotate(bytes.begin(), bytes.end() - 1, bytes.end());
+    else if (!jp_voices && bytes[0] == 0x0B && bytes[1] == 0x06)
+      std::rotate(bytes.begin(), bytes.begin() + 1, bytes.end());
+    else
+      continue;
+    WriteGuest(v.close, bytes.data(), bytes.size());
+  }
+}
 
 // The prologue scroll (sub_823A6F38, set up by sub_823A6CA8 with the text).
 // In Japanese World scrolls a Japanese translation of its own, through the
@@ -340,9 +437,11 @@ bool InstallJpText(rex::Runtime* runtime) {
   for (const auto& [slot, value] : slots)
     Store32(slot, value);
   g_jp_prologue = prologue;
+  FindVoiceWaits();
   g_active = true;
-  REXLOG_INFO("jp text: JP's Japanese text in place (0x{:X} bytes, {} shared slots)", arena.used(),
-              g_swaps.size());
+  REXLOG_INFO("jp text: JP's Japanese text in place (0x{:X} bytes, {} shared slots, {} voice "
+              "waits)",
+              arena.used(), g_swaps.size(), g_voice_waits.size());
   return true;
 }
 
@@ -357,6 +456,7 @@ void ApplyPendingJpText() {
   const int voices = JpVoicesPlaying() ? 1 : 0;
   if (voices != g_applied_voices) {
     ApplyVoiceCues(voices);
+    ApplyVoiceWaits(voices);
     g_applied_voices = voices;
   }
 }
