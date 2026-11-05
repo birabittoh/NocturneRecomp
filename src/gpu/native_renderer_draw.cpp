@@ -18,6 +18,7 @@
 #include <vector>
 
 #include <rex/logging.h>
+#include <rex/cvar.h>
 #include <rex/system/xmemory.h>
 
 #include "core/game_state.h"
@@ -48,6 +49,10 @@
 #include "shaders/crtGlowFrag.hlsl.spirv.h"
 
 namespace nocturne {
+
+REXCVAR_DEFINE_BOOL(show_wallpaper, true, "Video",
+                   "Show the gameplay wallpaper (title and front-end menus are unaffected)");
+
 namespace {
 
 using namespace plume;
@@ -1563,6 +1568,25 @@ GuestVertexFill GuestDrawInline(uint8_t* base, const GuestInlineDraw& draw) {
   const GuestPipeline* pipeline = AcquirePipeline(device, key, decl);
   if (pipeline == nullptr)
     return {};
+
+  // Identify the original texture before replacements. Do not hash a resolve
+  // destination: its authoritative pixels live on the host GPU.
+  // GameRunning includes file select and pause screens, but excludes the
+  // title/front-end screens and stops immediately on Quit to Title.
+  if (!REXCVAR_GET(show_wallpaper) && GameRunning(base) &&
+      (pipeline->pixel->texture_mask & 1u) != 0) {
+    TextureFetch fetch;
+    if (ReadTextureFetch(base, dev + kTextureFetchConstants, fetch) &&
+        fetch.base_address != g_resolve_address &&
+        GuestTextureMatchesHash(commands, base, fetch, 0xAB1F34D7CE092104ull)) {
+      static bool reported = false;
+      if (!reported) {
+        reported = true;
+        REXLOG_INFO("native_renderer: hiding gameplay wallpaper ab1f34d7ce092104");
+      }
+      return {};
+    }
+  }
 
   // The vertices, out of the command buffer. Every element is made of 32 bit
   // units (MapVertexFormat refuses anything else), so the block swaps as

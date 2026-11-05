@@ -71,6 +71,13 @@ plume::RenderTexture* MirrorTexture(plume::RenderCommandList* commands, uint8_t*
 // The host sampler for `fetch`'s filter and address modes.
 plume::RenderSampler* MirrorSampler(const TextureFetch& fetch);
 
+// Whether `fetch`'s original guest bytes have the SDK replacement hash `hash`,
+// whether or not any texture mods are installed. Mirrors the texture through
+// `commands` like MirrorTexture, and hashes its source again only after its
+// contents changed.
+bool GuestTextureMatchesHash(plume::RenderCommandList* commands, uint8_t* base,
+                             const TextureFetch& fetch, uint64_t hash);
+
 // A new frame started recording into frame slot `slot`; that slot's staging
 // buffers are free again.
 void TextureMirrorBeginFrame(uint32_t slot);

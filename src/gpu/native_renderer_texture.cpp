@@ -299,6 +299,12 @@ struct MirroredTexture {
   bool replaced = false;
   uint32_t replaced_width = 0;
   uint32_t replaced_height = 0;
+  // The SDK replacement hash of the source, computed on demand and valid while
+  // `hash` still equals `content_hash_of`, so unchanged contents are not
+  // hashed again.
+  uint64_t content_hash = 0;
+  uint64_t content_hash_of = 0;
+  bool content_hashed = false;
 };
 
 // Everything that changes how the bytes are read is in the key, so a texture
@@ -518,7 +524,10 @@ bool ReadTextureFetch(const uint8_t* base, uint32_t address, TextureFetch& out) 
   return out.type == 2 && out.raw_base_address != 0;
 }
 
-RenderTexture* MirrorTexture(RenderCommandList* commands, uint8_t* base,
+namespace {
+
+// MirrorTexture, returning the cache entry: null, or one holding a texture.
+MirroredTexture* MirrorEntry(RenderCommandList* commands, uint8_t* base,
                              const TextureFetch& fetch) {
   FormatInfo info;
   if (!MapTextureFormat(fetch.format, info)) {
@@ -542,7 +551,7 @@ RenderTexture* MirrorTexture(RenderCommandList* commands, uint8_t* base,
   // the same frame are not seen until the next one.
   const uint64_t frame = PlumeFrameSerial();
   if (!inserted && entry.hashed_frame == frame)
-    return entry.texture.get();
+    return &entry;
   entry.hashed_frame = frame;
 
   const Layout layout = ComputeLayout(fetch, info);
@@ -569,19 +578,26 @@ RenderTexture* MirrorTexture(RenderCommandList* commands, uint8_t* base,
 
   const uint64_t hash = HashSource(source, layout.source_bytes);
   if (entry.texture && hash == entry.hash)
-    return entry.texture.get();
+    return &entry;
   const bool refresh = entry.texture != nullptr;
 
   uint64_t content_hash = 0;
-  if (const TextureReplacementData* image =
-          FindReplacementImage(fetch, source, layout.source_bytes, content_hash)) {
+  const TextureReplacementData* image =
+      FindReplacementImage(fetch, source, layout.source_bytes, content_hash);
+  // The replacement lookup already paid for the content hash.
+  if (content_hash != 0) {
+    entry.content_hash = content_hash;
+    entry.content_hash_of = hash;
+    entry.content_hashed = true;
+  }
+  if (image != nullptr) {
     if (UploadReplacement(commands, *image, entry)) {
       entry.hash = hash;
       if (++g_replaced <= 32)
         REXLOG_INFO("native_renderer: replaced {}x{} fmt {} texture {:016x} with a {}x{} image",
                     fetch.width, fetch.height, fetch.format, content_hash, image->width,
                     image->height);
-      return entry.texture.get();
+      return &entry;
     }
   }
   // The decode only refreshes in place a texture it made itself.
@@ -605,7 +621,36 @@ RenderTexture* MirrorTexture(RenderCommandList* commands, uint8_t* base,
         fetch.width, fetch.height, fetch.format, fetch.tiled ? "tiled" : "linear", fetch.pitch,
         fetch.endianness, fetch.swizzle, fetch.base_address);
   }
-  return entry.texture.get();
+  return &entry;
+}
+
+}  // namespace
+
+RenderTexture* MirrorTexture(RenderCommandList* commands, uint8_t* base,
+                             const TextureFetch& fetch) {
+  MirroredTexture* entry = MirrorEntry(commands, base, fetch);
+  return entry != nullptr ? entry->texture.get() : nullptr;
+}
+
+bool GuestTextureMatchesHash(RenderCommandList* commands, uint8_t* base,
+                             const TextureFetch& fetch, uint64_t hash) {
+  MirroredTexture* entry = MirrorEntry(commands, base, fetch);
+  if (entry == nullptr)
+    return false;
+  // The mirror's own hash already says whether the contents changed, so the
+  // content hash is only paid for a texture that is new or was rewritten.
+  if (!entry->content_hashed || entry->content_hash_of != entry->hash) {
+    FormatInfo info;
+    MapTextureFormat(fetch.format, info);
+    const Layout layout = ComputeLayout(fetch, info);
+    const uint8_t* source = PhysicalPointer(base, fetch.raw_base_address, layout.source_bytes);
+    if (source == nullptr)
+      return false;
+    entry->content_hash = TextureReplacement::HashGuestData(source, size_t(layout.source_bytes));
+    entry->content_hash_of = entry->hash;
+    entry->content_hashed = true;
+  }
+  return entry->content_hash == hash;
 }
 
 RenderSampler* MirrorSampler(const TextureFetch& fetch) {
