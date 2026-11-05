@@ -377,6 +377,10 @@ class CuratedSettingsDialog : public rex::ui::ImGuiDialog {
         DrawGeneralTab();
         ImGui::EndTabItem();
       }
+      if (ImGui::BeginTabItem(Tr("settings", "section_graphics"))) {
+        DrawGraphicsTab();
+        ImGui::EndTabItem();
+      }
       // One tab per group of enhancements, labelled like its old section.
       for (const char* section : kEnhancementTabs) {
         if (ImGui::BeginTabItem(Tr("enhancements", section))) {
@@ -470,7 +474,11 @@ class CuratedSettingsDialog : public rex::ui::ImGuiDialog {
     DrawAudioMuteRow();
     DrawAudioVolumeRow();
 
-    ImGui::SeparatorText(Tr("settings", "section_graphics"));
+    ImGui::SeparatorText(Tr("settings", "section_controls"));
+    DrawTouchRows();
+  }
+
+  void DrawGraphicsTab() {
 #if !REX_PLATFORM_ANDROID
     // Android is always fullscreen.
     DrawFullscreenRow();
@@ -492,9 +500,6 @@ class CuratedSettingsDialog : public rex::ui::ImGuiDialog {
 #endif
       DrawVulkanDeviceRow();
 #endif
-
-    ImGui::SeparatorText(Tr("settings", "section_controls"));
-    DrawTouchRows();
   }
 
   // The on-screen pad (see touch_layout.h). Its sliders only show while it is on.
