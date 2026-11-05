@@ -54,7 +54,7 @@
 // picture fills the PS1 box: JP builds its XMV quad from the four corners of
 // the Change Screen Size rect (JP dword_82B32C90, sub_825E01E0), the rect the
 // game's layers are drawn in, so it follows the player's stretch and the
-// border outside the box stays on screen. Start skips it, as in JP. A folder without the movie files (World) runs the vanilla code.
+// border outside the box stays on screen. Start skips it once the game is cleared, as JP's opening does. A folder without the movie files (World) runs the vanilla code.
 //
 // Hooks wired up in config/nocturnerecomp_movie_hooks.toml.
 // ---------------------------------------------------------------------------
@@ -72,6 +72,7 @@ namespace {
 
 constexpr uint32_t kMovieIndex = 0x831751A0;   // dword_831751A0
 constexpr uint32_t kStrPlayerOn = 0x8318EE20;  // dword_8318EE20
+constexpr uint32_t kGameCleared = 0x83133AFC;  // JP dword_833F6F04 (player_status.cpp)
 constexpr size_t kFramesAhead = 8;
 
 uint32_t ReadU32(uint32_t guest_address) {
@@ -464,8 +465,9 @@ bool StartDown() {
 enum class Hold { kNoMovie, kPlaying, kFinished };
 
 // Starts |name| from JP's DATA/video on the first call and holds the caller
-// while it plays. Without JP installed the vanilla code runs.
-Hold HoldForMovie(const char* name) {
+// while it plays; Start skips it when |skippable|. Without JP installed the
+// vanilla code runs.
+Hold HoldForMovie(const char* name, bool skippable) {
   switch (g_movie.phase()) {
     case Movie::Phase::kIdle: {
       if (JpDir().empty())
@@ -481,7 +483,7 @@ Hold HoldForMovie(const char* name) {
     }
     case Movie::Phase::kPlaying: {
       const bool down = StartDown();
-      if (down && !g_start_was_down)
+      if (skippable && down && !g_start_was_down)
         g_movie.Skip();
       g_start_was_down = down;
       return Hold::kPlaying;
@@ -506,8 +508,9 @@ bool CurrentMoviePicture(MoviePicture& out) { return g_movie.Picture(out); }
 
 // Title dispatcher sub_822521C0, mode 5's `b sub_8224ED70`: JP's title card,
 // then OPN_WS. True holds mode 5 (returns from the dispatcher, 0x822523A0).
-// Start during the card skips both, as JP's mode 5 does. The opening
-// introduces the Richter prologue, so skip_richter skips it too.
+// Start skips both, but only once the game has been cleared: JP's mode 5
+// checks Start against the clear flag. The opening introduces the Richter
+// prologue, so skip_richter skips it too.
 bool MovieOpeningHook() {
   using namespace nocturne;
   if (REXCVAR_GET(skip_richter))
@@ -522,7 +525,7 @@ bool MovieOpeningHook() {
     const bool down = StartDown();
     const bool pressed = down && !g_start_was_down;
     g_start_was_down = down;
-    if (pressed) {
+    if (pressed && ReadU32(kGameCleared) != 0) {
       g_card.End();
       g_card.Reset();
       return false;
@@ -530,7 +533,7 @@ bool MovieOpeningHook() {
     if (g_card.Run())
       return true;
   }
-  if (HoldForMovie("OPN_WS.wmv") == Hold::kPlaying)
+  if (HoldForMovie("OPN_WS.wmv", ReadU32(kGameCleared) != 0) == Hold::kPlaying)
     return true;
   g_card.Reset();
   return false;
@@ -540,13 +543,14 @@ bool MovieOpeningHook() {
 // movie state 0 picked. True holds state 1 (to the epilogue, 0x82392304).
 // When it ends, the STR player is switched off (it returns at once when
 // dword_8318EE20 is 0) and the rest of state 1 runs as after a played movie.
+// Start skips it once the game is cleared, like the opening.
 bool MovieEndingHook() {
   using nocturne::Hold;
   const uint32_t index = nocturne::ReadU32(nocturne::kMovieIndex);
   const char* name = index == 2 ? "TYK_WS.wmv" : index == 3 ? "END_WS.wmv" : nullptr;
   if (!name)
     return false;
-  switch (nocturne::HoldForMovie(name)) {
+  switch (nocturne::HoldForMovie(name, nocturne::ReadU32(nocturne::kGameCleared) != 0)) {
     case Hold::kPlaying:
       return true;
     case Hold::kFinished:
