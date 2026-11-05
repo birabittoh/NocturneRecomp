@@ -40,6 +40,8 @@ struct GuestInlineDraw {
   // the bound one (-1 for the bound one).
   const uint8_t* host_vertices = nullptr;
   int vertex_slot = -1;
+  // Cloud strip only: clamp V while preserving horizontal scrolling.
+  bool clamp_texture0_v = false;
 };
 
 // The size the guest's target is currently built at (0x0 until the first draw

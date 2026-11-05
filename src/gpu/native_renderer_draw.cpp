@@ -1403,7 +1403,7 @@ void BuildDrawState(const uint8_t* base, uint32_t device, const uint32_t swizzle
 // the mirror cannot produce, samples the white placeholder.
 const TextureBinding* BindTextures(RenderCommandList* commands, RenderDevice* device,
                                    uint8_t* base, uint32_t dev, uint32_t texture_mask,
-                                   uint32_t swizzles[kTextureSlots]) {
+                                   uint32_t swizzles[kTextureSlots], bool clamp_texture0_v) {
   TextureBinding wanted;
   for (uint32_t stage = 0; stage < kTextureSlots; ++stage) {
     wanted.textures[stage] = g_res.white.get();
@@ -1423,6 +1423,10 @@ const TextureBinding* BindTextures(RenderCommandList* commands, RenderDevice* de
     if (texture == nullptr)
       continue;
     wanted.textures[stage] = texture;
+    // The cloud's bottom UV extends beyond 1.0; vertical wrapping pulls
+    // the top row into the lower edge. Override only this draw's sampler.
+    if (stage == 0 && clamp_texture0_v)
+      fetch.clamp_y = 2;  // Clamp to edge; leave U unchanged.
     wanted.samplers[stage] = MirrorSampler(fetch);
     swizzles[stage] = fetch.swizzle;
   }
@@ -1621,7 +1625,8 @@ GuestVertexFill GuestDrawInline(uint8_t* base, const GuestInlineDraw& draw) {
   CopySwapped(bools.cpu + 32, base, dev + kLoopShadow, 128);
   uint32_t swizzles[kTextureSlots];
   const TextureBinding* textures =
-      BindTextures(commands, device, base, dev, pipeline->pixel->texture_mask, swizzles);
+      BindTextures(commands, device, base, dev, pipeline->pixel->texture_mask, swizzles,
+                   draw.clamp_texture0_v);
   if (textures == nullptr) {
     Drop(kDropTextures, 0);
     return {};

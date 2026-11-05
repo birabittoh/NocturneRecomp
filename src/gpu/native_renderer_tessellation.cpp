@@ -196,6 +196,7 @@ void GuestDrawTessellatedQuad(uint8_t* base, uint32_t device, uint32_t control_p
   draw.stride = kControlPointStride;
   draw.host_vertices = reinterpret_cast<const uint8_t*>(quads.data());
   draw.vertex_slot = vertex_slot;
+  draw.clamp_texture0_v = true;
   GuestDrawInline(base, draw);
 }
 
