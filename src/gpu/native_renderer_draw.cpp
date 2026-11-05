@@ -1419,11 +1419,12 @@ const TextureBinding* BindTextures(RenderCommandList* commands, RenderDevice* de
         !ReadTextureFetch(base, dev + kTextureFetchConstants + 24 * stage, fetch))
       continue;
     RenderTexture* texture = nullptr;
+    bool replaced = false;
     if (fetch.base_address == g_resolve_address) {
       g_res.front.Transition(commands, RenderTextureLayout::SHADER_READ);
       texture = g_res.front.texture.get();
     } else {
-      texture = MirrorTexture(commands, base, fetch);
+      texture = MirrorTexture(commands, base, fetch, &replaced);
     }
     if (texture == nullptr)
       continue;
@@ -1433,7 +1434,8 @@ const TextureBinding* BindTextures(RenderCommandList* commands, RenderDevice* de
     if (stage == 0 && clamp_texture0_v)
       fetch.clamp_y = 2;  // Clamp to edge; leave U unchanged.
     wanted.samplers[stage] = MirrorSampler(fetch);
-    swizzles[stage] = fetch.swizzle;
+    // A replacement is painted from a dump, which already has the swizzle.
+    swizzles[stage] = replaced ? 0x688u : fetch.swizzle;
   }
 
   for (const auto& binding : g_bindings) {

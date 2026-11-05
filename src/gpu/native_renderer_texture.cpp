@@ -382,8 +382,11 @@ bool Upload(RenderCommandList* commands, const TextureFetch& fetch, const Format
 // the shaders sample with normalized coordinates, so nothing else has to know.
 //
 // Colour formats only, and a single mip level (the sampler never leaves level
-// 0). There is no dump path here: the SDK's own dumper names files the same
-// way.
+// 0). texture_dump_enabled writes each new or rewritten level 0 through the
+// SDK's dumper, named by the same hash, so a dump is a replacement's key. The
+// dump has the fetch swizzle applied (a k_8_8_8_8 is BGRA in memory), so it
+// shows the colours the game does; a replacement is therefore sampled without
+// the swizzle, in the channel order it was painted in.
 
 using rex::graphics::TextureReplacement;
 using rex::graphics::TextureReplacementData;
@@ -402,18 +405,42 @@ bool ReplaceableFormat(uint32_t format) {
   return format == 3 || format == 4 || format == 6 || (format >= 18 && format <= 20);
 }
 
-// Null when no enabled mod ships textures, so the hash is only paid for when
-// something can use it.
-TextureReplacement* ActiveReplacement() {
+TextureReplacement* Replacement() {
   if (!g_replacement_initialized) {
     g_replacement_initialized = true;
     if (rex::Runtime* runtime = rex::Runtime::instance())
       g_replacement = std::make_unique<TextureReplacement>(runtime->ModOverlayRoots("textures"),
                                                            runtime->ModDumpRoot());
   }
-  if (!g_replacement || g_replacement->mod_roots().empty())
-    return nullptr;
   return g_replacement.get();
+}
+
+// Null when no enabled mod ships textures, so the hash is only paid for when
+// something can use it.
+TextureReplacement* ActiveReplacement() {
+  TextureReplacement* replacement = Replacement();
+  if (replacement == nullptr || replacement->mod_roots().empty())
+    return nullptr;
+  return replacement;
+}
+
+// Writes level 0 under the dump root, once per content hash (the dumper skips
+// a file that already exists). `hash` is filled in when it is still 0.
+void DumpTexture(const TextureFetch& fetch, const uint8_t* source, uint64_t bytes,
+                 uint64_t& hash) {
+  if (!REXCVAR_GET(texture_dump_enabled))
+    return;
+  TextureReplacement* replacement = Replacement();
+  if (replacement == nullptr)
+    return;
+  if (hash == 0)
+    hash = TextureReplacement::HashGuestData(source, size_t(bytes));
+  // The dumper takes the pitch in units of 32 texels.
+  const uint32_t pitch = fetch.pitch > fetch.width ? fetch.pitch : fetch.width;
+  replacement->DumpTexture(hash, fetch.width, fetch.height, (pitch + 31) / 32, fetch.tiled,
+                           rex::graphics::xenos::TextureFormat(fetch.format),
+                           rex::graphics::xenos::Endian(fetch.endianness), source,
+                           uint32_t(bytes), fetch.swizzle);
 }
 
 // Upload a replacement's RGBA8 pixels, into the entry's texture when it already has
@@ -584,7 +611,8 @@ MirroredTexture* MirrorEntry(RenderCommandList* commands, uint8_t* base,
   uint64_t content_hash = 0;
   const TextureReplacementData* image =
       FindReplacementImage(fetch, source, layout.source_bytes, content_hash);
-  // The replacement lookup already paid for the content hash.
+  DumpTexture(fetch, source, layout.source_bytes, content_hash);
+  // The replacement lookup or the dump already paid for the content hash.
   if (content_hash != 0) {
     entry.content_hash = content_hash;
     entry.content_hash_of = hash;
@@ -627,8 +655,10 @@ MirroredTexture* MirrorEntry(RenderCommandList* commands, uint8_t* base,
 }  // namespace
 
 RenderTexture* MirrorTexture(RenderCommandList* commands, uint8_t* base,
-                             const TextureFetch& fetch) {
+                             const TextureFetch& fetch, bool* replaced) {
   MirroredTexture* entry = MirrorEntry(commands, base, fetch);
+  if (replaced != nullptr)
+    *replaced = entry != nullptr && entry->replaced;
   return entry != nullptr ? entry->texture.get() : nullptr;
 }
 

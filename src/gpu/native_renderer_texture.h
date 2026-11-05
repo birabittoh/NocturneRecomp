@@ -64,9 +64,10 @@ bool ReadTextureFetch(const uint8_t* base, uint32_t address, TextureFetch& out);
 // produced (an unsupported format, an unreadable source). Uploads, and
 // refreshes a texture whose guest bytes changed since the last frame it was
 // checked in, through `commands`, so the copy is ordered against the frame's
-// draws.
+// draws. `replaced`, when given, says whether a mod's image stands in for the
+// guest's, which is sampled without the fetch swizzle.
 plume::RenderTexture* MirrorTexture(plume::RenderCommandList* commands, uint8_t* base,
-                                    const TextureFetch& fetch);
+                                    const TextureFetch& fetch, bool* replaced = nullptr);
 
 // The host sampler for `fetch`'s filter and address modes.
 plume::RenderSampler* MirrorSampler(const TextureFetch& fetch);
