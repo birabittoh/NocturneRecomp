@@ -34,6 +34,7 @@ mods/<name>/
   textures/    texture replacements: <hash16>.dds or .png (flat dir)
   shaders/     shader replacements (DXBC/SPIR-V binaries)
   filters/     screen filters for the Screen Filter setting (see below)
+  presets/     screen size presets (see "Screen size presets")
   mod.toml     descriptive metadata (see below)
   icon.png     shown in the F1 mod manager overlay
 ```
@@ -173,6 +174,28 @@ its own). The game's own CRT filter, `src/shaders/crt.frag.hlsl`, is written
 against the same contract and is a worked example of a multi-pass one: the
 PS1 lines decoded into a 1024x240 rgba16f image, bloom and halation into a
 512x240 one, then scanlines and an aperture grille drawn from them.
+
+## Screen size presets
+
+A mod can add its own entries to the Screen size setting (the F4 overlay's
+combo and the game's own Settings page), listed after the built-in presets
+("PSX Big", "16:10 Default", ...) and before Custom. Each is a small toml in
+the mod's `presets/` folder:
+
+```toml
+# mods/<name>/presets/<stem>.toml
+name   = "Ultra Wide"   # optional, the stem otherwise; ASCII only
+width  = 50             # the stretch screen's width percentage, 0 to 150
+height = 40             # and its height percentage, 0 to 150
+```
+
+These are the same percentages the stretch screen edits and the built-in
+presets are defined in (PSX Default is 1/30, Stretched is 50/56). A file
+without both numbers in range is skipped with a warning in the log. The choice
+is remembered as `<mod>/<stem>`, so turning the mod off falls back to the
+saved stretch and turning it back on brings the preset's name back. Presets
+are read once at startup, so a newly enabled mod's presets show up after a
+restart.
 
 ## Code mods
 

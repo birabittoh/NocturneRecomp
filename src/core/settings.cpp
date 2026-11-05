@@ -537,13 +537,13 @@ class CuratedSettingsDialog : public rex::ui::ImGuiDialog {
   void DrawScreenSizeRows() {
     const uint32_t choices = GraphicsPresetChoiceCount();
     const int32_t current = GetGraphicsPresetIndex();
-    // The catalog's names are ASCII (see kGraphicsPresetTexts), so a narrow is
+    // The catalog's names are ASCII (see GraphicsPresetText), so a narrow is
     // enough; Custom is the one that says something rather than naming a shape.
     auto preset_name = [](uint32_t i) -> std::string {
-      if (i == kGraphicsCustomPresetIndex)
+      if (i == GraphicsCustomPresetIndex())
         return Tr("settings", "screen_size_custom");
       std::string name;
-      for (const char16_t* c = kGraphicsPresetTexts[i]; *c; ++c)
+      for (const char16_t* c = GraphicsPresetText(i); c && *c; ++c)
         name.push_back(static_cast<char>(*c));
       return name;
     };

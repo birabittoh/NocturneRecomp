@@ -21,6 +21,7 @@
 #include <mutex>
 #include <optional>
 #include <string>
+#include <vector>
 
 #include <rex/cvar.h>
 #include <rex/logging.h>
@@ -30,6 +31,7 @@
 #include <rex/system/function_dispatcher.h>
 #include <rex/system/mod_registry.h>
 #include <rex/system/mod_storage.h>
+#include <toml++/toml.hpp>
 
 #include "core/function_hooks.h"
 #include "jp/jp_artwork.h"
@@ -173,20 +175,118 @@ constexpr uint32_t kTextScratchChars = 64;
 // 54*1/30 + 666 = 667 exactly, where bottom(0) = 666 is 1px short. Kept at 1
 // rather than 0 to match the d-pad floor below -- that floor is about how
 // far hand adjustment can reach, not what the presets should be solved to.
-constexpr uint32_t kPresetCount = 7;
-constexpr uint32_t kPresetX[kPresetCount] = {1, 11, 1, 19, 38, 50, 50};
-constexpr uint32_t kPresetY[kPresetCount] = {30, 55, 1, 30, 55, 71, 56};
-constexpr const char* kPresetNames[kPresetCount] = {
-    "PSX Default", "PSX Big", "16:10 Default", "16:10 Big",
-    "16:10 Huge",  "16:10 Extreme", "Stretched"};
+struct BuiltinPreset {
+  uint32_t x;
+  uint32_t y;
+  const char* name;
+};
+constexpr BuiltinPreset kBuiltinPresets[] = {
+    {1, 30, "PSX Default"},   {11, 55, "PSX Big"},         {1, 1, "16:10 Default"},
+    {19, 30, "16:10 Big"},    {38, 55, "16:10 Huge"},      {50, 71, "16:10 Extreme"},
+    {50, 56, "Stretched"},
+};
 
-// Index the row shows for a hand-dialled stretch that matches no preset.
-constexpr uint32_t kCustomIndex = kGraphicsCustomPresetIndex;
+// A catalog entry: the built-ins, then the mods' presets/<stem>.toml.
+struct PresetEntry {
+  uint32_t x;
+  uint32_t y;
+  std::string name;
+  std::u16string text;
+  std::string key;  // "<mod>/<stem>" for a mod's, the name for a built-in
+};
 
-static_assert(kPresetCount + 1 == kGraphicsPresetCount,
-              "kGraphicsPresetTexts (graphics_settings.h) must stay index-aligned with this "
-              "catalog plus one for Custom -- the native options Preset row indexes both by the "
-              "same value");
+// ASCII only: the names are painted with the literal-text widget (see
+// native_options.cpp's ResolutionLabel comment on tofu), so anything else would show as
+// blanks.
+std::string AsciiName(const std::string& name) {
+  std::string out;
+  for (const char c : name)
+    out.push_back(c >= 0x20 && c < 0x7F ? c : '?');
+  return out;
+}
+
+std::string PresetPathUtf8(const std::filesystem::path& path) {
+  const auto u8 = path.u8string();
+  return std::string(u8.begin(), u8.end());
+}
+
+void ScanPresetFolder(const std::filesystem::path& root, std::vector<PresetEntry>& out) {
+  const std::string mod = PresetPathUtf8(root.parent_path().filename());
+  std::vector<std::filesystem::path> files;
+  std::error_code ec;
+  for (const auto& entry : std::filesystem::directory_iterator(root, ec)) {
+    if (entry.is_regular_file(ec) && entry.path().extension() == ".toml")
+      files.push_back(entry.path());
+  }
+  std::sort(files.begin(), files.end());
+  for (const std::filesystem::path& file : files) {
+    const std::string stem = PresetPathUtf8(file.stem());
+    PresetEntry entry;
+    entry.key = mod + "/" + stem;
+    try {
+      const toml::table table = toml::parse_file(PresetPathUtf8(file));
+      const auto x = table["width"].value<int64_t>();
+      const auto y = table["height"].value<int64_t>();
+      if (!x || !y || *x < kGraphicsStretchPercentMin || *x > kGraphicsStretchPercentMax ||
+          *y < kGraphicsStretchPercentMin || *y > kGraphicsStretchPercentMax) {
+        REXLOG_WARN("screen preset {}: width and height must be {} to {}, skipped", entry.key,
+                    kGraphicsStretchPercentMin, kGraphicsStretchPercentMax);
+        continue;
+      }
+      entry.x = static_cast<uint32_t>(*x);
+      entry.y = static_cast<uint32_t>(*y);
+      const auto name = table["name"].value<std::string>();
+      entry.name = AsciiName(name && !name->empty() ? *name : stem);
+    } catch (const toml::parse_error& e) {
+      REXLOG_WARN("screen preset {}: {}", entry.key, e.what());
+      continue;
+    }
+    out.push_back(std::move(entry));
+  }
+}
+
+// Built once on first use. Capped so the catalog plus Custom fits the native
+// row's fixed capacity.
+const std::vector<PresetEntry>& Catalog() {
+  static std::mutex mutex;
+  static bool built = false;
+  static std::vector<PresetEntry> catalog;
+  std::lock_guard lock(mutex);
+  if (built)
+    return catalog;
+  catalog.clear();
+  for (const BuiltinPreset& preset : kBuiltinPresets)
+    catalog.push_back({preset.x, preset.y, preset.name, {}, preset.name});
+  rex::Runtime* runtime = rex::Runtime::instance();
+  // Without a runtime there are no mods to ask yet: the built-ins now, the
+  // whole catalog on a later call.
+  built = runtime != nullptr;
+  const size_t builtin = catalog.size();
+  if (runtime != nullptr) {
+    for (const std::filesystem::path& root : runtime->ModOverlayRoots("presets"))
+      ScanPresetFolder(root, catalog);
+  }
+  const size_t room = kMaxGraphicsPresets - 1;
+  if (catalog.size() > room) {
+    REXLOG_WARN("{} screen presets, only the first {} are listed", catalog.size() - builtin,
+                room - builtin);
+    catalog.resize(room);
+  }
+  for (size_t i = 0; i < catalog.size(); ++i) {
+    catalog[i].text.assign(catalog[i].name.begin(), catalog[i].name.end());
+    if (i >= builtin) {
+      REXLOG_INFO("screen preset {} (\"{}\", {}x{}) from a mod", catalog[i].key, catalog[i].name,
+                  catalog[i].x, catalog[i].y);
+    }
+  }
+  return catalog;
+}
+
+uint32_t PresetCount() { return static_cast<uint32_t>(Catalog().size()); }
+
+// Index the row shows for a hand-dialled stretch that matches no preset: the
+// entry after the last real one.
+uint32_t CustomIndex() { return PresetCount(); }
 
 constexpr int64_t kToastDurationMs = 2000;
 
@@ -426,7 +526,7 @@ uint32_t CallGuest(PPCContext& ctx, uint8_t* base, PPCFunc* fn, uint32_t r3, uin
 
 // Stages ASCII into the guest scratch buffer as UTF-16 and returns its guest
 // address, allocating the buffer on first use. The preset names are ASCII by
-// construction (see kPresetNames), so this is a widen, not a conversion.
+// construction (see AsciiName), so this is a widen, not a conversion.
 uint32_t StagePresetName(PPCContext& ctx, uint8_t* base, const char* text) {
   if (!g_text_scratch) {
     g_text_scratch = CallGuest(ctx, base, g_alloc_fn, kTextScratchChars * 2, 0);
@@ -771,8 +871,9 @@ double g_custom_height_ratio = 0.0;
 // defined in and what that screen edits, so this is an exact comparison with
 // no tolerance to tune.
 int32_t PresetIndexForPercent(int32_t x, int32_t y) {
-  for (uint32_t i = 0; i < kPresetCount; ++i) {
-    if (static_cast<int32_t>(kPresetX[i]) == x && static_cast<int32_t>(kPresetY[i]) == y) {
+  const std::vector<PresetEntry>& catalog = Catalog();
+  for (uint32_t i = 0; i < catalog.size(); ++i) {
+    if (static_cast<int32_t>(catalog[i].x) == x && static_cast<int32_t>(catalog[i].y) == y) {
       return static_cast<int32_t>(i);
     }
   }
@@ -822,6 +923,11 @@ void SavePresetRatios(const uint8_t* base) {
   // and the native Preset row has to show *which* preset is active the moment
   // the settings screen opens -- so the index is persisted alongside them.
   g_storage->SetInt("preset_index", static_cast<int64_t>(g_preset_index));
+  // The index shifts when a mod's presets come or go, so the entry is also
+  // saved by name and found again by it at boot.
+  g_storage->SetString("preset_key", g_preset_index < PresetCount()
+                                         ? Catalog()[g_preset_index].key
+                                         : std::string());
   if (g_has_custom) {
     g_storage->SetDouble("custom_width_ratio", g_custom_width_ratio);
     g_storage->SetDouble("custom_height_ratio", g_custom_height_ratio);
@@ -953,9 +1059,10 @@ void ApplyPendingCycle(PPCContext& ctx, uint8_t* base) {
     return;
   }
 
-  g_preset_index = (g_preset_index + 1) % kPresetCount;
-  uint32_t target_x = kPresetX[g_preset_index];
-  uint32_t target_y = kPresetY[g_preset_index];
+  const std::vector<PresetEntry>& catalog = Catalog();
+  g_preset_index = (g_preset_index + 1) % PresetCount();
+  uint32_t target_x = catalog[g_preset_index].x;
+  uint32_t target_y = catalog[g_preset_index].y;
 
   Write32BE(base, a1 + kStretchXOffset, target_x);
   Write32BE(base, a1 + kStretchYOffset, target_y);
@@ -972,7 +1079,7 @@ void ApplyPendingCycle(PPCContext& ctx, uint8_t* base) {
   SavePresetRatios(base);
 
   if (EnsurePresetLabel(ctx, base, a1)) {
-    SetPresetLabelText(ctx, base, kPresetNames[g_preset_index]);
+    SetPresetLabelText(ctx, base, catalog[g_preset_index].name.c_str());
     g_preset_label_deadline_ms.store(NowMs() + kToastDurationMs, std::memory_order_release);
   }
 }
@@ -1024,7 +1131,7 @@ void PublishCurrentPercent(const uint8_t* base) {
 // re-selecting the already-known Custom entry, or from a mod requesting a
 // brand new ratio via "graphics_settings.request_custom_ratio".
 void ApplyCustomRatio(PPCContext& ctx, uint8_t* base, double width_ratio, double height_ratio) {
-  g_preset_index = kCustomIndex;
+  g_preset_index = CustomIndex();
   g_has_custom = true;
   g_custom_width_ratio = width_ratio;
   g_custom_height_ratio = height_ratio;
@@ -1071,14 +1178,14 @@ void ApplyPendingCustomRatioRequest(PPCContext& ctx, uint8_t* base) {
 // updated too, so re-opening it doesn't show stale numbers.
 void ApplyRequestedPreset(PPCContext& ctx, uint8_t* base) {
   const int index = g_requested_preset.exchange(-1, std::memory_order_acq_rel);
-  if (index < 0 || index >= static_cast<int>(kGraphicsPresetCount)) {
+  if (index < 0 || index >= static_cast<int>(PresetCount() + 1)) {
     return;
   }
 
   // Custom isn't a percentage pair, so it goes back through the ratio path --
   // the same one the boot-time restore uses, since a hand-dialled stretch is
   // only ever recorded as a ratio.
-  if (index == static_cast<int>(kCustomIndex)) {
+  if (index == static_cast<int>(CustomIndex())) {
     if (!g_has_custom) {
       return;
     }
@@ -1087,8 +1194,8 @@ void ApplyRequestedPreset(PPCContext& ctx, uint8_t* base) {
   }
 
   g_preset_index = static_cast<uint32_t>(index);
-  const int32_t x = static_cast<int32_t>(kPresetX[index]);
-  const int32_t y = static_cast<int32_t>(kPresetY[index]);
+  const int32_t x = static_cast<int32_t>(Catalog()[index].x);
+  const int32_t y = static_cast<int32_t>(Catalog()[index].y);
 
   const uint32_t a1 = g_last_a1.load(std::memory_order_acquire);
   if (a1 != 0) {
@@ -1140,7 +1247,7 @@ void ApplyRequestedPercent(PPCContext& ctx, uint8_t* base) {
   if (matched >= 0) {
     g_preset_index = static_cast<uint32_t>(matched);
   } else {
-    g_preset_index = kCustomIndex;
+    g_preset_index = CustomIndex();
     g_has_custom = true;
     g_custom_width_ratio = g_pending_restore_width_ratio;
     g_custom_height_ratio = g_pending_restore_height_ratio;
@@ -1278,7 +1385,7 @@ extern "C" void GraphicsSettings_StretchScreen(PPCContext& ctx, uint8_t* base) {
       if (matched >= 0) {
         g_preset_index = static_cast<uint32_t>(matched);
       } else {
-        g_preset_index = kCustomIndex;
+        g_preset_index = CustomIndex();
         g_has_custom = true;
         g_custom_width_ratio = g_pending_restore_width_ratio;
         g_custom_height_ratio = g_pending_restore_height_ratio;
@@ -1366,12 +1473,17 @@ extern "C" void GraphicsSettings_SetWidgetText(PPCContext& ctx, uint8_t* base) {
 
 }  // namespace
 
-const char16_t* const kGraphicsPresetTexts[kGraphicsPresetCount] = {
-    u"PSX Default", u"PSX Big",       u"16:10 Default", u"16:10 Big",
-    u"16:10 Huge",  u"16:10 Extreme", u"Stretched",     u"Custom"};
+uint32_t GraphicsCustomPresetIndex() { return CustomIndex(); }
+
+const char16_t* GraphicsPresetText(uint32_t index) {
+  const std::vector<PresetEntry>& catalog = Catalog();
+  if (index < catalog.size())
+    return catalog[index].text.c_str();
+  return index == CustomIndex() ? u"Custom" : nullptr;
+}
 
 uint32_t GraphicsPresetChoiceCount() {
-  return g_has_custom ? kGraphicsPresetCount : kPresetCount;
+  return g_has_custom ? PresetCount() + 1 : PresetCount();
 }
 
 int32_t GetGraphicsPresetIndex() { return static_cast<int32_t>(g_preset_index); }
@@ -1464,11 +1576,24 @@ void GraphicsSettings::Bind(rex::Runtime* runtime) {
     g_custom_height_ratio = *custom_height;
     g_has_custom = true;
   }
-  // Loaded after the custom ratios: a saved index of kCustomIndex is only
+  // Loaded after the custom ratios: a saved Custom entry is only
   // valid if the custom stretch it refers to came back too.
-  if (auto preset_index = g_storage->GetInt("preset_index");
-      preset_index && *preset_index >= 0 &&
-      *preset_index < static_cast<int64_t>(GraphicsPresetChoiceCount())) {
+  if (auto key = g_storage->GetString("preset_key"); key) {
+    // Empty is Custom; a key no preset has any more (its mod is off) leaves
+    // the default, and the restored ratios still put the stretch back.
+    if (key->empty()) {
+      if (g_has_custom)
+        g_preset_index = CustomIndex();
+    } else {
+      const std::vector<PresetEntry>& catalog = Catalog();
+      for (uint32_t i = 0; i < catalog.size(); ++i) {
+        if (catalog[i].key == *key)
+          g_preset_index = i;
+      }
+    }
+  } else if (auto preset_index = g_storage->GetInt("preset_index");
+             preset_index && *preset_index >= 0 &&
+             *preset_index < static_cast<int64_t>(GraphicsPresetChoiceCount())) {
     g_preset_index = static_cast<uint32_t>(*preset_index);
   }
   auto width_ratio = g_storage->GetDouble("width_ratio");

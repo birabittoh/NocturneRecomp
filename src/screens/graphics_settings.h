@@ -37,29 +37,32 @@ GraphicsSettings& GetGraphicsSettings();
 //
 // The stretch presets this file cycles are also driven from the game's own
 // settings screen (native_options.cpp's Preset row, which replaced the stock
-// "Change Screen Size..." row). That row needs the catalog at compile time --
-// hence the constant here rather than an accessor -- and the .cpp
-// static_asserts it against its own kPresetCount so the two can't drift.
-// (7 stretch presets, plus "Custom" -- see kGraphicsCustomPresetIndex.)
-inline constexpr uint32_t kGraphicsPresetCount = 8;
+// "Change Screen Size..." row) and the F4 overlay's Screen size combo. The
+// catalog is the built-in presets, then the ones mods ship in their
+// presets/ folder (see docs/making-mods.md), then "Custom" last. It is built
+// once, lazily, so a newly enabled mod's presets show up after a restart.
+//
+// The most the native row reserves room for (built-ins, mods and Custom).
+inline constexpr uint32_t kMaxGraphicsPresets = 32;
 
-// The last entry: whatever the player last dialled in by hand on the stretch
-// screen, when that isn't one of the presets. It only becomes selectable once
-// such a stretch exists -- see GraphicsPresetChoiceCount.
-inline constexpr uint32_t kGraphicsCustomPresetIndex = kGraphicsPresetCount - 1;
+// Index of the "Custom" entry: whatever the player last dialled in by hand on
+// the stretch screen, when that isn't one of the presets. It is the last entry
+// of the catalog, and only becomes selectable once such a stretch exists --
+// see GraphicsPresetChoiceCount.
+uint32_t GraphicsCustomPresetIndex();
 
-// Display text per preset, index-aligned with the .cpp's kPresetNames. These
-// are ASCII-only on purpose: they're painted with the literal-text widget
-// setter, which resolves glyphs from the game's own baked atlas (see
-// native_options.cpp's ResolutionLabel comment on tofu).
-extern const char16_t* const kGraphicsPresetTexts[kGraphicsPresetCount];
+// Display text per preset. ASCII-only on purpose: it is painted with the
+// literal-text widget setter, which resolves glyphs from the game's own baked
+// atlas (see native_options.cpp's ResolutionLabel comment on tofu). Null for an
+// index past the catalog.
+const char16_t* GraphicsPresetText(uint32_t index);
 
-// How many of those the player can actually cycle through right now:
-// kGraphicsPresetCount once a custom stretch exists, one less until then.
+// How many entries the player can actually cycle through right now: the whole
+// catalog once a custom stretch exists, one less until then.
 uint32_t GraphicsPresetChoiceCount();
 
 // The preset last applied (or restored from disk at boot), which may be
-// kGraphicsCustomPresetIndex.
+// GraphicsCustomPresetIndex().
 int32_t GetGraphicsPresetIndex();
 
 // Queues a preset to be applied on the next guest frame. Safe to call from

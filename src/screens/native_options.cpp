@@ -917,8 +917,8 @@ constexpr OptionRow kEffectsPageRows[] = {
     {
         .list_row = kPresetRow,
         .label = kPresetLabel,
-        .value_count = kGraphicsPresetCount,
-        .value_text = [](int32_t value) { return kGraphicsPresetTexts[value]; },
+        .value_count = kMaxGraphicsPresets,
+        .value_text = [](int32_t value) { return GraphicsPresetText(static_cast<uint32_t>(value)); },
         // "Custom" (the last entry) only joins the cycle once the player has
         // dialled a stretch in by hand on the screen Y opens.
         .live_value_count = &GraphicsPresetChoiceCount,
