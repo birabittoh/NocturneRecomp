@@ -5,6 +5,7 @@
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
+#include <cstring>
 #include <deque>
 #include <filesystem>
 #include <fstream>
@@ -35,9 +36,11 @@
 // state machines World still has:
 //
 //  - Title mode 5 (JP sub_822B0EA0): new game runs it on the way to the
-//    prologue. JP fades a picture in and out, plays OPN_WS, then calls
-//    sub_822AE128; World's mode 5 (dispatcher sub_822521C0) calls the same
-//    step, sub_8224ED70, straight away.
+//    prologue. JP fades a title card in and out ("JOURNEY BACK TO 1792 / and
+//    the Transylvanian countryside of Romania." over 「1792年 トランシルバニア
+//    地方」), plays OPN_WS, then calls sub_822AE128; World's mode 5
+//    (dispatcher sub_822521C0) calls the same step, sub_8224ED70, straight
+//    away. The card is ported below on World's functions (OpeningCard).
 //  - The ending (JP sub_823F0078, World sub_82391F48): state 0 picks movie 3
 //    (END_WS) when dword_83164F14 is set, else 2 (TYK_WS), in
 //    dword_831751A0; state 1 plays it. World's state 1 still calls the PSX
@@ -60,6 +63,9 @@ REXCVAR_DECLARE(bool, skip_richter);  // intro_skips.cpp
 
 extern "C" REX_FUNC(sub_82234BF0);  // SOTNSoundSuspend
 extern "C" REX_FUNC(sub_82234CC8);  // SOTNSoundUnsuspend
+extern "C" REX_FUNC(sub_82239918);  // LoadGfx(id), JP sub_82299758
+extern "C" REX_FUNC(sub_8223B470);  // AllocPrimitives(type, count), JP sub_8229B2B8
+extern "C" REX_FUNC(sub_8223B6A8);  // FreePrimitives(index), JP sub_8229B4F0
 
 namespace nocturne {
 namespace {
@@ -78,17 +84,28 @@ void WriteU32(uint32_t guest_address, uint32_t value) {
       REX_KERNEL_STATE()->memory()->TranslateVirtual(guest_address), value);
 }
 
+uint8_t* Guest(uint32_t guest_address) {
+  return REX_KERNEL_STATE()->memory()->TranslateVirtual<uint8_t*>(guest_address);
+}
+
+void WriteU16(uint32_t guest_address, uint16_t value) {
+  rex::memory::store_and_swap<uint16_t>(Guest(guest_address), value);
+}
+
 // Calls a recompiled guest function with an isolated context borrowed from the
 // current thread (see tu_hooks.cpp's CallGuest). Midasm hooks get no context.
-void CallGuest(void (*fn)(PPCContext&, uint8_t*)) {
+uint32_t CallGuest(void (*fn)(PPCContext&, uint8_t*), uint32_t r3 = 0, uint32_t r4 = 0) {
   auto* parent = rex::runtime::ThreadState::Get()->context();
   PPCContext ctx{};
   ctx.r1 = parent->r1;
   ctx.r1.u32 -= 0x70;
   ctx.r13 = parent->r13;
   ctx.fpscr = parent->fpscr;
+  ctx.r3.u64 = r3;
+  ctx.r4.u64 = r4;
   fn(ctx, REX_KERNEL_STATE()->memory()->virtual_membase());
   parent->fpscr = ctx.fpscr;
+  return ctx.r3.u32;
 }
 
 struct Frame {
@@ -248,6 +265,190 @@ class Movie {
 };
 
 Movie g_movie;
+// ---------------------------------------------------------------------------
+// The title card before OPN_WS: JP sub_822B0EA0, states 0-4.
+//
+// Two textured quads (POLY_GT4) from texture page 0x1C (VRAM 768,256, 4bpp)
+// at CLUT 0, which gfx 0x1A (World's DRA table still has it) loads with a
+// 16-step grey palette: the English lines (232x32 from v 0) in the middle of
+// a 320x240 screen and the Japanese one (192x16 from v 32) below. After a 64
+// frame wait the English fades in a step a frame, the Japanese appears at
+// 0x60; after 128 frames at full both fade out, the Japanese going at 0x40.
+// JP shows the Japanese line in every language; here only in Japanese.
+// JP's globals sit 0x2C8E9E0 higher than World's, in the same layout.
+// ---------------------------------------------------------------------------
+constexpr uint32_t kGfxBusy = 0x83164F08;   // JP dword_8342D8E8
+constexpr uint32_t kGfxOwner = 0x83164F04;  // JP dword_8342D8E4
+constexpr uint32_t kGfxMode = 0x83174634;   // JP dword_8343D014
+constexpr uint32_t kGfxSlots = 0x8316AFE0;  // JP 0x834339C0: 32 of 0x40
+constexpr uint32_t kGfxQueue = 0x8316AF60;  // JP 0x83433940
+constexpr uint32_t kPrims = 0x831751E0;     // JP 0x8343DBC0: the primitive pool
+constexpr uint32_t kPrimSize = 0x38;
+constexpr uint32_t kDisplay = 0x8318F660;   // JP 0x83458040: the draw/display envs
+constexpr uint32_t kPs1Language = 0x8313BC20;  // the PS1 side's language index
+constexpr uint32_t kPs1Japanese = 1;
+
+// World's primitive (the PSX Primitive, 4 bytes further on).
+constexpr uint32_t kPrimNext = 0x00;
+constexpr uint32_t kPrimXY[] = {0x0C, 0x18, 0x24, 0x30};  // s16 x, y per vertex
+constexpr uint32_t kPrimUV[] = {0x10, 0x1C, 0x28, 0x34};  // u8 u, v per vertex
+constexpr uint32_t kPrimRGB[] = {0x08, 0x14, 0x20, 0x2C};  // u8 r, g, b per vertex
+constexpr uint32_t kPrimTimer = 0x17;                      // p1, JP's wait counter
+constexpr uint32_t kPrimTpage = 0x1E;
+constexpr uint32_t kPrimDrawMode = 0x36;
+constexpr uint16_t kDrawShown = 0, kDrawColors = 4, kDrawHide = 8;
+
+// JP sub_822ABE20: a 320x240 screen (World only has 256, 360 and 512 wide).
+// {offset from kDisplay, size, value}, as JP stores them.
+struct DisplayStore {
+  uint32_t offset;
+  uint8_t size;
+  uint16_t value;
+};
+constexpr DisplayStore kDisplay320[] = {
+    {0x4, 2, 0},       {0x6, 2, 20},      {0x8, 2, 320},     {0xA, 2, 207},
+    {0xC, 2, 0},       {0xE, 2, 0},       {0x10, 2, 0},      {0x12, 2, 0},
+    {0x14, 2, 0},      {0x16, 2, 0},      {0x1A, 1, 0},      {0x1B, 1, 1},
+    {0x1C, 1, 1},      {0x1D, 1, 0},      {0x1E, 1, 0},      {0x1F, 1, 0},
+    {0x64, 2, 0},      {0x66, 2, 256},    {0x68, 2, 320},    {0x6A, 2, 240},
+    {0x6C, 2, 0},      {0x6E, 2, 0},      {0x70, 2, 320},    {0x72, 2, 240},
+    {0x75, 1, 0},      {0x1BAFC, 2, 0},   {0x1BAFE, 2, 276}, {0x1BB00, 2, 320},
+    {0x1BB02, 2, 207}, {0x1BB04, 2, 0},   {0x1BB06, 2, 256}, {0x1BB08, 2, 0},
+    {0x1BB0A, 2, 0},   {0x1BB0C, 2, 0},   {0x1BB0E, 2, 0},   {0x1BB12, 1, 0},
+    {0x1BB13, 1, 1},   {0x1BB14, 1, 1},   {0x1BB15, 1, 0},   {0x1BB16, 1, 0},
+    {0x1BB17, 1, 0},   {0x1BB5C, 2, 0},   {0x1BB5E, 2, 0},   {0x1BB60, 2, 320},
+    {0x1BB62, 2, 240}, {0x1BB64, 2, 0},   {0x1BB66, 2, 0},   {0x1BB68, 2, 320},
+    {0x1BB6A, 2, 240}, {0x1BB6D, 1, 0},
+};
+
+void SetDisplay320() {
+  for (const auto& store : kDisplay320) {
+    if (store.size == 1)
+      *Guest(kDisplay + store.offset) = uint8_t(store.value);
+    else
+      WriteU16(kDisplay + store.offset, store.value);
+  }
+}
+
+// An axis-aligned quad: (x0, y0)-(x1, y1) on screen, (u0, v0)-(u1, v1) in
+// page 0x1C.
+void SetQuad(uint32_t prim, int16_t x0, int16_t y0, int16_t x1, int16_t y1, uint8_t u0, uint8_t v0,
+             uint8_t u1, uint8_t v1) {
+  const int16_t xs[] = {x0, x1, x0, x1}, ys[] = {y0, y0, y1, y1};
+  const uint8_t us[] = {u0, u1, u0, u1}, vs[] = {v0, v0, v1, v1};
+  for (int i = 0; i < 4; ++i) {
+    WriteU16(prim + kPrimXY[i], uint16_t(xs[i]));
+    WriteU16(prim + kPrimXY[i] + 2, uint16_t(ys[i]));
+    *Guest(prim + kPrimUV[i]) = us[i];
+    *Guest(prim + kPrimUV[i] + 1) = vs[i];
+  }
+  WriteU16(prim + kPrimTpage, 0x1C);
+}
+
+void SetGrey(uint32_t prim, uint8_t level) {
+  for (const uint32_t rgb : kPrimRGB)
+    std::memset(Guest(prim + rgb), level, 3);
+}
+
+class OpeningCard {
+ public:
+  bool fresh() const { return step_ == Step::kSetUp; }
+  bool done() const { return step_ == Step::kDone; }
+  void Reset() { step_ = Step::kSetUp; }
+
+  // One game frame of the card. False once it is over.
+  bool Run() {
+    switch (step_) {
+      case Step::kSetUp:
+        return SetUp();
+      case Step::kWaitIn:
+      case Step::kHold: {
+        uint8_t& timer = *Guest(english_ + kPrimTimer);
+        if (--timer == 0)
+          step_ = step_ == Step::kWaitIn ? Step::kFadeIn : Step::kFadeOut;
+        return true;
+      }
+      case Step::kFadeIn: {
+        const uint8_t level = Level() + 1;
+        SetGrey(english_, level);
+        if (level == 0x60 && ReadU32(kPs1Language) == kPs1Japanese)
+          WriteU16(japanese_ + kPrimDrawMode, kDrawShown);
+        if (level == 0x80) {
+          *Guest(english_ + kPrimTimer) = 0x80;
+          step_ = Step::kHold;
+        }
+        return true;
+      }
+      case Step::kFadeOut: {
+        const uint8_t level = Level() - 1;
+        SetGrey(english_, level);
+        if (level == 0x40)
+          WriteU16(japanese_ + kPrimDrawMode, kDrawHide);
+        if (level != 0)
+          return true;
+        End();
+        return false;
+      }
+      case Step::kDone:
+        return false;
+    }
+    return false;
+  }
+
+  // Frees the quads, if they were made.
+  void End() {
+    if (step_ != Step::kSetUp && step_ != Step::kDone)
+      CallGuest(sub_8223B6A8, index_);
+    step_ = Step::kDone;
+  }
+
+ private:
+  enum class Step { kSetUp, kWaitIn, kFadeIn, kHold, kFadeOut, kDone };
+
+  uint8_t Level() const { return *Guest(english_ + kPrimRGB[0]); }
+
+  bool SetUp() {
+    if (ReadU32(kGfxBusy) != 0)
+      return true;
+    // Drop the gfx loads still pending and queue the card's palette.
+    WriteU32(kGfxQueue + 0xC, 0);
+    for (uint32_t i = 0; i < 32; ++i)
+      WriteU16(kGfxSlots + 8 + i * 0x40, 0);
+    CallGuest(sub_82239918, 0x1A);
+    WriteU32(kGfxOwner, 1);
+    WriteU32(kGfxMode, 0x18);
+    SetDisplay320();
+    const int16_t index = int16_t(CallGuest(sub_8223B470, 4, 2));
+    if (index < 0) {
+      REXLOG_WARN("movies: no primitives for the opening card");
+      step_ = Step::kDone;
+      return false;
+    }
+    index_ = uint32_t(index);
+    english_ = kPrims + index_ * kPrimSize;
+    japanese_ = ReadU32(english_ + kPrimNext);
+
+    SetQuad(english_, 44, 96, 276, 128, 0, 0, 232, 32);
+    SetGrey(english_, 0);
+    *Guest(english_ + kPrimTimer) = 0x40;
+    WriteU16(english_ + kPrimDrawMode, kDrawColors);
+
+    SetQuad(japanese_, 60, 208, 252, 224, 0, 32, 192, 48);
+    SetGrey(japanese_, 0x80);
+    WriteU16(japanese_ + kPrimDrawMode, kDrawHide);
+    REXLOG_INFO("movies: opening card (primitives {})", index_);
+    step_ = Step::kWaitIn;
+    return true;
+  }
+
+  Step step_ = Step::kSetUp;
+  uint32_t index_ = 0;
+  uint32_t english_ = 0;
+  uint32_t japanese_ = 0;
+};
+
+OpeningCard g_card;
+
 rex::input::InputSystem* g_input = nullptr;
 bool g_start_was_down = true;
 
@@ -303,13 +504,36 @@ bool CurrentMoviePicture(MoviePicture& out) { return g_movie.Picture(out); }
 
 }  // namespace nocturne
 
-// Title dispatcher sub_822521C0, mode 5's `b sub_8224ED70`: OPN_WS first.
-// True holds mode 5 (returns from the dispatcher, 0x822523A0). The opening
+// Title dispatcher sub_822521C0, mode 5's `b sub_8224ED70`: JP's title card,
+// then OPN_WS. True holds mode 5 (returns from the dispatcher, 0x822523A0).
+// Start during the card skips both, as JP's mode 5 does. The opening
 // introduces the Richter prologue, so skip_richter skips it too.
 bool MovieOpeningHook() {
+  using namespace nocturne;
   if (REXCVAR_GET(skip_richter))
     return false;
-  return nocturne::HoldForMovie("OPN_WS.wmv") == nocturne::Hold::kPlaying;
+  if (!g_card.done()) {
+    std::error_code ec;
+    if (JpDir().empty() ||
+        !std::filesystem::is_regular_file(JpDir() / "DATA" / "video" / "OPN_WS.wmv", ec))
+      return false;
+    if (g_card.fresh())
+      g_start_was_down = true;  // a press that started the game doesn't skip
+    const bool down = StartDown();
+    const bool pressed = down && !g_start_was_down;
+    g_start_was_down = down;
+    if (pressed) {
+      g_card.End();
+      g_card.Reset();
+      return false;
+    }
+    if (g_card.Run())
+      return true;
+  }
+  if (HoldForMovie("OPN_WS.wmv") == Hold::kPlaying)
+    return true;
+  g_card.Reset();
+  return false;
 }
 
 // sub_82391F48 state 1, before `bl sub_822ED3E0` (the PSX STR player): the
