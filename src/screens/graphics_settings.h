@@ -68,6 +68,21 @@ int32_t GetGraphicsPresetIndex();
 // deferred to GraphicsSettings_PerFrame rather than done here.
 void RequestGraphicsPreset(int32_t index);
 
+// How far the stretch screen's width/height percentages reach (see the .cpp's
+// comment on why they go past the vanilla [1,50]/[1,30]).
+inline constexpr int32_t kGraphicsStretchPercentMin = 0;
+inline constexpr int32_t kGraphicsStretchPercentMax = 150;
+
+// The live stretch as the stretch screen's width and height percentages,
+// worked back from the rect every guest frame. False until the game has set
+// up the rect's bounds.
+bool GetGraphicsStretchPercent(int32_t& width, int32_t& height);
+
+// Queues a stretch by percentages, applied on the next guest frame like
+// RequestGraphicsPreset. A pair matching a preset selects that preset;
+// anything else becomes Custom.
+void RequestGraphicsStretchPercent(int32_t width, int32_t height);
+
 // Requests the Original/Enhanced graphics style. Safe to call from any
 // thread -- deferred to the next GraphicsSettings_PerFrame tick, same as
 // RequestGraphicsPreset above. Persists to settings.toml once applied, and

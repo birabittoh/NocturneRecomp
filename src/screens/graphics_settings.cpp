@@ -96,6 +96,16 @@ constexpr uint32_t kStyleEntryIndexBias = 21;
 constexpr uint32_t kStyleEntryBaseOffset = 28;
 constexpr uint32_t kStyleEntryByteOffset = 2;
 constexpr uint32_t kStyleMenuMirrorOffset = 4548;
+// The stretch percentages the profile keeps, one pair per profile slot: the
+// slot is data_ptr + 32208, and the pair data_ptr + 4 * (slot + 1121) and
+// + 4 * (slot + 1129). The stretch screen fills its fields from these when it
+// opens and when B cancels, and saves them on A (all in sub_825BA678), so a
+// stretch applied from anywhere else has to land here too or that screen
+// opens on stale numbers.
+constexpr uint32_t kStretchSlotOffset = 32208;
+constexpr uint32_t kStretchProfileXIndex = 1121;
+constexpr uint32_t kStretchProfileYIndex = 1129;
+constexpr uint32_t kStretchProfileSlots = kStretchProfileYIndex - kStretchProfileXIndex;
 // cPersistentDataManager's profile writer, (settings_base, user_index) -> BOOL:
 // packs the settings (PackSettings, sub_8257FCA0 -- which takes the style from
 // the menu mirror above, not the applied byte) and hands them to
@@ -204,8 +214,8 @@ constexpr uint32_t kDpadDown = 3;
 // get back there. Negatives would invert the rect, so the floor stops at 0
 // rather than opening further. The maximum is deliberately above the tallest
 // preset (16:10 Extreme, y=71), so every preset stays reachable by hand.
-constexpr int32_t kStretchPercentMin = 0;
-constexpr int32_t kStretchPercentMax = 150;
+constexpr int32_t kStretchPercentMin = kGraphicsStretchPercentMin;
+constexpr int32_t kStretchPercentMax = kGraphicsStretchPercentMax;
 
 // The localized-string-id menu.set_widget_text_by_id_fn uses for "DEFAULT"
 // -- confirmed live by dumping the whole shared string table (base/count
@@ -300,6 +310,15 @@ constexpr const char* kPresetAppliedEvent = "graphics_settings.preset_applied";
 // pending; GraphicsSettings_PerFrame takes it from here (see
 // ApplyRequestedPreset).
 std::atomic<int> g_requested_preset{-1};
+
+// A width/height percentage pair from RequestGraphicsStretchPercent, packed
+// width << 32 | height; -1 means nothing pending.
+std::atomic<int64_t> g_requested_percent{-1};
+
+// The live stretch as percentages, for the curated settings dialog (see
+// PublishCurrentPercent); -1 until the rect's bounds are known.
+std::atomic<int32_t> g_current_percent_x{-1};
+std::atomic<int32_t> g_current_percent_y{-1};
 
 // Same deferral pattern as g_requested_preset above, for a custom (non-
 // catalog) width/height ratio requested by a mod via the
@@ -760,6 +779,31 @@ int32_t PresetIndexForPercent(int32_t x, int32_t y) {
   return -1;
 }
 
+// Puts a stretch applied from outside the stretch screen into the profile's
+// percentages (see kStretchSlotOffset) and saves the profile, the way that
+// screen's own A does.
+void WriteStretchPercentToProfile(PPCContext& ctx, uint8_t* base, int32_t x, int32_t y) {
+  const uint32_t singleton = Read32BE(base, kAppSingletonPtrAddr);
+  if (singleton == 0) {
+    return;
+  }
+  const uint32_t settings_base = Read32BE(base, singleton + kStyleSettingsBaseOffset);
+  if (settings_base == 0) {
+    return;
+  }
+  const uint32_t data_ptr = Read32BE(base, settings_base + kStyleDataPtrOffset);
+  if (data_ptr == 0) {
+    return;
+  }
+  const uint32_t slot = Read32BE(base, data_ptr + kStretchSlotOffset);
+  if (slot >= kStretchProfileSlots) {
+    return;
+  }
+  Write32BE(base, data_ptr + 4 * (slot + kStretchProfileXIndex), static_cast<uint32_t>(x));
+  Write32BE(base, data_ptr + 4 * (slot + kStretchProfileYIndex), static_cast<uint32_t>(y));
+  CallGuest(ctx, base, g_write_profile_settings_fn, settings_base, kProfileUserIndex);
+}
+
 void SavePresetRatios(const uint8_t* base) {
   if (!g_storage) {
     return;
@@ -933,12 +977,53 @@ void ApplyPendingCycle(PPCContext& ctx, uint8_t* base) {
   }
 }
 
+// Works the live rect back into the stretch screen's percentages, inverting
+// WriteStretchRectForPercent's right/bottom edges. The converter truncates,
+// so an edge sits up to a pixel short of the exact value; rounding up
+// recovers the percentage as long as a step is wider than a pixel, which it
+// is at any resolution (4.64px across, 1.8px down at 720p). Rounding up rather
+// than to nearest is what keeps that 1.8px step from reading one too low.
+bool CurrentStretchPercent(const uint8_t* base, int32_t& x, int32_t& y) {
+  const int32_t max_right =
+      static_cast<int32_t>(Read32BE(base, kStretchRectMaxAddr + kRectRightOffset));
+  const int32_t max_bottom =
+      static_cast<int32_t>(Read32BE(base, kStretchRectMaxAddr + kRectBottomOffset));
+  const int32_t min_right =
+      static_cast<int32_t>(Read32BE(base, kStretchRectMinAddr + kRectRightOffset));
+  const int32_t min_bottom =
+      static_cast<int32_t>(Read32BE(base, kStretchRectMinAddr + kRectBottomOffset));
+  if (max_right <= min_right || max_bottom <= min_bottom) {
+    return false;
+  }
+  const int32_t right = static_cast<int32_t>(Read32BE(base, kStretchRectAddr + kRectRightOffset));
+  const int32_t bottom =
+      static_cast<int32_t>(Read32BE(base, kStretchRectAddr + kRectBottomOffset));
+  const auto invert = [](int32_t edge, int32_t lo, int32_t hi, int32_t scale) {
+    const double percent = static_cast<double>(edge - lo) * scale / (hi - lo);
+    return std::clamp(static_cast<int32_t>(std::ceil(percent - 1e-6)), kStretchPercentMin,
+                      kStretchPercentMax);
+  };
+  x = invert(right, min_right, max_right, 50);
+  y = invert(bottom, min_bottom, max_bottom, 30);
+  return true;
+}
+
+void PublishCurrentPercent(const uint8_t* base) {
+  int32_t x = 0;
+  int32_t y = 0;
+  if (!CurrentStretchPercent(base, x, y)) {
+    return;
+  }
+  g_current_percent_x.store(x, std::memory_order_release);
+  g_current_percent_y.store(y, std::memory_order_release);
+}
+
 // Applies a hand-specified (non-catalog) width/height ratio -- shared by
 // ApplyRequestedPreset's Custom branch and ApplyPendingCustomRatioRequest
 // below, since a request can originate either from the native Preset row
 // re-selecting the already-known Custom entry, or from a mod requesting a
 // brand new ratio via "graphics_settings.request_custom_ratio".
-void ApplyCustomRatio(uint8_t* base, double width_ratio, double height_ratio) {
+void ApplyCustomRatio(PPCContext& ctx, uint8_t* base, double width_ratio, double height_ratio) {
   g_preset_index = kCustomIndex;
   g_has_custom = true;
   g_custom_width_ratio = width_ratio;
@@ -948,6 +1033,11 @@ void ApplyCustomRatio(uint8_t* base, double width_ratio, double height_ratio) {
   if (ApplyPendingRestore(base)) {
     g_restoring.store(true, std::memory_order_release);
     SavePresetRatios(base);
+    int32_t x = 0;
+    int32_t y = 0;
+    if (CurrentStretchPercent(base, x, y)) {
+      WriteStretchPercentToProfile(ctx, base, x, y);
+    }
   }
 }
 
@@ -955,7 +1045,7 @@ void ApplyCustomRatio(uint8_t* base, double width_ratio, double height_ratio) {
 // above), if one is pending. Called every GraphicsSettings_PerFrame tick,
 // same as ApplyRequestedPreset -- both are cheap flag checks when nothing is
 // pending.
-void ApplyPendingCustomRatioRequest(uint8_t* base) {
+void ApplyPendingCustomRatioRequest(PPCContext& ctx, uint8_t* base) {
   bool pending = false;
   double width_ratio = 0.0;
   double height_ratio = 0.0;
@@ -969,7 +1059,7 @@ void ApplyPendingCustomRatioRequest(uint8_t* base) {
     }
   }
   if (pending) {
-    ApplyCustomRatio(base, width_ratio, height_ratio);
+    ApplyCustomRatio(ctx, base, width_ratio, height_ratio);
   }
 }
 
@@ -992,7 +1082,7 @@ void ApplyRequestedPreset(PPCContext& ctx, uint8_t* base) {
     if (!g_has_custom) {
       return;
     }
-    ApplyCustomRatio(base, g_custom_width_ratio, g_custom_height_ratio);
+    ApplyCustomRatio(ctx, base, g_custom_width_ratio, g_custom_height_ratio);
     return;
   }
 
@@ -1007,6 +1097,7 @@ void ApplyRequestedPreset(PPCContext& ctx, uint8_t* base) {
   }
 
   WriteStretchRectForPercent(base, x, y);
+  WriteStretchPercentToProfile(ctx, base, x, y);
   PPCContext saved = ctx;
   RepositionWidgets(ctx, base, x, y);
   ctx = saved;
@@ -1014,6 +1105,46 @@ void ApplyRequestedPreset(PPCContext& ctx, uint8_t* base) {
   // Takes over the reassert engine rather than switching it off: the pick has
   // to survive the game's own recompute when a save loads.
   LatchCurrentRectForReassert(base);
+
+  PublishPresetApplied(base);
+  SavePresetRatios(base);
+}
+
+// Applies a percentage pair queued by RequestGraphicsStretchPercent, the same
+// way ApplyRequestedPreset applies a preset's pair, then files it as that
+// preset or as Custom, the same way leaving the stretch screen does.
+void ApplyRequestedPercent(PPCContext& ctx, uint8_t* base) {
+  const int64_t packed = g_requested_percent.exchange(-1, std::memory_order_acq_rel);
+  if (packed < 0) {
+    return;
+  }
+  const int32_t x = std::clamp(static_cast<int32_t>(packed >> 32), kStretchPercentMin,
+                               kStretchPercentMax);
+  const int32_t y = std::clamp(static_cast<int32_t>(packed & 0xFFFFFFFF), kStretchPercentMin,
+                               kStretchPercentMax);
+
+  const uint32_t a1 = g_last_a1.load(std::memory_order_acquire);
+  if (a1 != 0) {
+    Write32BE(base, a1 + kStretchXOffset, static_cast<uint32_t>(x));
+    Write32BE(base, a1 + kStretchYOffset, static_cast<uint32_t>(y));
+  }
+
+  WriteStretchRectForPercent(base, x, y);
+  WriteStretchPercentToProfile(ctx, base, x, y);
+  PPCContext saved = ctx;
+  RepositionWidgets(ctx, base, x, y);
+  ctx = saved;
+  LatchCurrentRectForReassert(base);
+
+  const int32_t matched = PresetIndexForPercent(x, y);
+  if (matched >= 0) {
+    g_preset_index = static_cast<uint32_t>(matched);
+  } else {
+    g_preset_index = kCustomIndex;
+    g_has_custom = true;
+    g_custom_width_ratio = g_pending_restore_width_ratio;
+    g_custom_height_ratio = g_pending_restore_height_ratio;
+  }
 
   PublishPresetApplied(base);
   SavePresetRatios(base);
@@ -1181,7 +1312,9 @@ extern "C" void GraphicsSettings_PerFrame(PPCContext& ctx, uint8_t* base) {
   ApplyPendingJpText();
 
   ApplyRequestedPreset(ctx, base);
-  ApplyPendingCustomRatioRequest(base);
+  ApplyRequestedPercent(ctx, base);
+  ApplyPendingCustomRatioRequest(ctx, base);
+  PublishCurrentPercent(base);
 
   // Blank the preset name once its moment is up. Doing it here rather than in
   // the screen's own handler is what makes it time out at all: that handler
@@ -1242,6 +1375,19 @@ uint32_t GraphicsPresetChoiceCount() {
 }
 
 int32_t GetGraphicsPresetIndex() { return static_cast<int32_t>(g_preset_index); }
+
+bool GetGraphicsStretchPercent(int32_t& width, int32_t& height) {
+  width = g_current_percent_x.load(std::memory_order_acquire);
+  height = g_current_percent_y.load(std::memory_order_acquire);
+  return width >= 0 && height >= 0;
+}
+
+void RequestGraphicsStretchPercent(int32_t width, int32_t height) {
+  width = std::clamp(width, kStretchPercentMin, kStretchPercentMax);
+  height = std::clamp(height, kStretchPercentMin, kStretchPercentMax);
+  g_requested_percent.store((static_cast<int64_t>(width) << 32) | static_cast<int64_t>(height),
+                            std::memory_order_release);
+}
 
 void RequestGraphicsStyle(bool enhanced) {
   g_requested_style.store(enhanced ? 1 : 0, std::memory_order_release);

@@ -8,7 +8,8 @@
 // ---------------------------------------------------------------------------
 //
 // A page is an OptionsPage over a table of OptionRows (native_options_page.h):
-// g_settings_page below, and the enhancements page in native_enhancements.cpp.
+// the settings pages below (kSettingsPages), and the enhancements pages in
+// native_enhancements.cpp.
 // Append an entry to a table and you are done. Widget creation, layout,
 // left/right cycling with wraparound, scrolling a page longer than the screen,
 // commit on A, re-seed on B/X and the localized label are all handled
@@ -417,13 +418,22 @@ namespace {
 // --- Fullscreen and VSync ---------------------------------------------------
 
 // Both apply live: `fullscreen` through the change callback
-// ReXApp::SetupPresentation registers, 
+// ReXApp::SetupPresentation registers, `vsync` on the renderer's next present
 // (see ApplyVsyncIfChanged). So both rows are `live`, same as Volume.
 //
 // The shared string table has no id for either label, so they are res/lang
 // [native] strings rather than looked up by id. Title case to match the stock rows, not the
 // all-caps prompt bar.
 constexpr NativeText kFullscreenLabel{"fullscreen_label"};
+constexpr NativeText kVsyncLabel{"vsync_label"};
+
+// --- Mute, wallpaper and clouds -----------------------------------------------
+
+// Plain bool cvars, all read live: the SDK's audio driver checks audio_mute
+// per buffer, the native renderer show_wallpaper and show_clouds per frame.
+constexpr NativeText kMuteLabel{"mute_label"};
+constexpr NativeText kWallpaperLabel{"wallpaper_label"};
+constexpr NativeText kCloudsLabel{"clouds_label"};
 
 // --- Gamma ----------------------------------------------------------------
 
@@ -740,6 +750,23 @@ int32_t ResetReleaseChoice(const OptionRow&) {
 // wherever they sit (OptionRow::stock_row).
 constexpr int32_t kStockGraphicsRow = 0;
 constexpr int32_t kStockVolumeRow = 1;
+// The pages follow the overlay's sections (settings.cpp), one page each and in
+// the same order: Game, Audio, Display, Screen, Background. The overlay's
+// Screen Size section is only Preset here (the width and height are the
+// stretch screen Y opens), so it heads the Screen page, with the effects laid
+// over the picture it sizes, rather than having a page of its own. Every page owns its rows, so the stock Graphics and Volume
+// settings are never shown; the two rows standing in for them (Screen Filter,
+// Volume) keep them in step from whichever page is up (SyncStockSettings).
+constexpr uint32_t kLanguageRow = 0;
+constexpr uint32_t kVoicesRow = 1;
+constexpr uint32_t kArtworkRow = 2;
+constexpr uint32_t kPrologueRow = 3;
+constexpr uint32_t kGamePageRowCount = 4;
+
+constexpr uint32_t kMuteRow = 0;
+constexpr uint32_t kVolumeRow = 1;
+constexpr uint32_t kAudioPageRowCount = 2;
+
 // Android is always fullscreen, so the row is left out there and the ones
 // after it move up.
 #if REX_PLATFORM_ANDROID
@@ -747,122 +774,22 @@ constexpr uint32_t kFullscreenRows = 0;
 #else
 constexpr uint32_t kFullscreenRows = 1;
 #endif
-// The picture first, from the window down to the effect laid over it, then the
-// sound. The first three lines are the stock rows', taken over.
 constexpr uint32_t kFullscreenRow = 0;
-constexpr uint32_t kPresetRow = kFullscreenRow + kFullscreenRows;
-constexpr uint32_t kGammaRow = kPresetRow + 1;
-constexpr uint32_t kScreenFilterRow = kGammaRow + 1;
-constexpr uint32_t kScreenFilterIntensityRow = kScreenFilterRow + 1;
-constexpr uint32_t kScreenCurvatureRow = kScreenFilterIntensityRow + 1;
-constexpr uint32_t kVolumeRow = kScreenCurvatureRow + 1;
-constexpr uint32_t kSettingsRowCount = kVolumeRow + 1;
+constexpr uint32_t kVsyncRow = kFullscreenRow + kFullscreenRows;
+constexpr uint32_t kGammaRow = kVsyncRow + 1;
+constexpr uint32_t kDisplayPageRowCount = kGammaRow + 1;
 
-// The second page: language, and whose release to take voices, artwork and the
-// prologue from. Its rows are all its own.
-constexpr uint32_t kLanguageRow = 0;
-constexpr uint32_t kVoicesRow = 1;
-constexpr uint32_t kArtworkRow = 2;
-constexpr uint32_t kPrologueRow = 3;
-constexpr uint32_t kLanguagePageRowCount = 4;
+constexpr uint32_t kPresetRow = 0;
+constexpr uint32_t kScreenFilterRow = 1;
+constexpr uint32_t kScreenFilterIntensityRow = 2;
+constexpr uint32_t kScreenCurvatureRow = 3;
+constexpr uint32_t kEffectsPageRowCount = 4;
 
-constexpr OptionRow kSettingsRows[] = {
-#if !REX_PLATFORM_ANDROID
-    {
-        .list_row = kFullscreenRow,
-        .label = kFullscreenLabel,
-        .value_count = 2,
-        .values = kOffOnTexts,
-        .get = &GetCvarBool,
-        .commit = &CommitCvarBool,
-        .cvar = "fullscreen",
-        .live = true,
-        .follow = true,
-        .tooltip = NativeText{"tip_fullscreen"},
-    },
-#endif
-    {
-        .list_row = kPresetRow,
-        .label = kPresetLabel,
-        .value_count = kGraphicsPresetCount,
-        .value_text = [](int32_t value) { return kGraphicsPresetTexts[value]; },
-        // "Custom" (the last entry) only joins the cycle once the player has
-        // dialled a stretch in by hand on the screen Y opens.
-        .live_value_count = &GraphicsPresetChoiceCount,
-        .get = [](const OptionRow&) { return GetGraphicsPresetIndex(); },
-        .commit = [](const OptionRow&, int32_t value) { RequestGraphicsPreset(value); },
-        .live = true,
-        .tooltip = NativeText{"tip_preset"},
-    },
-    {
-        .list_row = kGammaRow,
-        .label = kGammaLabel,
-        .value_count = std::size(kGammaTexts),
-        .value_text = &GammaText,
-        .get = &GetGammaIndex,
-        .commit = &CommitGammaIndex,
-        .cvar = "display_gamma",
-        .live = true,
-        .tooltip = NativeText{"tip_gamma"},
-    },
-    {
-        // Stands in for the stock Graphics setting: Enhanced is one of the
-        // filters (Smooth, settings.h). The game's own Graphics value is held
-        // at the style the filter picked, so its Accept writes back the same
-        // style.
-        .list_row = kScreenFilterRow,
-        .label = kScreenFilterLabel,
-        .value_count = kMaxScreenFilterOptions,
-        .value_text = &ScreenFilterText,
-        .live_value_count = &ScreenFilterChoiceCount,
-        .get = &GetScreenFilterIndex,
-        .commit = &CommitScreenFilterIndex,
-        .cvar = "screen_filter",
-        .live = true,
-        .stock_row = kStockGraphicsRow,
-        .stock_value = [](const OptionRow&) { return int32_t(ScreenFilterIsEnhanced() ? 1 : 0); },
-        .tooltip = NativeText{"tip_screen_filter"},
-    },
-    {
-        .list_row = kScreenFilterIntensityRow,
-        .label = kScreenFilterIntensityLabel,
-        .value_count = std::size(kScreenFilterIntensityTexts),
-        .value_text = &ScreenFilterIntensityText,
-        .get = &GetScreenFilterIntensityIndex,
-        .commit = &CommitScreenFilterIntensityIndex,
-        .cvar = "screen_filter_intensity",
-        .live = true,
-        .tooltip = NativeText{"tip_screen_filter_intensity"},
-    },
-    {
-        // Any filter or none: the renderer bends the picture itself.
-        .list_row = kScreenCurvatureRow,
-        .label = kScreenCurvatureLabel,
-        .value_count = std::size(kScreenCurvatureTexts),
-        .value_text = &ScreenCurvatureText,
-        .get = &GetScreenCurvatureIndex,
-        .commit = &CommitScreenCurvatureIndex,
-        .cvar = "screen_curvature",
-        .live = true,
-        .tooltip = NativeText{"tip_screen_curvature"},
-    },
-    {
-        // The stock Volume setting's 0-10 spinner, backed by audio_volume; the
-        // game's own volume is held at its maximum underneath.
-        .list_row = kVolumeRow,
-        .label = kVolumeLabel,
-        .min = 0,
-        .max = kVolumeSteps,
-        .get = &GetMasterVolumeStep,
-        .commit = &CommitMasterVolumeStep,
-        .live = true,
-        .stock_row = kStockVolumeRow,
-        .pin_stock_to_max = true,
-        .tooltip = NativeText{"tip_volume"},
-    },
-};
+constexpr uint32_t kWallpaperRow = 0;
+constexpr uint32_t kCloudsRow = 1;
+constexpr uint32_t kBackgroundPageRowCount = 2;
 
-constexpr OptionRow kLanguagePageRows[] = {
+constexpr OptionRow kGamePageRows[] = {
     {
         // `live`: each left/right switches the whole game's language on the
         // next frame, and B puts the original back the same way.
@@ -917,22 +844,184 @@ constexpr OptionRow kLanguagePageRows[] = {
     },
 };
 
-static_assert(RowsAreWellFormed(kSettingsRows, kSettingsRowCount, /*owns_all_rows=*/false),
-              "every settings row needs a unique in-range list_row; appended rows must run "
-              "contiguously up from kVanillaRowCount; a row without `get` is label-only and "
-              "must supply a `label` and target a stock row");
-static_assert(RowsAreWellFormed(kLanguagePageRows, kLanguagePageRowCount, /*owns_all_rows=*/true));
+constexpr OptionRow kAudioPageRows[] = {
+    {
+        .list_row = kMuteRow,
+        .label = kMuteLabel,
+        .value_count = 2,
+        .values = kOffOnTexts,
+        .get = &GetCvarBool,
+        .commit = &CommitCvarBool,
+        .reset = &GetCvarDefault,
+        .cvar = "audio_mute",
+        .live = true,
+        .tooltip = NativeText{"tip_mute"},
+    },
+    {
+        // The stock Volume setting's 0-10 spinner, backed by audio_volume; the
+        // game's own volume is held at its maximum underneath.
+        .list_row = kVolumeRow,
+        .label = kVolumeLabel,
+        .min = 0,
+        .max = kVolumeSteps,
+        .get = &GetMasterVolumeStep,
+        .commit = &CommitMasterVolumeStep,
+        .live = true,
+        .stock_row = kStockVolumeRow,
+        .pin_stock_to_max = true,
+        .tooltip = NativeText{"tip_volume"},
+    },
+};
+
+constexpr OptionRow kDisplayPageRows[] = {
+#if !REX_PLATFORM_ANDROID
+    {
+        .list_row = kFullscreenRow,
+        .label = kFullscreenLabel,
+        .value_count = 2,
+        .values = kOffOnTexts,
+        .get = &GetCvarBool,
+        .commit = &CommitCvarBool,
+        .cvar = "fullscreen",
+        .live = true,
+        .follow = true,
+        .tooltip = NativeText{"tip_fullscreen"},
+    },
+#endif
+    {
+        .list_row = kVsyncRow,
+        .label = kVsyncLabel,
+        .value_count = 2,
+        .values = kOffOnTexts,
+        .get = &GetCvarBool,
+        .commit = &CommitCvarBool,
+        .reset = &GetCvarDefault,
+        .cvar = "vsync",
+        .live = true,
+        .tooltip = NativeText{"tip_vsync"},
+    },
+    {
+        .list_row = kGammaRow,
+        .label = kGammaLabel,
+        .value_count = std::size(kGammaTexts),
+        .value_text = &GammaText,
+        .get = &GetGammaIndex,
+        .commit = &CommitGammaIndex,
+        .cvar = "display_gamma",
+        .live = true,
+        .tooltip = NativeText{"tip_gamma"},
+    },
+};
+
+constexpr OptionRow kEffectsPageRows[] = {
+    {
+        .list_row = kPresetRow,
+        .label = kPresetLabel,
+        .value_count = kGraphicsPresetCount,
+        .value_text = [](int32_t value) { return kGraphicsPresetTexts[value]; },
+        // "Custom" (the last entry) only joins the cycle once the player has
+        // dialled a stretch in by hand on the screen Y opens.
+        .live_value_count = &GraphicsPresetChoiceCount,
+        .get = [](const OptionRow&) { return GetGraphicsPresetIndex(); },
+        .commit = [](const OptionRow&, int32_t value) { RequestGraphicsPreset(value); },
+        .live = true,
+        .tooltip = NativeText{"tip_preset"},
+    },
+    {
+        // Stands in for the stock Graphics setting: Enhanced is one of the
+        // filters (Smooth, settings.h). The game's own Graphics value is held
+        // at the style the filter picked, so its Accept writes back the same
+        // style.
+        .list_row = kScreenFilterRow,
+        .label = kScreenFilterLabel,
+        .value_count = kMaxScreenFilterOptions,
+        .value_text = &ScreenFilterText,
+        .live_value_count = &ScreenFilterChoiceCount,
+        .get = &GetScreenFilterIndex,
+        .commit = &CommitScreenFilterIndex,
+        .cvar = "screen_filter",
+        .live = true,
+        .stock_row = kStockGraphicsRow,
+        .stock_value = [](const OptionRow&) { return int32_t(ScreenFilterIsEnhanced() ? 1 : 0); },
+        .tooltip = NativeText{"tip_screen_filter"},
+    },
+    {
+        .list_row = kScreenFilterIntensityRow,
+        .label = kScreenFilterIntensityLabel,
+        .value_count = std::size(kScreenFilterIntensityTexts),
+        .value_text = &ScreenFilterIntensityText,
+        .get = &GetScreenFilterIntensityIndex,
+        .commit = &CommitScreenFilterIntensityIndex,
+        .cvar = "screen_filter_intensity",
+        .live = true,
+        .tooltip = NativeText{"tip_screen_filter_intensity"},
+    },
+    {
+        // Any filter or none: the renderer bends the picture itself.
+        .list_row = kScreenCurvatureRow,
+        .label = kScreenCurvatureLabel,
+        .value_count = std::size(kScreenCurvatureTexts),
+        .value_text = &ScreenCurvatureText,
+        .get = &GetScreenCurvatureIndex,
+        .commit = &CommitScreenCurvatureIndex,
+        .cvar = "screen_curvature",
+        .live = true,
+        .tooltip = NativeText{"tip_screen_curvature"},
+    },
+};
+
+constexpr OptionRow kBackgroundPageRows[] = {
+    {
+        .list_row = kWallpaperRow,
+        .label = kWallpaperLabel,
+        .value_count = 2,
+        .values = kOffOnTexts,
+        .get = &GetCvarBool,
+        .commit = &CommitCvarBool,
+        .reset = &GetCvarDefault,
+        .cvar = "show_wallpaper",
+        .live = true,
+        .tooltip = NativeText{"tip_show_wallpaper"},
+    },
+    {
+        .list_row = kCloudsRow,
+        .label = kCloudsLabel,
+        .value_count = 2,
+        .values = kOffOnTexts,
+        .get = &GetCvarBool,
+        .commit = &CommitCvarBool,
+        .reset = &GetCvarDefault,
+        .cvar = "show_clouds",
+        .live = true,
+        .tooltip = NativeText{"tip_show_clouds"},
+    },
+};
+
+static_assert(RowsAreWellFormed(kGamePageRows, kGamePageRowCount, /*owns_all_rows=*/true));
+static_assert(RowsAreWellFormed(kAudioPageRows, kAudioPageRowCount, /*owns_all_rows=*/true));
+static_assert(RowsAreWellFormed(kDisplayPageRows, kDisplayPageRowCount, /*owns_all_rows=*/true));
+static_assert(RowsAreWellFormed(kEffectsPageRows, kEffectsPageRowCount, /*owns_all_rows=*/true));
+static_assert(RowsAreWellFormed(kBackgroundPageRows, kBackgroundPageRowCount,
+                                /*owns_all_rows=*/true));
 
 // What fits on the screen's backdrop, as on the enhancements pages: the
 // settings pages switch with the shoulder buttons rather than scroll.
 constexpr uint32_t kSettingsVisibleRows = 7;
-static_assert(kSettingsRowCount <= kSettingsVisibleRows &&
-                  kLanguagePageRowCount <= kSettingsVisibleRows,
+static_assert(kGamePageRowCount <= kSettingsVisibleRows &&
+                  kAudioPageRowCount <= kSettingsVisibleRows &&
+                  kDisplayPageRowCount <= kSettingsVisibleRows &&
+                  kEffectsPageRowCount <= kSettingsVisibleRows &&
+                  kBackgroundPageRowCount <= kSettingsVisibleRows,
               "each settings page fits the screen without scrolling");
 
-template <const auto& Rows>
+const OptionsPage& Page();
+
+// The description column: the highlighted row's tooltip, led by why it is
+// locked when it is. Reads the bound page's rows as laid out, so it serves the
+// Screen page too, whose rows move.
 PageDescription SettingsDescription(uint32_t list_row, int32_t) {
-  for (const OptionRow& row : Rows) {
+  for (uint32_t i = 0; i < Page().row_count; ++i) {
+    const OptionRow& row = Page().rows[i];
     if (row.list_row != list_row) {
       continue;
     }
@@ -946,86 +1035,83 @@ PageDescription SettingsDescription(uint32_t list_row, int32_t) {
 constexpr uint32_t kLeftBumperGlyph = 0x82012F50u;
 constexpr NativeText kChangePagePrompt{"change_page_prompt"};
 
-bool RelayoutSettingsPage();
-PageDescription SettingsPageDescription(uint32_t list_row, int32_t value);
+bool RelayoutEffectsPage();
 
-// Both pages carry a title of their own, so that coming back to the first one
-// puts its title back: a null key would leave the second page's in place. The
-// first has the stretch screen's Y prompt as well as the page one.
-//
-// The first lays its rows out from kSettingsRows (RelayoutSettingsPage), which
-// it starts out showing all of.
-OptionsPage g_settings_page = {
-    .rows = kSettingsRows,
-    .row_count = static_cast<uint32_t>(std::size(kSettingsRows)),
-    .total_rows = kSettingsRowCount,
-    .visible_rows = kSettingsVisibleRows,
-    .title = NativeText{"settings_title_general"},
-    .title_arrows = true,
-    .stretch_prompt = true,
-    .prompt_text = kCustomPromptLabel,
-    .prompt_glyph = kYGlyphNameAddr,
-    // Y sets the stretch by hand, so it only means something on Preset.
-    .prompt_row = static_cast<int32_t>(kPresetRow),
-    .page_prompt = true,
-    .relayout = &RelayoutSettingsPage,
-    .row_description = &SettingsPageDescription,
-};
+// Every page carries a title of its own, so that coming back to one puts its
+// title back: a null key would leave the previous page's in place.
+template <const auto& Rows>
+constexpr OptionsPage MakeSettingsPage(uint32_t row_count, NativeText title) {
+  return {
+      .rows = Rows,
+      .row_count = static_cast<uint32_t>(std::size(Rows)),
+      .total_rows = row_count,
+      .visible_rows = kSettingsVisibleRows,
+      .title = title,
+      .title_arrows = true,
+      .owns_all_rows = true,
+      .page_prompt = true,
+      .row_description = &SettingsDescription,
+  };
+}
 
-// The first page's rows as laid out, and what they were laid out for.
-std::array<OptionRow, std::size(kSettingsRows)> g_settings_page_rows = {};
-bool g_settings_laid_out = false;
-bool g_settings_intensity_shown = false;
+constexpr OptionsPage kGamePage =
+    MakeSettingsPage<kGamePageRows>(kGamePageRowCount, NativeText{"settings_title_game"});
+constexpr OptionsPage kAudioPage =
+    MakeSettingsPage<kAudioPageRows>(kAudioPageRowCount, NativeText{"settings_title_audio"});
+constexpr OptionsPage kBackgroundPage =
+    MakeSettingsPage<kBackgroundPageRows>(kBackgroundPageRowCount, NativeText{"settings_title_background"});
 
-// OptionsPage::relayout for the first page: Filter Intensity only while the
-// filter has an intensity to set (Scanlines, LCD Grid, CRT), the rows below
-// it moving up a line while it is gone.
-bool RelayoutSettingsPage() {
+constexpr OptionsPage kDisplayPage =
+    MakeSettingsPage<kDisplayPageRows>(kDisplayPageRowCount, NativeText{"settings_title_display"});
+
+// Laid out from kEffectsPageRows (RelayoutEffectsPage), which it starts out
+// showing all of. Y opens the stretch screen for setting the stretch by hand,
+// which is what Preset picks among, so its prompt only shows on that row.
+OptionsPage MakeEffectsPage() {
+  OptionsPage page =
+      MakeSettingsPage<kEffectsPageRows>(kEffectsPageRowCount, NativeText{"settings_title_screen"});
+  page.stretch_prompt = true;
+  page.prompt_text = kCustomPromptLabel;
+  page.prompt_glyph = kYGlyphNameAddr;
+  page.prompt_row = static_cast<int32_t>(kPresetRow);
+  page.relayout = &RelayoutEffectsPage;
+  return page;
+}
+OptionsPage g_effects_page = MakeEffectsPage();
+
+// The Screen page's rows as laid out, and what they were laid out for.
+std::array<OptionRow, std::size(kEffectsPageRows)> g_effects_page_rows = {};
+bool g_effects_laid_out = false;
+bool g_effects_intensity_shown = false;
+
+// OptionsPage::relayout for Screen: Filter Intensity only while the
+// filter has an intensity to set (Scanlines, LCD Grid, CRT), the row below it
+// moving up a line while it is gone.
+bool RelayoutEffectsPage() {
   const bool shown = CurrentScreenFilter().kind != ScreenFilterKind::kNone;
-  if (g_settings_laid_out && shown == g_settings_intensity_shown) {
+  if (g_effects_laid_out && shown == g_effects_intensity_shown) {
     return false;
   }
-  g_settings_laid_out = true;
-  g_settings_intensity_shown = shown;
+  g_effects_laid_out = true;
+  g_effects_intensity_shown = shown;
   uint32_t count = 0;
-  for (const OptionRow& row : kSettingsRows) {
+  for (const OptionRow& row : kEffectsPageRows) {
     if (!shown && row.list_row == kScreenFilterIntensityRow) {
       continue;
     }
-    OptionRow& out = g_settings_page_rows[count++];
+    OptionRow& out = g_effects_page_rows[count++];
     out = row;
     if (!shown && row.list_row > kScreenFilterIntensityRow) {
       --out.list_row;
     }
   }
-  g_settings_page.rows = g_settings_page_rows.data();
-  g_settings_page.row_count = g_settings_page.total_rows = count;
+  g_effects_page.rows = g_effects_page_rows.data();
+  g_effects_page.row_count = g_effects_page.total_rows = count;
   return true;
 }
 
-PageDescription SettingsPageDescription(uint32_t list_row, int32_t) {
-  for (uint32_t i = 0; i < g_settings_page.row_count; ++i) {
-    const OptionRow& row = g_settings_page.rows[i];
-    if (row.list_row == list_row) {
-      return {u"", row.tooltip.Get() ? row.tooltip.Get() : u""};
-    }
-  }
-  return {};
-}
-
-constexpr OptionsPage kLanguagePage = {
-    .rows = kLanguagePageRows,
-    .row_count = static_cast<uint32_t>(std::size(kLanguagePageRows)),
-    .total_rows = kLanguagePageRowCount,
-    .visible_rows = kSettingsVisibleRows,
-    .title = NativeText{"settings_title_language"},
-    .title_arrows = true,
-    .owns_all_rows = true,
-    .page_prompt = true,
-    .row_description = &SettingsDescription<kLanguagePageRows>,
-};
-
-const OptionsPage* const kSettingsPages[] = {&g_settings_page, &kLanguagePage};
+const OptionsPage* const kSettingsPages[] = {&kGamePage, &kAudioPage, &kDisplayPage,
+                                             &g_effects_page, &kBackgroundPage};
 
 // ---------------------------------------------------------------------------
 // The current page
@@ -1034,7 +1120,7 @@ const OptionsPage* const kSettingsPages[] = {&g_settings_page, &kLanguagePage};
 // The page the screen shows, picked by Help & Options (SelectSettingsPage)
 // before it opens the screen, and the page the list was last bound with. The
 // two differ for exactly the bind that switches pages.
-const OptionsPage* g_page = &g_settings_page;
+const OptionsPage* g_page = &kGamePage;
 const OptionsPage* g_bound_page = nullptr;
 
 // How many of the page's rows are scrolled off the top of the list. Always 0
@@ -1052,9 +1138,12 @@ uint32_t VisibleRowCount() { return VisibleRowCount(Page()); }
 // How many rows the list is built with: enough for whichever page shows the
 // most. A page with fewer binds fewer, and the list hides the rest.
 uint32_t ListCapacity() {
-  // The first page's full table, whatever it is laid out as right now.
-  return std::max({std::min(kSettingsRowCount, kSettingsVisibleRows), VisibleRowCount(kLanguagePage),
-                   VisibleRowCount(EnhancementsOptionsPage()),
+  // Screen's full table, whatever it is laid out as right now.
+  uint32_t capacity = std::min(kEffectsPageRowCount, kSettingsVisibleRows);
+  for (const OptionsPage* page : kSettingsPages) {
+    capacity = std::max(capacity, VisibleRowCount(*page));
+  }
+  return std::max({capacity, VisibleRowCount(EnhancementsOptionsPage()),
                    VisibleRowCount(RandomizerOptionsPage())});
 }
 
@@ -1446,14 +1535,46 @@ uint32_t StockRow(const OptionRow& row) {
 }
 
 // Writes a row's stock_value into the game's own table. See
-// OptionRow::stock_value.
+// OptionRow::stock_value. Whatever page is up: the settings pages all own
+// their rows, so the row may well sit on another page than the one bound.
 void SyncStockValue(uint8_t* base, const OptionRow& row) {
   const uint32_t stock = StockRow(row);
-  if (!g_vanilla_entries || Page().owns_all_rows || !row.stock_value || stock >= kVanillaRowCount) {
+  if (!g_vanilla_entries || !row.stock_value || stock >= kVanillaRowCount) {
     return;
   }
   Write32BE(base, g_vanilla_entries + stock * kEntryStride + kEntryValue,
             static_cast<uint32_t>(row.stock_value(row)));
+}
+
+// Pins displaced stock settings to their maximum and syncs the rest, in the
+// game's *own* table -- that is the copy its apply path (sub_8257F9E0) and its
+// live on-change apply both read, and the one we otherwise leave frozen at
+// whatever the row held before it was taken over. From the bound page's rows
+// and every settings page's, since the rows standing in for the stock
+// settings sit on settings pages of their own.
+void SyncStockSettings(uint8_t* base) {
+  const auto sync = [base](const OptionsPage& page) {
+    for (uint32_t i = 0; i < page.row_count; ++i) {
+      const OptionRow& row = page.rows[i];
+      if (!IsRowActive(row)) {
+        continue;
+      }
+      if (row.pin_stock_to_max && StockRow(row) < kVanillaRowCount) {
+        const uint32_t stock = g_vanilla_entries + StockRow(row) * kEntryStride;
+        Write32BE(base, stock + kEntryValue, Read32BE(base, stock + kEntryMax));
+      }
+      SyncStockValue(base, row);
+    }
+  };
+  if (!g_vanilla_entries) {
+    return;
+  }
+  sync(Page());
+  for (const OptionsPage* page : kSettingsPages) {
+    if (page != g_page) {
+      sync(*page);
+    }
+  }
 }
 
 // Rebinds the list to the rows in view after a scroll or a relayout: the same
@@ -1571,23 +1692,7 @@ extern "C" void NativeOptions_BindRows(PPCContext& ctx, uint8_t* base) {
       }
       WriteEntries(base);
 
-      // Pin displaced stock settings to their maximum, in the game's *own*
-      // table -- that is the copy its apply path (sub_8257F9E0) and its live
-      // on-change apply both read, and the one we otherwise leave frozen at
-      // whatever the row held before it was taken over.
-      for (uint32_t i = 0; i < Page().row_count; ++i) {
-        const OptionRow& row = Page().rows[i];
-        if (!IsRowActive(row) || !row.pin_stock_to_max || StockRow(row) >= kVanillaRowCount) {
-          continue;
-        }
-        const uint32_t stock = g_vanilla_entries + StockRow(row) * kEntryStride;
-        Write32BE(base, stock + kEntryValue, Read32BE(base, stock + kEntryMax));
-      }
-      for (uint32_t i = 0; i < Page().row_count; ++i) {
-        if (IsRowActive(Page().rows[i])) {
-          SyncStockValue(base, Page().rows[i]);
-        }
-      }
+      SyncStockSettings(base);
 
       ctx.r4.u32 = g_entries;
       ctx.r5.u32 = VisibleRowCount();
@@ -2748,7 +2853,7 @@ void EnterPregameScreen(uint32_t page) { g_pregame_screen_page = page; }
 void SelectSettingsPage(SettingsPage page) {
   switch (page) {
     case SettingsPage::kSettings:
-      g_page = &g_settings_page;
+      g_page = &kGamePage;
       break;
     case SettingsPage::kEnhancements:
       g_page = &EnhancementsOptionsPage();
@@ -3016,8 +3121,8 @@ void NativeOptions::Bind(rex::Runtime* runtime) {
   }
 
   // The screen's functions are hooked at codegen time (config/nocturnerecomp_config.toml).
-  REXLOG_INFO("[native_options] hooks installed ({} settings row(s), {} enhancements row(s))",
-              std::size(kSettingsRows), EnhancementsOptionsPage().row_count);
+  REXLOG_INFO("[native_options] hooks installed ({} settings page(s), {} enhancements row(s))",
+              std::size(kSettingsPages), EnhancementsOptionsPage().row_count);
 }
 
 NativeOptions& GetNativeOptions() {

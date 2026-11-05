@@ -97,10 +97,12 @@ float Px(float pixels) { return pixels * UiScale(); }
 
 // Hover help from res/lang's [native] tip_<name>, for the item just drawn; the
 // same texts the native settings page shows for the highlighted row.
-void RowTip(const char* key) {
+void TipText(const char* text) {
   if (ImGui::IsItemHovered(ImGuiHoveredFlags_ForTooltip | ImGuiHoveredFlags_AllowWhenDisabled))
-    ImGui::SetTooltip("%s", Tr("native", key));
+    ImGui::SetTooltip("%s", text);
 }
+
+void RowTip(const char* key) { TipText(Tr("native", key)); }
 
 // A modal asking to confirm a restart. Call every frame; `open` requests it.
 // `id` keeps the popups of different buttons apart.
@@ -207,13 +209,13 @@ constexpr std::array<const char*, 4> kEnhancementTabs = {
 // <cvar> and <cvar>_desc.
 constexpr std::array<const char*, 2> kIntroSkipCvarNames = {"skip_intros", "skip_richter"};
 
-constexpr std::array<const char*, 22> kBasicCvarNames = {
+constexpr std::array<const char*, 24> kBasicCvarNames = {
     "fullscreen",       "vsync",         "user_language",
     "gpu_backend",      "vulkan_device", "audio_mute",      "audio_volume",
     "graphics_style_enhanced", "touch_controls", "touch_movement", "touch_function_keys", "touch_scale",
     "touch_opacity", "touch_hide_delay", "voices", "artwork", "prologue",
     "ui_scale", "display_gamma", "screen_filter", "screen_filter_intensity",
-    "screen_curvature"};
+    "screen_curvature", "show_wallpaper", "show_clouds"};
 
 constexpr std::array kUiScaleSteps = {0.75, 1.0, 1.25, 1.5, 1.75, 2.0, 2.5, 3.0};
 
@@ -479,16 +481,7 @@ class CuratedSettingsDialog : public rex::ui::ImGuiDialog {
   }
 
   void DrawGraphicsTab() {
-#if !REX_PLATFORM_ANDROID
-    // Android is always fullscreen.
-    DrawFullscreenRow();
-#endif
-    DrawVsyncRow();
-    DrawUiScaleRow();
-    DrawGammaRow();
-    DrawScreenFilterRow();
-    DrawScreenFilterIntensityRow();
-    DrawScreenCurvatureRow();
+    ImGui::SeparatorText(Tr("settings", "section_display"));
     // The native renderer reads both: gpu_backend picks D3D12 or Vulkan (only
     // Windows has the choice) and vulkan_device the adapter when Vulkan is in use.
 #ifdef _WIN32
@@ -500,6 +493,108 @@ class CuratedSettingsDialog : public rex::ui::ImGuiDialog {
 #endif
       DrawVulkanDeviceRow();
 #endif
+#if !REX_PLATFORM_ANDROID
+    // Android is always fullscreen.
+    DrawFullscreenRow();
+#endif
+    DrawVsyncRow();
+    DrawUiScaleRow();
+    DrawGammaRow();
+
+    ImGui::SeparatorText(Tr("settings", "section_screen_size"));
+    DrawScreenSizeRows();
+
+    ImGui::SeparatorText(Tr("settings", "section_screen_effects"));
+    DrawScreenFilterRow();
+    DrawScreenFilterIntensityRow();
+    DrawScreenCurvatureRow();
+
+    ImGui::SeparatorText(Tr("settings", "section_background"));
+    DrawBoolRow("show_wallpaper", Tr("settings", "show_wallpaper"),
+                Tr("native", "tip_show_wallpaper"));
+    DrawBoolRow("show_clouds", Tr("settings", "show_clouds"), Tr("native", "tip_show_clouds"));
+  }
+
+  // A cvar drawn with the SDK's own widget (a checkbox for a bool).
+  void DrawBoolRow(const char* name, const char* label, const char* tip) {
+    const auto* entry = rex::cvar::GetFlagInfo(name);
+    if (!entry)
+      return;
+    ImGui::TextUnformatted(label);
+    TipText(tip);
+    ImGui::SameLine(Px(180.0f));
+    ImGui::PushID(name);
+    if (rex::ui::DrawCvarWidget(*entry, Px(160.0f), /*persist=*/true))
+      SaveBasic();
+    TipText(tip);
+    ImGui::PopID();
+  }
+
+  // The stretch the game's "Change Screen Size" screen sets (see
+  // graphics_settings.h): a preset, and the width/height percentages it is made
+  // of. Both go through graphics_settings' own per-frame apply, which also
+  // persists them, so nothing here touches a cvar.
+  void DrawScreenSizeRows() {
+    const uint32_t choices = GraphicsPresetChoiceCount();
+    const int32_t current = GetGraphicsPresetIndex();
+    // The catalog's names are ASCII (see kGraphicsPresetTexts), so a narrow is
+    // enough; Custom is the one that says something rather than naming a shape.
+    auto preset_name = [](uint32_t i) -> std::string {
+      if (i == kGraphicsCustomPresetIndex)
+        return Tr("settings", "screen_size_custom");
+      std::string name;
+      for (const char16_t* c = kGraphicsPresetTexts[i]; *c; ++c)
+        name.push_back(static_cast<char>(*c));
+      return name;
+    };
+
+    ImGui::TextUnformatted(Tr("settings", "screen_size"));
+    RowTip("tip_screen_size");
+    ImGui::SameLine(Px(180.0f));
+    ImGui::SetNextItemWidth(Px(160.0f));
+    ImGui::PushID("screen_size");
+    const std::string preview =
+        current >= 0 && static_cast<uint32_t>(current) < choices ? preset_name(current) : "";
+    if (ImGui::BeginCombo("##v", preview.c_str())) {
+      for (uint32_t i = 0; i < choices; ++i) {
+        const bool selected = static_cast<int32_t>(i) == current;
+        if (ImGui::Selectable(preset_name(i).c_str(), selected) && !selected)
+          RequestGraphicsPreset(static_cast<int32_t>(i));
+        if (selected)
+          ImGui::SetItemDefaultFocus();
+      }
+      ImGui::EndCombo();
+    }
+    RowTip("tip_screen_size");
+    ImGui::PopID();
+
+    int32_t width = 0;
+    int32_t height = 0;
+    const bool known = GetGraphicsStretchPercent(width, height);
+    ImGui::BeginDisabled(!known);
+    if (DrawPercentRow("screen_width", Tr("settings", "screen_width"),
+                       Tr("native", "tip_screen_width"), width))
+      RequestGraphicsStretchPercent(width, height);
+    if (DrawPercentRow("screen_height", Tr("settings", "screen_height"),
+                       Tr("native", "tip_screen_height"), height))
+      RequestGraphicsStretchPercent(width, height);
+    ImGui::EndDisabled();
+  }
+
+  bool DrawPercentRow(const char* id, const char* label, const char* tip, int32_t& value) {
+    ImGui::TextUnformatted(label);
+    TipText(tip);
+    ImGui::SameLine(Px(180.0f));
+    ImGui::SetNextItemWidth(Px(160.0f));
+    ImGui::PushID(id);
+    int v = value;
+    const bool changed = ImGui::InputInt("##v", &v);
+    TipText(tip);
+    ImGui::PopID();
+    if (!changed)
+      return false;
+    value = std::clamp(v, int(kGraphicsStretchPercentMin), int(kGraphicsStretchPercentMax));
+    return true;
   }
 
   // The on-screen pad (see touch_layout.h). Its sliders only show while it is on.
@@ -1208,6 +1303,7 @@ class CuratedSettingsDialog : public rex::ui::ImGuiDialog {
     }
 
     ImGui::TextUnformatted(Tr("settings", "gpu_backend"));
+    RowTip("tip_gpu_backend");
     ImGui::SameLine(Px(180.0f));
     ImGui::SetNextItemWidth(Px(160.0f));
     ImGui::PushID("gpu_backend");
@@ -1223,6 +1319,7 @@ class CuratedSettingsDialog : public rex::ui::ImGuiDialog {
       }
       ImGui::EndCombo();
     }
+    RowTip("tip_gpu_backend");
     ImGui::PopID();
   }
 
