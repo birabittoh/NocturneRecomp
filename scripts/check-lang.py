@@ -97,7 +97,7 @@ sdk_src = root.parent / "rexglue-sdk" / "src"
 if sdk_src.is_dir():
     for path in sdk_src.rglob("*.cpp"):
         text = path.read_text(encoding="utf8", errors="replace")
-        sdk_used |= {("sdk_ui", key) for key in re.findall(r'\bUiText\(\s*"(\w+)"', text)}
+        sdk_used |= {("sdk_ui", key) for key in re.findall(r'\bUi(?:Text|TextFormat|Label)\(\s*"(\w+)"', text)}
 else:
     print(f"note: {sdk_src} not found; [sdk_ui] keys only the SDK reads aren't checked")
     sdk_used = {("sdk_ui", key) for key in en.get("sdk_ui", {})}
