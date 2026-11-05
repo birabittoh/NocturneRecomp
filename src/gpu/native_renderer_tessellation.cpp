@@ -24,6 +24,7 @@
 #include <cstring>
 #include <vector>
 
+#include <rex/cvar.h>
 #include <rex/logging.h>
 #include <rex/system/xmemory.h>
 
@@ -31,6 +32,10 @@
 #include "native_renderer_draw.h"
 
 namespace nocturne {
+
+REXCVAR_DEFINE_BOOL(show_clouds, true, "Video",
+                   "Show the animated background clouds");
+
 namespace {
 
 constexpr uint32_t kVertexFloatShadow = 1792;
@@ -131,6 +136,9 @@ Vertex Evaluate(const ControlPoint (&cp)[4], const FadeConstants& k, float u, fl
 }  // namespace
 
 void GuestDrawTessellatedQuad(uint8_t* base, uint32_t device, uint32_t control_points) {
+  if (!REXCVAR_GET(show_clouds))
+    return;
+
   if (base[device + kStreamStrides] != kControlPointStride / 4) {
     static bool warned = false;
     if (!warned) {
