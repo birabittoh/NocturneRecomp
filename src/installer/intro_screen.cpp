@@ -36,6 +36,7 @@
 #include "gen/images.generated.h"
 #include "intro_music.h"
 #include "mods_screen.h"
+#include "releases_screen.h"
 #include "saves_screen.h"
 #include "intro_text.h"
 #include "gen/version.generated.h"
@@ -305,6 +306,10 @@ class IntroDialog final : public rex::ui::ImGuiDialog {
         options_.push_back({IntroText::kAddVersion, GameDataChoice::kAddVersion,
                             versions / kColumnRows, versions % kColumnRows});
       options_.push_back({IntroText::kQuit, GameDataChoice::kQuit, right, kCornerRow});
+      // Above the first version, so Up reaches it.
+      if (kVersionString[0] != '\0')
+        options_.push_back({IntroText::kStart, GameDataChoice::kCancel, 0, kCornerRow, -1, false,
+                            false, false, true});
       selected_ = IndexOf(GameDataChoice::kStart);
       return;
     }
@@ -439,6 +444,8 @@ class IntroDialog final : public rex::ui::ImGuiDialog {
       DrawPage(*mods_, mods_open_, draw, size, unit, t);
     } else if (saves_open_) {
       DrawPage(*saves_, saves_open_, draw, size, unit, t);
+    } else if (releases_open_) {
+      DrawPage(*releases_, releases_open_, draw, size, unit, t);
     } else {
       float y = 46.0f * unit;
       if (g_logo.texture) {
@@ -489,13 +496,8 @@ class IntroDialog final : public rex::ui::ImGuiDialog {
         }
       }
 
-      if (kVersionString[0] != '\0') {
-        const std::string version = std::string("v") + kVersionString;
-        draw->AddText(font, 18.0f * unit, ImVec2(24.0f * unit + 1.5f * unit, 24.0f * unit + 1.5f * unit),
-                      IM_COL32(0, 0, 0, int(200 * body_in)), version.c_str());
-        draw->AddText(font, 18.0f * unit, ImVec2(24.0f * unit, 24.0f * unit),
-                      IM_COL32(255, 255, 255, int(255 * body_in)), version.c_str());
-      }
+      if (kVersionString[0] != '\0')
+        DrawVersionLabel(draw, font, unit, body_in, body_in >= 1.0f && !busy_ && !working_);
       if (working_) {
         on_picker_ = picker_open_ = on_music_ = on_trash_ = false;
         DrawLanguagePicker(draw, font, size, unit, body_in, false);
@@ -541,6 +543,51 @@ class IntroDialog final : public rex::ui::ImGuiDialog {
     else if (!on_picker_ && page.PickerFocused())
       on_music_ ? page.FocusMusic() : page.ReturnFocus();
     on_picker_ = on_music_ = false;
+  }
+
+  void OpenReleases() {
+    if (!releases_)
+      releases_ = std::make_unique<ReleasesScreen>();
+    releases_->Reopen(gamepad_);
+    releases_open_ = true;
+  }
+
+  // Top left; opens the release notes.
+  void DrawVersionLabel(ImDrawList* draw, ImFont* font, float unit, float alpha, bool ready) {
+    const std::string version = std::string("v") + kVersionString;
+    const float text_size = 18.0f * unit;
+    const ImVec2 text_at(24.0f * unit, 24.0f * unit);
+    const ImVec2 extent = font->CalcTextSizeA(text_size, FLT_MAX, 0.0f, version.c_str());
+    const ImVec2 min(text_at.x - 8.0f * unit, text_at.y - 5.0f * unit);
+    const ImVec2 max(text_at.x + extent.x + 8.0f * unit, text_at.y + extent.y + 5.0f * unit);
+    int index = -1;
+    for (int i = 0; i < int(options_.size()); ++i) {
+      if (options_[size_t(i)].releases)
+        index = i;
+    }
+    ImGui::SetCursorScreenPos(min);
+    const bool clicked = ImGui::InvisibleButton("##version", ImVec2(max.x - min.x, max.y - min.y));
+    const bool usable = ready && !picker_open_;
+    const bool hovered = usable && ImGui::IsItemHovered();
+    if (hovered)
+      ImGui::SetMouseCursor(ImGuiMouseCursor_Hand);
+    if (hovered && index >= 0 && MouseMoved()) {
+      selected_ = index;
+      on_picker_ = on_music_ = on_trash_ = false;
+    }
+    if (clicked && usable)
+      OpenReleases();
+    const bool focused =
+        index >= 0 && selected_ == index && !on_picker_ && !on_music_ && !on_trash_;
+    if (focused || hovered) {
+      draw->AddRectFilled(min, max, IM_COL32(0, 0, 0, int(150 * alpha)), 6.0f * unit);
+      draw->AddRect(min, max, focused ? Color(kAccent, alpha) : IM_COL32(255, 255, 255, int(60 * alpha)),
+                    6.0f * unit, 0, std::max(1.0f, (focused ? 2.0f : 1.0f) * unit));
+    }
+    draw->AddText(font, text_size, ImVec2(text_at.x + 1.5f * unit, text_at.y + 1.5f * unit),
+                  IM_COL32(0, 0, 0, int(200 * alpha)), version.c_str());
+    draw->AddText(font, text_size, text_at, IM_COL32(255, 255, 255, int(255 * alpha)),
+                  version.c_str());
   }
 
   // Quit sits in the top right corner, one step above the right column.
@@ -633,6 +680,8 @@ class IntroDialog final : public rex::ui::ImGuiDialog {
     bool mods = false;
     // Opens the Saves page; answers nothing.
     bool saves = false;
+    // The version label, which opens the Releases page.
+    bool releases = false;
   };
 
   bool Library() const {
@@ -748,7 +797,7 @@ class IntroDialog final : public rex::ui::ImGuiDialog {
     const Option& option = options_[size_t(i)];
     if (option.trash)
       return CanDelete(option.version);
-    if (option.mods || option.saves)
+    if (option.mods || option.saves || option.releases)
       return true;
     if (option.version >= 0)
       return true;
@@ -858,6 +907,10 @@ class IntroDialog final : public rex::ui::ImGuiDialog {
                                                g_user_data_root);
       saves_->Reopen(gamepad_);
       saves_open_ = true;
+      return;
+    }
+    if (option.releases) {
+      OpenReleases();
       return;
     }
     if (option.version < 0) {
@@ -971,6 +1024,9 @@ class IntroDialog final : public rex::ui::ImGuiDialog {
         DrawTrash(draw, i, option, column_x, widths, top, h, unit, alpha, ready);
         continue;
       }
+      // Drawn as the version label.
+      if (option.releases)
+        continue;
       const bool corner = option.row == kCornerRow;
       const bool plus = option.version < 0 && option.choice == GameDataChoice::kAddVersion;
       const int row = option.row;
@@ -1241,6 +1297,8 @@ class IntroDialog final : public rex::ui::ImGuiDialog {
           mods_open_ = false;
         } else if (saves_open_) {
           saves_open_ = false;
+        } else if (releases_open_) {
+          releases_open_ = false;
         } else {
           choice_ = GameDataChoice::kQuit;
         }
@@ -1437,6 +1495,8 @@ class IntroDialog final : public rex::ui::ImGuiDialog {
   bool mods_open_ = false;
   std::unique_ptr<SavesScreen> saves_;
   bool saves_open_ = false;
+  std::unique_ptr<ReleasesScreen> releases_;
+  bool releases_open_ = false;
   bool mods_was_open_ = false;
   // Why enabled mods stop the game starting; empty when none do.
   std::string mod_block_;

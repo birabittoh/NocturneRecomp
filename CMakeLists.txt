@@ -406,6 +406,7 @@ set(NOCTURNERECOMP_SOURCES
     src/installer/mods_screen.cpp
     src/installer/release_id.cpp
     src/installer/save_slots.cpp
+    src/installer/releases_screen.cpp
     src/installer/saves_screen.cpp
     src/installer/xbla_package.cpp
     src/platform/document_picker.cpp

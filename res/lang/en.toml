@@ -505,6 +505,15 @@ confirm_delete = "Delete Save File {} ({})? This cannot be undone."
 err_not_save = "That file is not a Castlevania: Symphony of the Night save from the Xbox 360."
 err_no_save_in_zip = "The archive holds no BASLUS-00067DRAX save."
 
+[releases]
+title = "Release Notes"
+loading = "Loading release notes..."
+failed = "Could not load the release notes. Check your connection and open this page again."
+empty = "No releases found."
+current = "Installed"
+prerelease = "Pre-release"
+scroll = "Scroll"
+
 [mods_page]
 install_file = "Install mod..."
 install_failed = "Could not install that mod: {}"

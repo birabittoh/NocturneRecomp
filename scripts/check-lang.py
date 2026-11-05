@@ -65,6 +65,8 @@ for path in sources:
     for key in pat_native.findall(text) + pat_native_text.findall(text):
         used.add(("native", key))
 
+# releases_screen.cpp's S("key") reads [releases].
+used |= {("releases", key) for key in re.findall(r'S\(\s*"(\w+)"', (root / "src/installer/releases_screen.cpp").read_text(encoding="utf8"))}
 # settings.cpp's RowTip("tip_x") reads [native].
 used |= {("native", key) for key in re.findall(r'RowTip\(\s*"(\w+)"', (root / "src/core/settings.cpp").read_text(encoding="utf8"))}
 # Keys composed at run time.

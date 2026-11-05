@@ -499,6 +499,15 @@ confirm_delete = "Supprimer la sauvegarde {} ({}) ? C'est irréversible."
 err_not_save = "Ce fichier n'est pas une sauvegarde Xbox 360 de Castlevania: Symphony of the Night."
 err_no_save_in_zip = "L'archive ne contient aucune sauvegarde BASLUS-00067DRAX."
 
+[releases]
+title = "Notes de version"
+loading = "Chargement des notes de version..."
+failed = "Impossible de charger les notes de version. Vérifiez la connexion et rouvrez cette page."
+empty = "Aucune version trouvée."
+current = "Installée"
+prerelease = "Préversion"
+scroll = "Défiler"
+
 [mods_page]
 install_file = "Installer un mod..."
 install_failed = "Impossible d'installer ce mod : {}"

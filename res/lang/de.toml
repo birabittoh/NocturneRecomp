@@ -499,6 +499,15 @@ confirm_delete = "Spielstand {} ({}) löschen? Das lässt sich nicht rückgängi
 err_not_save = "Diese Datei ist kein Spielstand von Castlevania: Symphony of the Night für Xbox 360."
 err_no_save_in_zip = "Das Archiv enthält keinen BASLUS-00067DRAX-Spielstand."
 
+[releases]
+title = "Versionshinweise"
+loading = "Versionshinweise werden geladen..."
+failed = "Die Versionshinweise konnten nicht geladen werden. Prüfe die Verbindung und öffne diese Seite erneut."
+empty = "Keine Versionen gefunden."
+current = "Installiert"
+prerelease = "Vorabversion"
+scroll = "Blättern"
+
 [mods_page]
 install_file = "Mod installieren..."
 install_failed = "Mod konnte nicht installiert werden: {}"

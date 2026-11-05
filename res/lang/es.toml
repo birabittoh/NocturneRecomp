@@ -499,6 +499,15 @@ confirm_delete = "¿Borrar la partida {} ({})? No se puede deshacer."
 err_not_save = "Ese archivo no es una partida de Castlevania: Symphony of the Night de Xbox 360."
 err_no_save_in_zip = "El archivo no contiene ninguna partida BASLUS-00067DRAX."
 
+[releases]
+title = "Notas de la versión"
+loading = "Cargando las notas de la versión..."
+failed = "No se pudieron cargar las notas de la versión. Comprueba la conexión y vuelve a abrir esta página."
+empty = "No se encontraron versiones."
+current = "Instalada"
+prerelease = "Preliminar"
+scroll = "Desplazar"
+
 [mods_page]
 install_file = "Instalar mod..."
 install_failed = "No se pudo instalar ese mod: {}"

@@ -499,6 +499,15 @@ confirm_delete = "Eliminare il file {} ({})? L'operazione non si può annullare.
 err_not_save = "Questo file non è un salvataggio Xbox 360 di Castlevania: Symphony of the Night."
 err_no_save_in_zip = "L'archivio non contiene salvataggi BASLUS-00067DRAX."
 
+[releases]
+title = "Note di rilascio"
+loading = "Caricamento delle note di rilascio..."
+failed = "Impossibile caricare le note di rilascio. Controlla la connessione e riapri questa pagina."
+empty = "Nessuna versione trovata."
+current = "Installata"
+prerelease = "Pre-release"
+scroll = "Scorri"
+
 [mods_page]
 install_file = "Installa mod..."
 install_failed = "Impossibile installare la mod: {}"
